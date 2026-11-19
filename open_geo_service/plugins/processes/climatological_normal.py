@@ -17,9 +17,12 @@ import xarray as xr
 from earthkit.transforms import climatology as ek_climatology
 
 from open_geo_service.process import process
+from open_geo_service.shared.time import cadence_of, infer_cadence
 from open_geo_service.transforms.climatology import circular_rolling_mean
 
 _FREQUENCIES = ("dayofyear", "month")
+# The dataset period type each frequency is computed from.
+_REQUIRED_CADENCE = {"dayofyear": "daily", "month": "monthly"}
 
 
 @process(
@@ -60,6 +63,15 @@ def climatological_normal(data: xr.DataArray, frequency: str = "dayofyear", smoo
     if t_dim is None:
         raise ValueError("climatological_normal requires a datetime temporal dimension on the input cube")
     t_dim = str(t_dim)
+    # WMO-No. 1203 computes a normal from values at its own resolution. A monthly normal of daily
+    # precipitation totals would average them into a daily rate, wrong by a factor of about 30.
+    required = _REQUIRED_CADENCE[frequency]
+    cadence = cadence_of(data) or infer_cadence(data[t_dim].values)
+    if cadence != required:
+        raise ValueError(
+            f"a {frequency} normal is computed from {required} data, but this cube is "
+            f"{cadence or 'of unknown cadence'}; load the {required} dataset instead"
+        )
 
     # earthkit reduces the temporal axis to the day-of-year (1..366) or month (1..12) mean,
     # handling the calendar binning and preserving dask laziness; the output ordinal dim is

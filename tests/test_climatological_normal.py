@@ -8,6 +8,7 @@ import pytest
 import xarray as xr
 
 from open_geo_service.plugins.processes.climatological_normal import climatological_normal
+from open_geo_service.shared.time import stamp_cadence
 
 
 def _daily_cube() -> xr.DataArray:
@@ -41,19 +42,38 @@ def test_climatological_normal_requires_temporal_dimension() -> None:
 
 
 def test_climatological_normal_monthly_reduces_time_to_month() -> None:
-    # A cube where each step equals its calendar month → the month-of-year mean is the
-    # month itself (1..12).
-    times = pd.date_range("1991-01-01", "1992-12-31", freq="D")
-    month = times.month.to_numpy().astype("float32")
-    data = np.broadcast_to(month[:, None, None], (len(times), 2, 2)).copy()
-    cube = xr.DataArray(data, dims=("t", "y", "x"), coords={"t": times, "y": [1.0, 2.0], "x": [1.0, 2.0]})
+    # Monthly totals of 1 mm a day: the month-of-year mean is the mean monthly total, and a
+    # February normal averages 28 and 29 days (WMO-No. 1203).
+    times = pd.date_range("1991-01-01", "1992-12-01", freq="MS")
+    days = times.days_in_month.to_numpy().astype("float32")
+    data = np.broadcast_to(days[:, None, None], (len(times), 2, 2)).copy()
+    monthly = xr.DataArray(data, dims=("t", "y", "x"), coords={"t": times, "y": [1.0, 2.0], "x": [1.0, 2.0]})
 
-    out = climatological_normal(cube, frequency="month")
+    out = climatological_normal(monthly, frequency="month")
 
     assert "month" in out.dims and "dayofyear" not in out.dims and "t" not in out.dims
     assert out.sizes["month"] == 12
-    assert float(out.sel(month=1).isel(y=0, x=0)) == pytest.approx(1.0)
-    assert float(out.sel(month=12).isel(y=0, x=0)) == pytest.approx(12.0)
+    assert float(out.sel(month=1).isel(y=0, x=0)) == pytest.approx(31.0)
+    assert float(out.sel(month=2).isel(y=0, x=0)) == pytest.approx(28.5)
+
+
+@pytest.mark.parametrize(
+    ("cube", "frequency", "declared"),
+    [
+        # A monthly normal of daily totals would average them into a daily rate.
+        (_daily_cube(), "month", None),
+        (_daily_cube(), "month", "daily"),
+        (_daily_cube().resample(t="MS").sum(), "dayofyear", None),
+        # The template's declared period type wins over the spacing of the axis.
+        (_daily_cube(), "dayofyear", "monthly"),
+    ],
+)
+def test_climatological_normal_requires_the_frequency_of_the_data(
+    cube: xr.DataArray, frequency: str, declared: str | None
+) -> None:
+    stamp_cadence(cube, declared)
+    with pytest.raises(ValueError, match="normal is computed from"):
+        climatological_normal(cube, frequency=frequency)
 
 
 def test_climatological_normal_rejects_unknown_frequency() -> None:
