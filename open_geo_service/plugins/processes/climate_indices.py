@@ -41,6 +41,10 @@ _spi_ind = xclim_atmos.standardized_precipitation_index
     summary="Standardized Precipitation Index (SPI)",
     parameters={
         **_xclim_params(_spi_ind, "pr", "cal_start", "cal_end", "freq"),
+        "pr": {
+            "description": "Precipitation rate, such as mm/d. Convert stored precipitation totals with amount2rate.",
+            "schema": _VARIABLE_SCHEMA,
+        },
         "window": {"description": "Accumulation window in months (1 = SPI-1, 3 = SPI-3, 6 = SPI-6)."},
     },
 )

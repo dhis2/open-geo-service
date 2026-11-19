@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 
 _cache: list[Any] | None = None
 
-# The xclim realms registered as processes. `convert` (unit and variable conversions) and
-# `generic` are left out.
+# The xclim realms registered as processes. `generic` is left out, and of `convert` only the
+# water-budget chain SPEI needs is registered: its humidity and vapour-pressure converters repeat
+# the earthkit-meteo processes under other names.
 _REALMS = ("atmos", "land", "seaIce")
+_CONVERTERS = frozenset({"potential_evapotranspiration", "water_budget", "water_budget_from_tas"})
 
 
 def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
@@ -26,6 +28,9 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     directly). This renames ``t`` -> ``time`` on every xarray argument on the way
     in, and renames ``time`` -> ``t`` back on the result, so xclim works against our
     cubes without the caller adding ``rename_dimension`` to every process graph.
+
+    It also marks ``y`` as latitude on a cube in a geographic CRS, which is how xclim finds the
+    latitude that indicators such as ``potential_evapotranspiration`` need.
     """
     import xarray as xr
 
@@ -33,7 +38,10 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
 
     def _to_time(value: Any) -> Any:
         nonlocal renamed
-        if isinstance(value, (xr.DataArray, xr.Dataset)) and "t" in value.dims and "time" not in value.dims:
+        if not isinstance(value, (xr.DataArray, xr.Dataset)):
+            return value
+        value = _with_cf_latitude(value)
+        if "t" in value.dims and "time" not in value.dims:
             renamed = True
             return value.rename({"t": "time"})
         return value
@@ -53,6 +61,21 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     if isinstance(result, tuple):
         return tuple(_to_t(item) for item in result)
     return _to_t(result)
+
+
+def _with_cf_latitude(value: Any) -> Any:
+    """Return ``value`` with its ``y`` coordinate labelled CF latitude, if its CRS is geographic.
+
+    A cube without a CRS is left alone: its ``y`` may be a projected coordinate in metres.
+    """
+    import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates the .rio accessor
+
+    if "y" not in value.coords or "standard_name" in value["y"].attrs:
+        return value
+    crs = value.rio.crs
+    if crs is None or not crs.is_geographic:
+        return value
+    return value.assign_coords(y=value["y"].assign_attrs(standard_name="latitude", units="degrees_north"))
 
 
 def scan() -> list[Any]:
@@ -75,8 +98,15 @@ def scan() -> list[Any]:
 
 
 def _collect() -> list[Any]:
+    import xclim
     import xclim.indicators  # noqa: F401  # pyright: ignore[reportUnusedImport]  # fills the registry
     from xclim.core import InputKind
+
+    # Log rather than warn about inputs whose CF metadata differs from what an indicator expects,
+    # such as a precipitation rate from amount2rate (`lwe_precipitation_rate` where xclim names
+    # `precipitation_flux`); the results are unaffected. Set once for the process, since xclim's
+    # options are process-wide and jobs run in threads (see `_single_output`).
+    xclim.set_options(cf_compliance="log")
     from xclim.core.calendar import select_time
     from xclim.core.indicator import registry
 
@@ -104,7 +134,7 @@ def _collect() -> list[Any]:
     # Registry keys are lower-cased identifiers, used as process ids. Dotted keys are the anuclim,
     # cf and icclim collections, which repeat the core indicators under their own names.
     for indicator_id, obj in registry.items():
-        if "." in indicator_id or obj.realm not in _REALMS:
+        if "." in indicator_id or not (obj.realm in _REALMS or indicator_id in _CONVERTERS):
             continue
 
         # Every spec below declares a single datacube return, so an indicator producing
