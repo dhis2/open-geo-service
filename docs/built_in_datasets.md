@@ -41,7 +41,7 @@ CHIRPS (Climate Hazards Group InfraRed Precipitation with Station data) v3 is a 
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_daily_prelim`                                               |
 | **Variable**           | `precip`                                                                           |
-| **Units**              | mm/d                                                                               |
+| **Units**              | mm                                                                                 |
 | **Period**             | Daily                                                                              |
 | **Spatial coverage**   | Global land, 50°S–50°N                                                             |
 | **Spatial resolution** | ~5 km                                                                              |
@@ -69,7 +69,7 @@ DHIS2 then holds the best value available for each day. It does not show which v
 | ---------------------- | -------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_monthly`                    |
 | **Variable**           | `precip`                                           |
-| **Units**              | mm/d                                               |
+| **Units**              | mm                                                 |
 | **Period**             | Monthly                                            |
 | **Spatial coverage**   | Global land, 50°S–50°N                             |
 | **Spatial resolution** | ~5 km                                              |
@@ -80,9 +80,7 @@ The monthly CHIRPS product, published as one global raster per calendar month. P
 
 **Sync behaviour** — as for the daily dataset, the latest published month is discovered by probing the CHIRPS server rather than assuming a fixed lag. The monthly final product typically trails the calendar by a month or two.
 
-**Transforms** — the source raster is a monthly **total** in mm; it is divided by the number of days in the month and stored as a mean daily rate (`mm/d`). Unlike the daily dataset, where mm and mm/day are the same number, this is a real conversion.
-
-That choice keeps every monthly precipitation dataset on the same units, which matters because `chirps3_precipitation_monthly_normal_1991_2020` is also `mm/d` and is the natural partner for a monthly anomaly — storing the raw total under the same label would make that comparison wrong by a factor of about 30. It is also the form xclim's drought indices expect.
+**Transforms** — none applied; the month's total is stored as received in mm. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ---
 
