@@ -67,7 +67,7 @@ from open_geo_service.shared.cancellation import (
 from open_geo_service.shared.cf import is_temperature_like
 from open_geo_service.shared.compute import get_job_slots, max_concurrent_jobs
 from open_geo_service.shared.display import display_midpoint, display_range, range_spec
-from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
+from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.netcdf import write_netcdf
 from open_geo_service.shared.persistence import execution_lease
 from open_geo_service.shared.statistics import measure_statistics, statistics_of
@@ -2564,7 +2564,7 @@ def _write_geodataframe(gdf: Any, results_dir: Any, fmt: str) -> str | None:
 
     if ext == ".parquet":
         path = str(results_dir / "result.parquet")
-        gdf.to_parquet(path)
+        gdf.to_parquet(path, compression=PARQUET_COMPRESSION)
         return path
 
     if ext == ".csv":

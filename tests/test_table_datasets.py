@@ -503,7 +503,7 @@ def test_destination_checks_name_a_held_dataset_id_and_a_missing_collection() ->
     assert [check.status for check in bad] == ["fail"]
 
 
-def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) -> None:
+def test_a_dataset_keeps_one_period_type_and_its_zstd_files_carry_it(stores: Path) -> None:
     import pyarrow.parquet as pq
 
     _write([_row("D1", 1.0)], written_at=FIRST)  # monthly
@@ -523,6 +523,7 @@ def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) ->
 
     files = sorted((stores / "precip_districts").glob("*.parquet"))
     assert {pq.read_schema(path).metadata[store.PERIOD_TYPE_KEY] for path in files} == {b"monthly"}
+    assert {pq.ParquetFile(path).metadata.row_group(0).column(0).compression for path in files} == {"ZSTD"}
     assert ingestion_services.published_table_artifacts_by_dataset()["precip_districts"].period_type == "monthly"
 
 

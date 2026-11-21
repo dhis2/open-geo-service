@@ -341,7 +341,13 @@ def write_feature_collection(
     # interrupted write leaves an unreferenced file, never a truncated collection.
     staging = path.with_name(f"{path.name}.{uuid4().hex}.writing")
     try:
-        frame.to_parquet(staging, write_covering_bbox=True, schema_version="1.1.0", row_group_size=ROW_GROUP_SIZE)
+        frame.to_parquet(
+            staging,
+            write_covering_bbox=True,
+            schema_version="1.1.0",
+            row_group_size=ROW_GROUP_SIZE,
+            compression=geoparquet.PARQUET_COMPRESSION,
+        )
         staging.replace(path)
     finally:
         staging.unlink(missing_ok=True)
