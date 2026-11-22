@@ -43,7 +43,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.types import ASGIApp, Receive, Scope, Send  # noqa: E402
 
 from open_geo_service import config as api_config  # noqa: E402
-from open_geo_service import plugin_discovery  # noqa: E402
+from open_geo_service import plugin_discovery, writer_lease  # noqa: E402
 from open_geo_service.features import tiles  # noqa: E402
 from open_geo_service.ingestions import services as ingestion_services  # noqa: E402
 from open_geo_service.main import app  # noqa: E402
@@ -148,6 +148,9 @@ def _reset_config_cache() -> Generator[None, None, None]:
     ingestion_services._open_repositories.clear()
     ingestion_services._open_sessions.clear()
     yield
+    # A store write takes the instance's writer lease for the rest of the process; each test
+    # starts as a process that has written nothing.
+    writer_lease.release_all()
     api_config._cache = None
     xclim_processes._cache = None
     earthkit_processes._cache = None

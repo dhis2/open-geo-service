@@ -24,6 +24,7 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync as zarr_sync
 
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.data_accessor.services.accessor import get_data_coverage_for_paths
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -113,7 +114,12 @@ class StoreWriteLock:
         self._handle: Any | None = None
 
     def acquire(self, blocking: bool = True) -> bool:
-        """Take the lock; with ``blocking=False`` return False at once when another writer holds it."""
+        """Take the lock; with ``blocking=False`` return False at once when another writer holds it.
+
+        Raises `WriterLeaseHeld` when another process is the instance's writer: one that holds
+        no lease, such as a script, takes it here, so it cannot write beside the server.
+        """
+        writer_lease.ensure_held()
         if not self._thread_lock.acquire(blocking=blocking):
             return False
         try:

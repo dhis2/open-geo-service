@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.features import tiles
 from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.shared import geoparquet
@@ -70,8 +71,10 @@ def collection_lock(dataset_id: str) -> threading.Lock:
 
     In-process, like `ingestions.services._acquire_store_lock` for raster stores. The record
     index itself is guarded across processes by portalocker; a store is guarded within one, which
-    is the deployment this serves — one instance owning its data directory.
+    is the deployment this serves — one instance owning its data directory, which the writer
+    lease enforces: a process that is not the instance's writer is refused here.
     """
+    writer_lease.ensure_held()
     with _collection_locks_mutex:
         return _collection_locks.setdefault(dataset_id, threading.Lock())
 
