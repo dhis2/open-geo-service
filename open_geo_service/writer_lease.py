@@ -4,9 +4,9 @@ The rule and what runs beside the writer are in the instance guide (`docs/instan
 "One writer per instance"). The lease is a file lock, so the operating system releases it
 when its process exits and a crashed writer never blocks the next one.
 
-The writing server takes it at startup (:func:`hold`). Every store write also checks it
-(:func:`ensure_held`), so a script or notebook that writes without taking it first still
-cannot write beside the server.
+The writing server takes it at startup and every store write checks it (:func:`ensure_held`),
+so a script or notebook that writes without taking it first still cannot write beside the
+server. Both keep it until the process exits. A host command takes it for its run (:func:`hold`).
 """
 
 from __future__ import annotations
@@ -59,14 +59,15 @@ def hold(role: str) -> Generator[None]:
             _release(data_root)
 
 
-def ensure_held() -> None:
+def ensure_held(role: str = "a process writing a store") -> None:
     """Take the writer lease for the rest of this process, unless it already holds it.
 
-    Called before every store write. Raises :class:`WriterLeaseHeld` when another process holds it.
+    Called by the writing server at startup and before every store write. *role* is as for
+    :func:`hold`. Raises :class:`WriterLeaseHeld` when another process holds it.
     """
     data_root = api_config.get_data_root()
-    if _acquire(data_root, "a process writing a store"):
-        logger.info("Took the writer lease of %s for this process, at its first store write", data_root)
+    if _acquire(data_root, role):
+        logger.info("Took the writer lease of %s for this process, as %s", data_root, role)
 
 
 def release_all() -> None:
