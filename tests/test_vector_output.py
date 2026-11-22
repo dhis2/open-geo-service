@@ -13,6 +13,7 @@ from typing import Any
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio
 import xarray as xr
@@ -112,6 +113,8 @@ def test_parquet_output_is_geoparquet_with_real_geometry(tmp_path: Path) -> None
     assert sorted(frame.geom_type.unique()) == ["Polygon"]
     assert sorted(set(frame["feature_id"])) == ["MW.N", "MW.S"]
     assert [float(v) for v in frame.total_bounds] == [0.0, 0.0, 4.0, 4.0]
+    metadata = pq.ParquetFile(written).metadata
+    assert {metadata.row_group(0).column(i).compression for i in range(metadata.num_columns)} == {"ZSTD"}
 
 
 def test_geojson_output_carries_the_geometry_too(tmp_path: Path) -> None:

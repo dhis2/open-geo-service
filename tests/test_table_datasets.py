@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
@@ -399,6 +400,8 @@ def test_the_destination_renders_rows_and_delivers_them_through_the_writer() -> 
 
     rendered = plugin.render(_cube([1.5, math.nan]), plugin.validate_mapping(dict(_MAPPING)))
     assert rendered.record_count == 2 and rendered.periods == ("2026-01-01",)
+    metadata = pq.ParquetFile(io.BytesIO(rendered.content)).metadata
+    assert {metadata.row_group(0).column(i).compression for i in range(metadata.num_columns)} == {"ZSTD"}
 
     report = plugin.send(rendered.content, "tables")
     assert report.outcome == "success" and report.imported == 2
@@ -504,7 +507,6 @@ def test_destination_checks_name_a_held_dataset_id_and_a_missing_collection() ->
 
 
 def test_a_dataset_keeps_one_period_type_and_its_zstd_files_carry_it(stores: Path) -> None:
-    import pyarrow.parquet as pq
 
     _write([_row("D1", 1.0)], written_at=FIRST)  # monthly
     # Rows with another cadence are refused, by the writer and by a dry run alike.
