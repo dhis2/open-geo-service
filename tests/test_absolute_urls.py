@@ -170,6 +170,10 @@ def test_the_capabilities_json_still_carries_the_configured_origin(https_client:
 
     assert any(link["href"].startswith(_CONFIGURED) for link in links)
     assert not any("testserver" in link["href"] for link in links)
+    # Version discovery is the backend's own, and titled: the Web Editor lists links by title.
+    history = next(link for link in links if link["rel"] == "version-history")
+    assert history["href"] == f"{_CONFIGURED}/.well-known/openeo"
+    assert history["title"]
 
 
 def test_the_stac_self_link_uses_the_configured_scheme(https_client: TestClient) -> None:

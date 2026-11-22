@@ -53,10 +53,13 @@ from open_geo_service.openeo.schemas import (
     ManagedPublication,
     OpenEOJobCreate,
     OpenEOJobListResponse,
+    OpenEOJobLogs,
     OpenEOJobRecord,
     OpenEOJobResults,
     OpenEOJobStatus,
     OpenEOJobUpdate,
+    OpenEOLogEntry,
+    OpenEOLogLevel,
 )
 from open_geo_service.shared.cancellation import (
     ExecutionCancelled,
@@ -320,6 +323,9 @@ def _with_attempts(message: str, record: OpenEOJobRecord) -> str:
     if record.max_attempts <= 1:
         return message
     return f"{message} (attempt {record.attempt} of {record.max_attempts})"
+
+
+_LOG_SEVERITY: dict[str, int] = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
 
 def _append_log(record: OpenEOJobRecord, line: str) -> str:
@@ -606,6 +612,7 @@ class OpenEOJobService:
             links=[
                 {"rel": "self", "href": f"/jobs/{job_id}", "type": "application/json"},
                 {"rel": "results", "href": f"/jobs/{job_id}/results", "type": "application/json"},
+                {"rel": "logs", "href": f"/jobs/{job_id}/logs", "type": "application/json"},
             ],
         )
         return store_create_job(record)
@@ -647,6 +654,7 @@ class OpenEOJobService:
             links=[
                 {"rel": "self", "href": f"/jobs/{job_id}", "type": "application/json"},
                 {"rel": "results", "href": f"/jobs/{job_id}/results", "type": "application/json"},
+                {"rel": "logs", "href": f"/jobs/{job_id}/logs", "type": "application/json"},
             ],
             trigger_id=trigger_id,
             source_event_id=source_event_id,
@@ -843,6 +851,30 @@ class OpenEOJobService:
             assets=assets,
             links=[{"rel": "self", "href": f"/jobs/{job_id}/results", "type": "application/json"}],
         )
+
+    def get_logs(self, job_id: str, *, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
+        """Return the job's attempt history as openEO log entries, at `level` or more severe.
+
+        Each stored line is one `info` entry, numbered by position so a client can pass the
+        last id it saw as `offset`. A failed job ends with an `error` entry carrying its error,
+        which is what the openEO Web Editor shows for it.
+        """
+        record = self.get_job_or_404(job_id)
+        entries: list[OpenEOLogEntry] = []
+        for index, line in enumerate((record.logs or "").splitlines()):
+            stamp, _, message = line.partition(" ")
+            try:
+                time: datetime | None = datetime.fromisoformat(stamp)
+            except ValueError:
+                time, message = None, line
+            entries.append(OpenEOLogEntry(id=str(index), level="info", message=message, time=time))
+        if record.status == OpenEOJobStatus.ERROR and record.error_message:
+            entries.append(OpenEOLogEntry(id="error", level="error", message=record.error_message, time=record.updated))
+        if offset is not None:
+            ids = [entry.id for entry in entries]
+            entries = entries[ids.index(offset) + 1 :] if offset in ids else entries
+        threshold = _LOG_SEVERITY[level]
+        return OpenEOJobLogs(level=level, logs=[entry for entry in entries if _LOG_SEVERITY[entry.level] >= threshold])
 
     # ------------------------------------------------------------------
     # Internal execution

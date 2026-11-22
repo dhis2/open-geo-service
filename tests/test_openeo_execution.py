@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -561,17 +562,23 @@ def test_create_job_title_is_none_when_no_load_collection(client: TestClient) ->
     assert response.json()["title"] is None
 
 
-def test_create_job_does_not_advertise_missing_logs_endpoint(client: TestClient) -> None:
-    response = client.post(
-        "/jobs",
-        json={
-            "process": {"process_graph": {"result": {"process_id": "constant", "arguments": {"x": 1}, "result": True}}}
-        },
-    )
+def test_a_failed_job_links_to_logs_that_carry_its_error(client: TestClient) -> None:
+    graph = {"load": {"process_id": "load_collection", "arguments": {"id": "no_such_dataset"}, "result": True}}
+    created = client.post("/jobs", json={"process": {"process_graph": graph}})
+    job_id = created.json()["id"]
+    assert client.post(f"/jobs/{job_id}/results").status_code == 202
+    deadline = time.monotonic() + 30
+    while client.get(f"/jobs/{job_id}").json()["status"] != "error":
+        assert time.monotonic() < deadline, "job did not fail within 30 s"
+        time.sleep(0.05)
 
-    assert response.status_code == 201
-    links = response.json()["links"]
-    assert all(link["rel"] != "logs" for link in links)
+    assert "/jobs/{job_id}/logs" in {endpoint["path"] for endpoint in client.get("/").json()["endpoints"]}
+    logs_href = next(link["href"] for link in created.json()["links"] if link["rel"] == "logs")
+    entries = client.get(logs_href, params={"level": "error"}).json()["logs"]
+
+    assert [entry["level"] for entry in entries] == ["error"]
+    assert "no_such_dataset" in entries[0]["message"]
+    assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
 
 
 def test_put_udp_rejects_predefined_process_id(client: TestClient) -> None:

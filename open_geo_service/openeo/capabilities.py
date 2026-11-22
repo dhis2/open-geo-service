@@ -47,6 +47,7 @@ def build_capabilities(base_url: str) -> OpenEOCapabilities:
         OpenEOEndpoint(path="/jobs", methods=["GET", "POST"]),
         OpenEOEndpoint(path="/jobs/{job_id}", methods=["GET", "PATCH", "DELETE"]),
         OpenEOEndpoint(path="/jobs/{job_id}/results", methods=["GET", "POST", "DELETE"]),
+        OpenEOEndpoint(path="/jobs/{job_id}/logs", methods=["GET"]),
         OpenEOEndpoint(path="/result", methods=["POST"]),
         OpenEOEndpoint(path="/health", methods=["GET"]),
     ]
@@ -63,7 +64,12 @@ def build_capabilities(base_url: str) -> OpenEOCapabilities:
 
     links = [
         {"rel": "self", "href": base_url, "type": "application/json"},
-        {"rel": "version-history", "href": "https://openeo.org/documentation/1.0/", "type": "text/html"},
+        {
+            "rel": "version-history",
+            "href": f"{base_url}/.well-known/openeo",
+            "type": "application/json",
+            "title": "Supported openEO API versions",
+        },
         {
             "rel": "data",
             "href": f"{base_url}/collections",
@@ -85,8 +91,8 @@ def build_capabilities(base_url: str) -> OpenEOCapabilities:
         id=api_config.get_id(),
         title=name,
         description=(
-            "openEO-compatible backend for the Open Geo Service. "
-            "Access and process ERA5-Land climate datasets for health and climate analysis."
+            "openEO API of an Open Geo Service instance: process its published climate, "
+            "Earth observation and vector datasets."
         ),
         production=False,
         endpoints=endpoints,

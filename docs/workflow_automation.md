@@ -155,7 +155,8 @@ Such a job runs up to 3 times, the first attempt included, under the same job id
 
 When the attempts run out, the job stays `error`. Its error names the attempt, for example
 `OSError: connection reset (attempt 3 of 3)`, and `GET /jobs/{job_id}/results` answers with it.
-The job's `logs` field lists every attempt with its time and outcome. Re-running a failed job
+The job's `logs` field, and `GET /jobs/{job_id}/logs`, list every attempt with its time and
+outcome. Re-running a failed job
 with `POST /jobs/{job_id}/results` starts a fresh attempt budget.
 
 Jobs submitted directly run once. A job still running in another Open Geo Service process, for example one

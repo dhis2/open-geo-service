@@ -94,6 +94,7 @@ ROUTE_TABLE: dict[Tier, frozenset[str]] = {
             "GET /jobs/{job_id}/results",
             "POST /jobs/{job_id}/results",
             "DELETE /jobs/{job_id}/results",
+            "GET /jobs/{job_id}/logs",
             "GET /jobs/{job_id}/results/{filename}",
             "GET /jobs/{job_id}/results/result.geojson",
             "GET /jobs/{job_id}/results/result.zarr/{zarr_path:path}",
