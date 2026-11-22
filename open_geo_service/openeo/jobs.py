@@ -857,7 +857,8 @@ class OpenEOJobService:
 
         Each stored line is one `info` entry, numbered by position so a client can pass the
         last id it saw as `offset`. A failed job ends with an `error` entry carrying its error,
-        which is what the openEO Web Editor shows for it.
+        which is what the openEO Web Editor shows for it. That entry's id names the failure, so
+        after a re-run fails again the earlier id is unknown and the client gets every entry.
         """
         record = self.get_job_or_404(job_id)
         entries: list[OpenEOLogEntry] = []
@@ -869,7 +870,10 @@ class OpenEOJobService:
                 time, message = None, line
             entries.append(OpenEOLogEntry(id=str(index), level="info", message=message, time=time))
         if record.status == OpenEOJobStatus.ERROR and record.error_message:
-            entries.append(OpenEOLogEntry(id="error", level="error", message=record.error_message, time=record.updated))
+            failure_id = f"error-{record.updated.isoformat()}" if record.updated else "error"
+            entries.append(
+                OpenEOLogEntry(id=failure_id, level="error", message=record.error_message, time=record.updated)
+            )
         if offset is not None:
             ids = [entry.id for entry in entries]
             entries = entries[ids.index(offset) + 1 :] if offset in ids else entries
