@@ -130,9 +130,10 @@ happens; if it exits without finishing, the new process takes the job over withi
 it would have at startup. The operating system releases both locks when their process exits,
 so a crash never leaves a store or job locked.
 
-Job, artifact and scheduler records are still whole-file JSON without transactions.
-Direct store mutation outside the shared services must therefore still require
-a stopped server or otherwise guarantee a single writer.
+Job, artifact and scheduler records are whole-file JSON without transactions. They rely on
+one writer per instance, which the writer lease enforces: the writing server and host commands
+that write take it, and a second one is refused. See
+[One writer per instance](instance_guide.md#one-writer-per-instance).
 
 ---
 
