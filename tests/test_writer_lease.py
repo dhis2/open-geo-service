@@ -15,9 +15,12 @@ from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.features.services import refresh_feature_collection
 from open_geo_service.ingestions.processes import execute_ingestion
+from open_geo_service.jobs import store as job_store
+from open_geo_service.jobs.models import JobRecord, JobStatus
 from open_geo_service.jobs.service import reset_job_service
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import reset_openeo_job_service
+from open_geo_service.shared.time import utc_now
 from open_geo_service.tables.store import write_rows
 from open_geo_service.writer_lease import WriterLeaseHeld
 
@@ -64,13 +67,25 @@ def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subproce
     with TestClient(app) as client:
         assert client.get("/info").status_code == 200
 
+    # Kept after shutdown, while job workers stopped without waiting may still write.
+    takeover = subprocess.run(
+        [sys.executable, "-c", "from open_geo_service import writer_lease; writer_lease.ensure_held()"],
+        capture_output=True,
+        text=True,
+    )
+    assert takeover.returncode != 0 and "server (pid" in takeover.stderr
+
 
 def test_a_read_only_process_runs_beside_the_writer_but_cannot_write(
     other_writer: subprocess.Popen[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(api_config, "is_read_only", lambda: True)
+    interrupted = job_store.create_job_record(
+        JobRecord(job_id="interrupted", process_id="ingestion", status=JobStatus.RUNNING, created_at=utc_now())
+    )
     with TestClient(app) as client:
         assert client.get("/info").json()["read_only"] is True
+    assert job_store.get_job_record("interrupted") == interrupted, "the writer's job is left to the writer"
 
     # A script or notebook on the host, writing each kind of data without taking the lease first.
     refused = rf"server \(pid {other_writer.pid} on .+\) is already writing"

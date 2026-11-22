@@ -362,8 +362,9 @@ reads are constant, and reads scale without more writers.
 
 - **The writer** holds the writer lease: a lock on `writer.lock` in the data folder, with who
   holds it in `writer.json` beside it. The server of an instance without `read_only: true`
-  takes it at startup. Any other process takes it at its first write (a raster store, a
-  feature collection or a table) and keeps it until it exits.
+  takes it at startup, and any other process at its first write (a raster store, a feature
+  collection or a table). Each keeps it until it exits. A read-only server recovers no jobs,
+  leaving them to the writer.
 - **A second writer is refused.** A second server on the same data folder (another replica,
   another uvicorn worker), a host command such as `migrate_layout`, or a script that writes
   stops with an error naming the holder, its process id and host. Nothing waits: stop the

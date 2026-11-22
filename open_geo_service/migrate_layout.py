@@ -21,6 +21,7 @@ import argparse
 import json
 import re
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -212,23 +213,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="report the changes without making them")
     args = parser.parse_args(argv)
     try:
-        plan = build_plan()
-    except MigrationError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if plan.empty:
-        print("Nothing to migrate: this instance already uses rasters/ and vectors/.")
-        return 0
-    if args.dry_run:
-        for line in describe(plan):
-            print("would " + line)
-        return 0
-    try:
-        with writer_lease.hold("migrate_layout"):
+        # The plan is built under the lease, so no writer changes what it read before it is applied.
+        with nullcontext() if args.dry_run else writer_lease.hold("migrate_layout"):
+            plan = build_plan()
+            if plan.empty:
+                print("Nothing to migrate: this instance already uses rasters/ and vectors/.")
+                return 0
             for line in describe(plan):
-                print(line)
+                print(("would " if args.dry_run else "") + line)
+            if args.dry_run:
+                return 0
             apply(plan)
-    except writer_lease.WriterLeaseHeld as exc:
+    except (MigrationError, writer_lease.WriterLeaseHeld) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print("Done. Restart the server.")
