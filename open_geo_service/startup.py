@@ -22,6 +22,25 @@ if not eo_logger.handlers:
 eo_logger.propagate = False
 
 
+def _quiet_icechunk_concurrency_warning() -> None:
+    """Drop Icechunk's warning that local storage is unsafe for concurrent commits.
+
+    It is printed on every store open. The writer lease (`writer_lease.py`) is what keeps a
+    second process from committing, so the warning says nothing an operator can act on.
+    ICECHUNK_LOG, when set, still decides.
+    """
+    if os.environ.get("ICECHUNK_LOG"):
+        return
+    try:
+        import icechunk
+    except ImportError:
+        return  # client-only install without icechunk
+    icechunk.set_logs_filter("warn,icechunk_arrow_object_store=error")
+
+
+_quiet_icechunk_concurrency_warning()
+
+
 def _ensure_proj_database() -> None:
     """Make sure pyproj can resolve CRS codes, healing a polluted host PROJ env.
 

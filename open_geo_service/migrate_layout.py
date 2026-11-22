@@ -1,6 +1,7 @@
 """Move an instance onto the rasters/vectors folder layout (CLIM-1253).
 
-Run once per instance, with its server stopped, from the directory its ``.env`` is in:
+Run once per instance, with its server stopped (it refuses while a writing server runs), from
+the directory its ``.env`` is in:
 
     python -m open_geo_service.migrate_layout [--dry-run]
 
@@ -26,6 +27,7 @@ from typing import Any
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]  # loads .env
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.shared.persistence import atomic_text
 
 DATA_RENAMES = (("downloads", "rasters"), ("features", "vectors"))
@@ -217,11 +219,19 @@ def main(argv: list[str] | None = None) -> int:
     if plan.empty:
         print("Nothing to migrate: this instance already uses rasters/ and vectors/.")
         return 0
-    for line in describe(plan):
-        print(("would " if args.dry_run else "") + line)
-    if not args.dry_run:
-        apply(plan)
-        print("Done. Restart the server.")
+    if args.dry_run:
+        for line in describe(plan):
+            print("would " + line)
+        return 0
+    try:
+        with writer_lease.hold("migrate_layout"):
+            for line in describe(plan):
+                print(line)
+            apply(plan)
+    except writer_lease.WriterLeaseHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print("Done. Restart the server.")
     return 0
 
 

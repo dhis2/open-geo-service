@@ -12,6 +12,8 @@ import pytest
 from open_geo_service import config as api_config
 from open_geo_service import migrate_layout
 
+from .test_writer_lease import start_other_writer
+
 
 @pytest.fixture
 def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -69,7 +71,7 @@ def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> 
     assert migrate_layout.main([]) == 0
 
     data, plugins = instance / "data", instance / "plugins"
-    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "rasters", "vectors"]
+    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "rasters", "vectors", "writer.lock"]
     assert (data / "rasters" / "chirps.icechunk").is_dir()
     assert (data / "rasters" / "chirps.icechunk.lock").exists(), "a store's sibling files move with it"
     assert (data / "vectors" / "districts.abc.parquet").exists()
@@ -135,6 +137,18 @@ def test_refuses_when_an_old_and_a_new_folder_both_exist(instance: Path, capsys:
     assert "move their contents by hand" in capsys.readouterr().err
     assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
     assert "plugin: datasets." in (instance / "plugins" / "datasets" / "chelsa.yaml").read_text()
+
+
+def test_refuses_while_a_writer_runs(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    writer = start_other_writer()
+    try:
+        assert migrate_layout.main([]) == 1
+    finally:
+        writer.kill()
+        writer.wait()
+
+    assert f"server (pid {writer.pid}" in capsys.readouterr().err
+    assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
 def test_the_service_reads_the_migrated_instance(instance: Path) -> None:

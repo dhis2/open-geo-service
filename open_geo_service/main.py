@@ -5,7 +5,7 @@ import logging
 import os
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +13,7 @@ from starlette.responses import Response
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.auth import routes as auth_routes
 from open_geo_service.auth.middleware import AccessMiddleware
 from open_geo_service.auth.tokens import configured_tokens
@@ -162,6 +163,18 @@ async def _measure_missing_statistics(stop: threading.Event) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    """Hold the writer lease, unless read-only, for as long as the services run.
+
+    Taken first, so a refused second writer starts nothing. A read-only process may run beside
+    the writer on the same data folder.
+    """
+    with nullcontext() if api_config.is_read_only() else writer_lease.hold("server"):
+        async with _services():
+            yield
+
+
+@asynccontextmanager
+async def _services() -> AsyncGenerator[None]:
     """Run lightweight startup recovery hooks for the application lifecycle."""
     from open_geo_service.plugins_diagnostics import log_plugin_loading
     from open_geo_service.shared.compute import install_shared_dask_pool
