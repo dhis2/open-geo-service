@@ -1902,7 +1902,7 @@ def test_persist_result_auto_registers_missing_template(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
@@ -1953,7 +1953,7 @@ def test_persist_result_reloads_template_after_concurrent_create(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)

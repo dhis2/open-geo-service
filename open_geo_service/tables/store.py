@@ -37,6 +37,7 @@ import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -130,6 +131,7 @@ def _dataset_lock(dataset_id: str) -> AbstractContextManager[None]:
     from open_geo_service.ingestions import services as ingestion_services
 
     _require_id(dataset_id, "table dataset")
+    writer_lease.ensure_held()
     return index_lock(Path(ingestion_services.ARTIFACTS_DIR) / "locks" / f"table-{dataset_id}")
 
 
