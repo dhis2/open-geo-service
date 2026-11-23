@@ -119,8 +119,6 @@ precip.process("dry_spell_max_length", arguments={"pr": precip, "thresh": "1 mm"
 precip.process("wet_spell_max_length", arguments={"pr": precip, "thresh": "1 mm", "window": 1, "freq": "MS"})
 ```
 
-`cdd` and `cwd` still work but are deprecated since xclim 1.0, as are a few other indicators; `GET /processes` marks them `deprecated` and names the replacement. With `window: 1` and the threshold as a daily amount, the replacements give the same values.
-
 ### Days above temperature threshold
 
 ```python
