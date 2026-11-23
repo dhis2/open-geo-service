@@ -26,7 +26,7 @@ from open_geo_service.exports.base import (
 )
 from open_geo_service.exports.report import ExportOutcome, ExportReport
 from open_geo_service.ingestions.schemas import ArtifactProvenance
-from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
+from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.urls import SEGMENT_SAFE_ID_PATTERN
 from open_geo_service.shared.vectors import GEOMETRY_FIELD, SPATIAL_REDUCER_ATTR
 
@@ -240,7 +240,7 @@ class TableExportPlugin(BaseExportPlugin):
         # The store's metadata carries the period type; the payload adds the dataset name.
         metadata = {**(table.schema.metadata or {}), _NAME_KEY: mapping.get("name", mapping["dataset_id"]).encode()}
         sink = pa.BufferOutputStream()
-        pq.write_table(table.replace_schema_metadata(metadata), sink)
+        pq.write_table(table.replace_schema_metadata(metadata), sink, compression=PARQUET_COMPRESSION)
         # The period type the store settled on, which may be the dataset's own.
         resolved = metadata.get(store.PERIOD_TYPE_KEY)
         period_type = resolved.decode() if resolved else None

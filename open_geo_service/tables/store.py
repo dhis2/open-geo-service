@@ -46,6 +46,7 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
+from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.urls import is_segment_safe_id
 
@@ -450,7 +451,7 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
     # A dot name no listing of `*.parquet` matches, so a half-written file is never taken for the dataset.
     staging = folder / f".{path.name}.writing"
     try:
-        pq.write_table(table, staging)
+        pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
         os.replace(staging, path)
     finally:
         staging.unlink(missing_ok=True)
