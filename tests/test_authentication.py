@@ -178,8 +178,8 @@ def test_an_invalid_credential_is_refused_even_on_a_public_route(auth_on: None, 
 
 
 def test_a_path_no_route_serves_is_not_found(auth_on: None, client: TestClient) -> None:
-    # The openEO client asks for job logs, which Open Geo Service does not serve.
-    assert client.get("/jobs/abc/logs").status_code == 404
+    # The openEO client asks for job cost estimates, which Open Geo Service does not serve.
+    assert client.get("/jobs/abc/estimate").status_code == 404
     assert client.post("/datasets").status_code == 401
 
 

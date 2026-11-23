@@ -582,13 +582,14 @@ def test_a_replaced_timer_that_fires_anyway_does_not_cut_the_new_backoff_short(i
         new.cancel()
 
 
-def test_a_single_attempt_job_keeps_no_attempt_history(
+def test_a_single_attempt_job_logs_its_outcome_without_an_attempt_count(
     instance: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _failing_then(monkeypatch, [])
     job_id = _triggered_job_id(instance, max_attempts=1)
     record = _await_done(job_id)
-    assert (record.status, record.logs) == (OpenEOJobStatus.FINISHED, None)
+    assert record.status == OpenEOJobStatus.FINISHED
+    assert (record.logs or "").endswith(" INFO finished")
 
 
 # --- review follow-ups -----------------------------------------------------------------------

@@ -15,9 +15,11 @@ from open_geo_service.openeo.jobs import get_openeo_job_service
 from open_geo_service.openeo.schemas import (
     OpenEOJobCreate,
     OpenEOJobListResponse,
+    OpenEOJobLogs,
     OpenEOJobRecord,
     OpenEOJobResults,
     OpenEOJobUpdate,
+    OpenEOLogLevel,
     WorkflowListResponse,
     WorkflowRecord,
 )
@@ -325,6 +327,12 @@ def start_job(job_id: OwnedJobId) -> Response:
 def get_results(job_id: OwnedJobId) -> OpenEOJobResults:
     """Return result links for a finished job."""
     return get_openeo_job_service().get_results(job_id)
+
+
+@jobs_router.get("/{job_id}/logs", response_model=OpenEOJobLogs)
+def get_logs(job_id: OwnedJobId, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
+    """Return a job's log entries at `level` or more severe, after the entry `offset`."""
+    return get_openeo_job_service().get_logs(job_id, level=level, offset=offset)
 
 
 @jobs_router.delete("/{job_id}/results", status_code=204)
