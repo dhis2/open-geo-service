@@ -131,8 +131,8 @@ it would have at startup. The operating system releases both locks when their pr
 so a crash never leaves a store or job locked.
 
 Job, artifact and scheduler records are whole-file JSON without transactions. They rely on
-one writer per instance, which the writer lease enforces: the writing server and host commands
-that write take it, and a second one is refused. See
+one writer per instance, which the writer lease enforces: every write to a store or a record
+takes or checks it, so a process that is not the writer is refused. See
 [One writer per instance](instance_guide.md#one-writer-per-instance).
 
 ---

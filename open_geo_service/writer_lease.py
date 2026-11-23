@@ -4,9 +4,10 @@ The rule and what runs beside the writer are in the instance guide (`docs/instan
 "One writer per instance"). The lease is a file lock, so the operating system releases it
 when its process exits and a crashed writer never blocks the next one.
 
-The writing server takes it at startup and every store write checks it (:func:`ensure_held`),
-so a script or notebook that writes without taking it first still cannot write beside the
-server. Both keep it until the process exits. A host command takes it for its run (:func:`hold`).
+The writing server takes it at startup, and every write to a store or a record checks it
+(:func:`ensure_held`), so a script or notebook that writes without taking it first still cannot
+write beside the server. Both keep it until the process exits. A host command takes it for its
+run (:func:`hold`). A read-only server refuses every write (:func:`refuse_writes`).
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from pathlib import Path
 import portalocker
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.persistence import atomic_text
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,12 @@ HOLDER_NAME = "writer.json"
 # The leases this process holds, by data folder. Several only in tests, which switch instances.
 _held: dict[Path, portalocker.Lock] = {}
 _held_mutex = threading.Lock()
+# Set by a read-only server, which must never become the writer, not even when none is running.
+_read_only = False
 
 
 class WriterLeaseHeld(RuntimeError):
-    """Another process holds this instance's writer lease."""
+    """This process may not write: another process holds the writer lease, or it is a read-only server."""
 
 
 @contextmanager
@@ -62,16 +64,30 @@ def hold(role: str) -> Generator[None]:
 def ensure_held(role: str = "a process writing a store") -> None:
     """Take the writer lease for the rest of this process, unless it already holds it.
 
-    Called by the writing server at startup and before every store write. *role* is as for
-    :func:`hold`. Raises :class:`WriterLeaseHeld` when another process holds it.
+    Called by the writing server at startup and before every write to a store or a record.
+    *role* is as for :func:`hold`. Raises :class:`WriterLeaseHeld` when another process holds
+    it, or when this process is a read-only server.
     """
     data_root = api_config.get_data_root()
+    if _read_only:
+        raise WriterLeaseHeld(f"This server is read-only and does not write to {data_root}.")
     if _acquire(data_root, role):
         logger.info("Took the writer lease of %s for this process, as %s", data_root, role)
 
 
+def refuse_writes() -> None:
+    """Make every later write in this process raise :class:`WriterLeaseHeld`; for a read-only server."""
+    global _read_only
+    _read_only = True
+
+
 def release_all() -> None:
-    """Release every lease this process holds; for tests, which run many instances in one process."""
+    """Release every lease this process holds and allow writes again; for tests.
+
+    The tests run many instances in one process.
+    """
+    global _read_only
+    _read_only = False
     for data_root in list(_held):
         _release(data_root)
 
@@ -96,7 +112,8 @@ def _acquire(data_root: Path, role: str) -> bool:
             "since": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         try:
-            atomic_text(data_root / HOLDER_NAME, json.dumps(holder))
+            # Not atomic: a refused process that reads it half-written names "another process".
+            (data_root / HOLDER_NAME).write_text(json.dumps(holder), encoding="utf-8")
         except BaseException:
             lock.release()
             raise

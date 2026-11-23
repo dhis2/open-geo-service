@@ -25,7 +25,7 @@ from open_geo_service.openeo.jobs import (
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
 from open_geo_service.shared.time import utc_now
 
-from .conftest import named_exports
+from .conftest import TEST_DATA_ROOT, named_exports
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def definition(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "period_type": "monthly",
         "series": [{"select": {}, "data_element": "BXgDHhPdFVU"}],
     }
-    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache", {"data_dir": str(TEST_DATA_ROOT)})
     named_exports(monkeypatch, definition)
     return definition
 
