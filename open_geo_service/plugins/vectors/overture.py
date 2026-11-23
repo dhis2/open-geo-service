@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -181,9 +181,12 @@ def overture_features(
 def _releases() -> tuple[list[str], str]:
     """The releases Overture publishes now, and the latest, from its STAC catalogue."""
     catalog = _catalog()
-    # Each release is a child catalogue at `<root>/<release>/catalog.json`.
+    # Each release is a child catalogue at `<root>/<release>/catalog.json`, linked by an absolute
+    # URL or one relative to the root (`./<release>/catalog.json`); Overture has published both.
     available = [
-        urlparse(link["href"]).path.strip("/").split("/")[0] for link in catalog["links"] if link.get("rel") == "child"
+        urlparse(urljoin(_STAC_CATALOG, link["href"])).path.strip("/").split("/")[0]
+        for link in catalog["links"]
+        if link.get("rel") == "child"
     ]
     return available, str(catalog["latest"])
 
