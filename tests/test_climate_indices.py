@@ -136,6 +136,9 @@ def test_cdd_catalog_metadata(client: TestClient) -> None:
     thresh = next(p for p in procs["cdd"]["parameters"] if p["name"] == "thresh")
     assert thresh["default"] == "1 mm/day"
     assert thresh["schema"].get("type") == "string"
+    assert procs["cdd"]["deprecated"] is True
+    assert "use `dry_spell_max_length` instead" in procs["cdd"]["description"]
+    assert "deprecated" not in procs["dry_spell_max_length"]
 
 
 def test_cwd_catalog_metadata(client: TestClient) -> None:

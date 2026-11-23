@@ -146,6 +146,11 @@ def _collect() -> list[Any]:
             "parameters": params,
             "returns": {"schema": {"type": "object", "subtype": "datacube"}},
         }
+        if obj.version_deprecated:
+            since, alternative = obj.version_deprecated
+            meta["deprecated"] = True
+            if alternative:
+                meta["description"] = f"{obj.abstract}\n\nDeprecated since xclim {since}; use `{alternative}` instead."
         extra = {name for name, p in obj.parameters.items() if p.kind is InputKind.KWARGS}
         accepted: set[str] | None = None
         # Other keyword parameters, such as the fire-model options `dc` and `dmc` take as `params`
@@ -173,22 +178,12 @@ def _make_callable(indicator: Any, meta: dict[str, Any], accepted: set[str] | No
         if unknown:
             known = ", ".join(p["name"] for p in meta["parameters"])
             raise TypeError(f"{meta['id']} has no parameter {', '.join(unknown)}; its parameters are {known}")
-        return _single_output(call_with_ogs_time_dim(indicator, **kwargs))
+        from xclim.core.options import set_options
+
+        # xclim 1.0 indicators return a Dataset by default; a process returns the cube itself.
+        # The option is per thread since xclim 1.0.1, so concurrent jobs do not see it (CLIM-1767).
+        with set_options(as_dataset=False):
+            return call_with_ogs_time_dim(indicator, **kwargs)
 
     setattr(_call, _GEOSERVICE_PROCESS_ATTR, meta)
     return _call
-
-
-def _single_output(result: Any) -> Any:
-    """Return the one cube of a single-output indicator.
-
-    xclim 1.0 indicators return a Dataset by default. Its ``as_dataset`` option is a process-wide
-    global with no per-call override, and jobs run in threads, so we unwrap the result here
-    rather than switch the option off around the call (CLIM-1767).
-    """
-    import xarray as xr
-
-    if isinstance(result, xr.Dataset):
-        (name,) = result.data_vars
-        return result[name]
-    return result
