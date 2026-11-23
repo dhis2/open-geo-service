@@ -21,6 +21,7 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,11 +30,13 @@ import xarray as xr
 import zarr
 
 from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
+from open_geo_service.shared.provisional import FETCHED_AT, FETCHED_AT_ENCODING
 from open_geo_service.shared.raster_contract import (
     TIME_ALIASES,
     prepare_for_publication,
     spatial_coords_match,
 )
+from open_geo_service.shared.time import utc_now
 from open_geo_service.streaming.protocol import (
     GridSpec,
     IngestionPlugin,
@@ -42,9 +45,11 @@ from open_geo_service.streaming.protocol import (
 )
 from open_geo_service.streaming.store import (
     committed_data_group,
+    ensure_fetched_at,
     is_store_empty,
     open_or_create_repo,
     read_committed_period_ids,
+    read_committed_period_ids_ordered,
     write_geozarr_attrs,
 )
 
@@ -66,6 +71,24 @@ class StreamingIngestResult:
     # Periods at the end of the run whose values were all missing, and so were not kept. A later
     # sync fetches them again.
     held_back: list[str] = field(default_factory=list)
+    # Positions on the time axis of the committed periods this run replaced, for the
+    # pyramid's coarser levels to follow.
+    refreshed_indices: list[int] = field(default_factory=lambda: list[int]())
+
+
+def _stamp_fetched_at(ds: xr.Dataset, *, time_dim: str) -> xr.Dataset:
+    """Record on ``ds`` the instant it is written, as the ``fetched_at`` coordinate along time.
+
+    An instant in UTC, not the server's timezone or ``utc_offset_hours``, which only define
+    period boundaries. Read back by the sync planner to decide whether a period fetched while
+    preliminary is due again (see ``shared.provisional``).
+    """
+    if time_dim not in ds.dims:
+        return ds
+    now = np.datetime64(utc_now().astimezone(UTC).replace(tzinfo=None), "ns")
+    ds = ds.assign_coords({FETCHED_AT: (time_dim, np.full(ds.sizes[time_dim], now))})
+    ds[FETCHED_AT].encoding.update(FETCHED_AT_ENCODING)
+    return ds
 
 
 def _strip_cf_encoding(ds: xr.Dataset, period_type: str, *, time_dim: str) -> None:
@@ -182,6 +205,7 @@ async def run_streaming_ingest(
     committed_periods: list[str] | None = None,
     branch: str = "main",
     replace: bool = False,
+    refresh_periods: list[str] | None = None,
 ) -> StreamingIngestResult:
     """Stream one dataset into a flat Zarr v3 store one period at a time, committing each to *branch*.
 
@@ -198,6 +222,13 @@ async def run_streaming_ingest(
 
     ``periods`` may be supplied by the sync planner to avoid a second
     ``plugin.periods()`` call when the list was already fetched during planning.
+
+    ``refresh_periods`` are committed periods to fetch again and write in place, before any
+    new period is appended: those fetched while preliminary whose final version is now
+    expected. Each is durable once written, with a new ``fetched_at``, so an interrupted
+    refresh resumes at the periods it did not reach. One that comes back with every value
+    missing is not written: it keeps its preliminary values and ``fetched_at``, so a later
+    sync fetches it again. A *replace* run refreshes nothing; it rewrites every period.
     """
     from open_geo_service.jobs.models import JobCancelledError
 
@@ -209,8 +240,15 @@ async def run_streaming_ingest(
     fallback_crs: int | str = getattr(plugin, "crs", 4326)
     spec: GridSpec | None = None
 
+    # Where each committed period sits on the stored time axis, for writing it in place.
+    refresh_index: dict[str, int] = {}
+    if refresh_periods and not replace:
+        stored = read_committed_period_ids_ordered(store_path, period_type, time_dim=time_dim, branch=branch)
+        positions = {period: index for index, period in enumerate(stored)}
+        refresh_index = {period: positions[period] for period in refresh_periods if period in positions}
+
     all_periods = periods if periods is not None else await plugin.periods(start, end)
-    if not all_periods:
+    if not all_periods and not refresh_index:
         close_ingestion_plugin(plugin)
         return StreamingIngestResult(store_path=store_path, period_type=period_type, periods_written=0)
 
@@ -219,17 +257,18 @@ async def run_streaming_ingest(
         if committed_periods is not None
         else read_committed_period_ids(store_path, period_type, time_dim=time_dim, branch=branch)
     )
-    pending = [period for period in all_periods if period not in committed]
+    pending = [*refresh_index, *(period for period in all_periods if period not in committed)]
     if not pending:
         close_ingestion_plugin(plugin)
         return StreamingIngestResult(store_path=store_path, period_type=period_type, periods_written=0)
+    total = len(all_periods) + len(refresh_index)
 
     if on_progress:
-        on_progress(len(all_periods) - len(pending), len(all_periods), f"{len(pending)} periods pending")
+        on_progress(total - len(pending), total, f"{len(pending)} periods pending")
 
     if replace:
         is_first_write = True
-    elif committed:
+    elif committed or refresh_index:
         is_first_write = False
     elif is_store_empty(store_path, branch=branch):
         is_first_write = True
@@ -284,17 +323,22 @@ async def run_streaming_ingest(
             break
         in_flight.append((period_id, asyncio.create_task(_fetch(period_id))))
     written = 0
+    # Periods processed, written or not, for progress.
+    done = 0
     # The periods at the end of the run whose values are all missing, and the snapshot before
     # the first of them, to reset to. See "Empty periods at the end of a run are not stored" in
     # docs/architecture.md.
     empty_tail: list[str] = []
     before_empty_tail: str | None = None
+    refreshed_indices: list[int] = []
     try:
         while in_flight:
             if is_cancel_requested and is_cancel_requested():
                 raise JobCancelledError("Streaming ingest cancelled")
 
             period_id, task = in_flight.popleft()
+            refresh_at = refresh_index.get(period_id)
+            kept_preliminary = False
             ds = await task
             # Always release the fetched dataset's backing handles (open_rasterio /
             # open_dataset / remote HTTP) once it is written, so long backfills don't
@@ -320,7 +364,11 @@ async def run_streaming_ingest(
                 if all(var.chunks is None for var in ds.data_vars.values()):
                     ds.load()
                 checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
-                if _all_values_missing(ds[checked]):
+                if refresh_at is not None:
+                    # Writing it would replace the preliminary values with nothing and stamp it
+                    # final, so it is not written, and stays due.
+                    kept_preliminary = _all_values_missing(ds[checked])
+                elif _all_values_missing(ds[checked]):
                     if not empty_tail:
                         before_empty_tail = repo.lookup_branch(branch)
                     empty_tail.append(period_id)
@@ -344,56 +392,78 @@ async def run_streaming_ingest(
                         f"expected {expected_spatial_shape}"
                     )
 
-                session = repo.writable_session(branch)
-                if is_first_write:
-                    ds.to_zarr(session.store, mode="w", zarr_format=3)
-                    is_first_write = False
-                else:
-                    if not axes_checked:
-                        _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim, branch=branch)
-                        # Where the data actually lives. A store promoted to a pyramid by an
-                        # earlier sync keeps its variables in level groups, and appending at the
-                        # root would create a second one-timestep array beside the pyramid,
-                        # leaving the store unopenable. Resolved once per sync, since promotion
-                        # only happens between syncs.
-                        append_group = committed_data_group(store_path, branch=branch)
-                        axes_checked = True
-                    # xarray replaces the group's attrs with the period's on append. At the root
-                    # write_geozarr_attrs restores them below; a pyramid level's are its own.
-                    level_attrs = (
-                        dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
-                        if append_group is not None
-                        else None
+                if kept_preliminary:
+                    logger.warning(
+                        "Every value is missing for %s, fetched again to replace its preliminary values, in %s. "
+                        "Its preliminary values were kept; a later sync fetches it again.",
+                        period_id,
+                        store_path,
                     )
-                    ds.to_zarr(
-                        session.store,
-                        group=append_group,
-                        append_dim=spec.time_dim,
-                        zarr_format=3,
-                    )
-                    if level_attrs is not None:
-                        zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
-                # Root attrs are rewritten on every commit so later append sessions
-                # preserve GeoZarr metadata even if the underlying store layer only
-                # touches array content for the new period.
-                write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
-                if run_start is None:
-                    session.commit(f"ingest: {period_id}")
-                    run_start = period_id
                 else:
-                    session.amend(f"ingest: {run_start} to {period_id}")
+                    # Every path below writes it: first write, append and refresh alike.
+                    ds = _stamp_fetched_at(ds, time_dim=spec.time_dim)
+                    session = repo.writable_session(branch)
+                    if is_first_write:
+                        ds.to_zarr(session.store, mode="w", zarr_format=3)
+                        is_first_write = False
+                    else:
+                        if not axes_checked:
+                            _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim, branch=branch)
+                            # Where the data actually lives. A store promoted to a pyramid by an
+                            # earlier sync keeps its variables in level groups, and appending at the
+                            # root would create a second one-timestep array beside the pyramid,
+                            # leaving the store unopenable. Resolved once per sync, since promotion
+                            # only happens between syncs.
+                            append_group = committed_data_group(store_path, branch=branch)
+                            axes_checked = True
+                            ensure_fetched_at(session.store, group=append_group, time_dim=spec.time_dim)
+                        # xarray replaces the group's attrs with the period's on append. At the root
+                        # write_geozarr_attrs restores them below; a pyramid level's are its own.
+                        level_attrs = (
+                            dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
+                            if append_group is not None
+                            else None
+                        )
+                        if refresh_at is not None:
+                            # A region write takes only the variables along time; the spatial
+                            # coordinates and `spatial_ref` stay as committed.
+                            along_time = [name for name in ds.variables if spec.time_dim not in ds[name].dims]
+                            ds.drop_vars(along_time).to_zarr(
+                                session.store,
+                                group=append_group,
+                                region={spec.time_dim: slice(refresh_at, refresh_at + 1)},
+                                zarr_format=3,
+                            )
+                        else:
+                            ds.to_zarr(
+                                session.store,
+                                group=append_group,
+                                append_dim=spec.time_dim,
+                                zarr_format=3,
+                            )
+                        if level_attrs is not None:
+                            zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
+                    # Root attrs are rewritten on every commit so later append sessions
+                    # preserve GeoZarr metadata even if the underlying store layer only
+                    # touches array content for the new period.
+                    write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
+                    kind = "refresh" if refresh_at is not None else "ingest"
+                    if run_start is None:
+                        session.commit(f"{kind}: {period_id}")
+                        run_start = period_id
+                    else:
+                        session.amend(f"{kind}: {run_start} to {period_id}")
+                    written += 1
+                    if refresh_at is not None:
+                        refreshed_indices.append(refresh_at)
             finally:
                 ds.close()
 
-            written += 1
-            if save_cursor and (written % commit_batch_size == 0 or written == len(pending)):
+            done += 1
+            if save_cursor and refresh_at is None and (done % commit_batch_size == 0 or done == len(pending)):
                 save_cursor({"last_committed": period_id})
             if on_progress:
-                on_progress(
-                    len(all_periods) - len(pending) + written,
-                    len(all_periods),
-                    f"Wrote {period_id}",
-                )
+                on_progress(total - len(pending) + done, total, f"Wrote {period_id}")
 
             next_period = next(period_queue, None)
             if next_period is not None:
@@ -425,6 +495,7 @@ async def run_streaming_ingest(
         period_type=period_type,
         periods_written=written - len(empty_tail),
         held_back=list(empty_tail),
+        refreshed_indices=refreshed_indices,
     )
 
 
@@ -445,6 +516,7 @@ def run_streaming_ingest_sync(
     committed_periods: list[str] | None = None,
     branch: str = "main",
     replace: bool = False,
+    refresh_periods: list[str] | None = None,
 ) -> StreamingIngestResult:
     """Synchronous wrapper for threaded job execution.
 
@@ -476,6 +548,7 @@ def run_streaming_ingest_sync(
             committed_periods=committed_periods,
             branch=branch,
             replace=replace,
+            refresh_periods=refresh_periods,
         )
     )
 
