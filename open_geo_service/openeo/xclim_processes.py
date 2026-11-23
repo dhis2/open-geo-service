@@ -104,7 +104,8 @@ def _collect() -> list[Any]:
     # Registry keys are lower-cased identifiers, used as process ids. Dotted keys are the anuclim,
     # cf and icclim collections, which repeat the core indicators under their own names.
     for indicator_id, obj in registry.items():
-        if "." in indicator_id or obj.realm not in _REALMS:
+        # A deprecated indicator has a named replacement, which is registered instead.
+        if "." in indicator_id or obj.realm not in _REALMS or obj.version_deprecated:
             continue
 
         # Every spec below declares a single datacube return, so an indicator producing
@@ -146,11 +147,6 @@ def _collect() -> list[Any]:
             "parameters": params,
             "returns": {"schema": {"type": "object", "subtype": "datacube"}},
         }
-        if obj.version_deprecated:
-            since, alternative = obj.version_deprecated
-            meta["deprecated"] = True
-            if alternative:
-                meta["description"] = f"{obj.abstract}\n\nDeprecated since xclim {since}; use `{alternative}` instead."
         extra = {name for name, p in obj.parameters.items() if p.kind is InputKind.KWARGS}
         accepted: set[str] | None = None
         # Other keyword parameters, such as the fire-model options `dc` and `dmc` take as `params`

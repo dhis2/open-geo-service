@@ -200,10 +200,10 @@ from open_geo_service.openeo.xclim_processes import call_with_ogs_time_dim
 from open_geo_service.process import process
 
 
-@process(summary="Consecutive dry days (Rwanda threshold)")
-def cdd(pr: xr.DataArray, thresh: str = "0.5 mm/day", freq: str = "MS") -> xr.DataArray:
-    """CDD with a lower threshold suited to Rwanda's dry season definition."""
-    return call_with_ogs_time_dim(xclim.compute.maximum_consecutive_dry_days, pr, thresh=thresh, freq=freq)
+@process(summary="Dry spell maximum length (Rwanda threshold)")
+def dry_spell_max_length(pr: xr.DataArray, thresh: str = "0.5 mm", freq: str = "MS") -> xr.DataArray:
+    """Longest run of dry days, with a lower threshold suited to Rwanda's dry season definition."""
+    return call_with_ogs_time_dim(xclim.compute.dry_spell_max_length, pr, thresh=thresh, window=1, freq=freq)
 ```
 
 Datacubes in Open Geo Service name their time dimension `t`, while xclim requires `time`. `call_with_ogs_time_dim` renames it on the way in and back on the result; calling xclim directly on a cube fails with `KeyError: 'time'`.
