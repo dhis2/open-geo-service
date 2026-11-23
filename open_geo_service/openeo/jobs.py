@@ -11,7 +11,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import portalocker
@@ -223,7 +223,6 @@ def _serialize(record: OpenEOJobRecord) -> dict[str, object]:
     data["attempt"] = record.attempt
     data["max_attempts"] = record.max_attempts
     data["retry_at"] = record.retry_at.isoformat() if record.retry_at is not None else None
-    data["failed_at"] = record.failed_at.isoformat() if record.failed_at is not None else None
     data["publishing"] = record.publishing
     data["publication"] = record.publication.model_dump(mode="json") if record.publication is not None else None
     data["events"] = [event.model_dump(mode="json", by_alias=True) for event in record.events]
@@ -329,10 +328,15 @@ def _with_attempts(message: str, record: OpenEOJobRecord) -> str:
 _LOG_SEVERITY: dict[str, int] = {"debug": 0, "info": 1, "warning": 2, "error": 3}
 
 
-def _append_log(record: OpenEOJobRecord, line: str) -> str:
-    """Add one timestamped line to the job's visible attempt history."""
-    entry = f"{utc_now().isoformat()} {line}"
+def _append_log(record: OpenEOJobRecord, line: str, level: OpenEOLogLevel = "info") -> str:
+    """Add one timestamped line, with its level, to the job's visible attempt history."""
+    entry = f"{utc_now().isoformat()} {level.upper()} {line}"
     return f"{record.logs}\n{entry}" if record.logs else entry
+
+
+def _attempt(record: OpenEOJobRecord) -> str:
+    """Name the attempt in a history line, when the job may have more than one."""
+    return f"attempt {record.attempt} of {record.max_attempts} " if record.max_attempts > 1 else ""
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -469,11 +473,8 @@ class OpenEOJobService:
                     "status": OpenEOJobStatus.ERROR,
                     "error_message": _with_attempts("Interrupted by server restart", r),
                     "updated": utc_now(),
-                    "failed_at": utc_now(),
                     "publishing": False,
-                    "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} interrupted by a server restart")
-                    if r.max_attempts > 1
-                    else r.logs,
+                    "logs": _append_log(r, f"{_attempt(r)}interrupted by a server restart", "error"),
                 }
             ),
         )
@@ -857,24 +858,17 @@ class OpenEOJobService:
     def get_logs(self, job_id: str, *, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
         """Return the job's attempt history as openEO log entries, at `level` or more severe.
 
-        Each stored line is one `info` entry, numbered by position so a client can pass the
-        last id it saw as `offset`. A failed job ends with an `error` entry carrying its error,
-        which is what the openEO Web Editor shows for it. That entry's id names the failure, so
-        after a re-run fails again the earlier id is unknown and the client gets every entry.
+        Each stored line is one entry at its stored level, numbered by position so a client can
+        pass the last id it saw as `offset`. A failed attempt is an `error` entry carrying its
+        error, which is what the openEO Web Editor shows for a failed job.
         """
         record = self.get_job_or_404(job_id)
         entries: list[OpenEOLogEntry] = []
         for index, line in enumerate((record.logs or "").splitlines()):
-            stamp, _, message = line.partition(" ")
-            try:
-                time: datetime | None = datetime.fromisoformat(stamp)
-            except ValueError:
-                time, message = None, line
-            entries.append(OpenEOLogEntry(id=str(index), level="info", message=message, time=time))
-        if record.status == OpenEOJobStatus.ERROR and record.error_message:
-            failure_id = f"error-{record.failed_at.isoformat()}" if record.failed_at else "error"
+            stamp, level_name, message = line.split(" ", 2)
+            entry_level = cast(OpenEOLogLevel, level_name.lower())
             entries.append(
-                OpenEOLogEntry(id=failure_id, level="error", message=record.error_message, time=record.failed_at)
+                OpenEOLogEntry(id=str(index), level=entry_level, message=message, time=datetime.fromisoformat(stamp))
             )
         if offset is not None:
             ids = [entry.id for entry in entries]
@@ -1236,7 +1230,7 @@ class OpenEOJobService:
                             "status": OpenEOJobStatus.CANCELED,
                             "updated": utc_now(),
                             "logs": _append_log(
-                                r, f"attempt {r.attempt} of {r.max_attempts} failed: {error}; cancelled"
+                                r, f"attempt {r.attempt} of {r.max_attempts} failed: {error}; cancelled", "error"
                             ),
                         }
                     )
@@ -1252,6 +1246,7 @@ class OpenEOJobService:
                             r,
                             f"attempt {r.attempt} of {r.max_attempts} failed: {error}; "
                             f"retrying at {retry_at.isoformat()}",
+                            "error",
                         ),
                     }
                 )
@@ -1266,11 +1261,8 @@ class OpenEOJobService:
                     "status": OpenEOJobStatus.ERROR,
                     "error_message": _with_attempts(error, r),
                     "updated": utc_now(),
-                    "failed_at": utc_now(),
                     "publishing": _commit_pending(r),
-                    "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} {outcome}: {error}")
-                    if r.max_attempts > 1
-                    else r.logs,
+                    "logs": _append_log(r, f"{_attempt(r)}{outcome}: {error}", "error"),
                 }
             )
 
@@ -1298,9 +1290,7 @@ class OpenEOJobService:
                 "usage": usage,
                 "publishing": False,
                 # The attempt history ends with the outcome that counts, in the same write.
-                "logs": _append_log(record, f"attempt {record.attempt} of {record.max_attempts} finished")
-                if record.max_attempts > 1
-                else record.logs,
+                "logs": _append_log(record, f"{_attempt(record)}finished"),
             }
         )
 

@@ -173,9 +173,10 @@ curl -s http://127.0.0.1:9000/jobs/{job_id}/results
 curl -s "http://127.0.0.1:9000/jobs/{job_id}/logs?level=error"
 ```
 
-`GET /jobs/{job_id}/logs` returns the job's attempt history as openEO log entries, and a
-failed job's error as a last entry at level `error`. `level` keeps entries at that level or
-more severe; `offset` returns only the entries after the given entry id.
+`GET /jobs/{job_id}/logs` returns the job's history as openEO log entries: one per attempt
+outcome, a failed attempt at level `error` with its error, everything else at `info`. A re-run
+adds to the same history. `level` keeps entries at that level or more severe; `offset` returns
+only the entries after the given entry id.
 
 Completed batch jobs write their output to disk and expose it as an asset link at `GET /jobs/{id}/results/{filename}`. The output format is controlled by the `format` argument of `save_result` — see [Export formats](#export-formats) below.
 
