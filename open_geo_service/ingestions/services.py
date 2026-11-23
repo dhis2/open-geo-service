@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 from uuid import uuid4
 
-import portalocker
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.responses import Response
@@ -96,56 +95,28 @@ MutationResult = TypeVar("MutationResult")
 StoreResult = TypeVar("StoreResult")
 
 
-# Per-store threading locks prevent two concurrent ingest/sync runs from writing
-# to the same Icechunk store simultaneously (which causes MVCC commit conflicts).
 class StoreWriteLock:
-    """Exclusive writer lock for one Icechunk store, across threads and across processes.
+    """Exclusive writer lock for one Icechunk store.
 
-    The writer lease keeps every process but the instance's writer from getting this far, so
-    across processes the file lock beside the store is a second guard, not how writers
-    coordinate. Within the writer, the thread lock keeps two ingests of one store apart.
+    Two writes to one store would make Icechunk reject one commit as a conflict. The writer
+    lease keeps every process but the instance's writer out (`writer_lease.py`), so two writes
+    can only meet inside the writer, as two threads, and a thread lock is all this needs.
     """
 
-    def __init__(self, store_path: Path) -> None:
+    def __init__(self) -> None:
         self._thread_lock = threading.Lock()
-        self._lock_path = store_path.with_name(f"{store_path.name}.lock")
-        self._handle: Any | None = None
 
     def acquire(self, blocking: bool = True) -> bool:
-        """Take the lock; with ``blocking=False`` return False at once when another writer holds it.
+        """Take the lock; with ``blocking=False`` return False at once when another write holds it.
 
         Raises `WriterLeaseHeld` when another process is the instance's writer: one that holds
         no lease, such as a script, takes it here, so it cannot write beside the server.
         """
         writer_lease.ensure_held()
-        if not self._thread_lock.acquire(blocking=blocking):
-            return False
-        try:
-            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(self._lock_path, "a+", encoding="utf-8")  # noqa: SIM115 -- held until release()
-            try:
-                flags = portalocker.LOCK_EX if blocking else portalocker.LOCK_EX | portalocker.LOCK_NB
-                portalocker.lock(handle, flags)
-            except portalocker.exceptions.LockException:
-                handle.close()
-                self._thread_lock.release()
-                return False
-        except BaseException:
-            self._thread_lock.release()
-            raise
-        self._handle = handle
-        return True
+        return self._thread_lock.acquire(blocking=blocking)
 
     def release(self) -> None:
-        handle, self._handle = self._handle, None
-        try:
-            if handle is not None:
-                try:
-                    portalocker.unlock(handle)
-                finally:
-                    handle.close()
-        finally:
-            self._thread_lock.release()
+        self._thread_lock.release()
 
 
 _store_locks: dict[str, StoreWriteLock] = {}
@@ -203,7 +174,7 @@ def _acquire_store_lock(store_path: Path) -> StoreWriteLock:
     key = str(store_path.resolve())
     with _store_locks_mutex:
         if key not in _store_locks:
-            _store_locks[key] = StoreWriteLock(Path(key))
+            _store_locks[key] = StoreWriteLock()
         return _store_locks[key]
 
 
