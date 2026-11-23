@@ -101,7 +101,7 @@ def test_commit_conflict_stops_the_loop_and_releases_the_lock(
     assert (artifact.coverage.temporal.start, artifact.coverage.temporal.end) == ("2026-01-01", "2026-01-06")
 
 
-# --- a second writer, as another process would be ---------------------------------------
+# --- a second write of the same store, or a second process ------------------------------
 
 
 class _OtherProcessLock:
@@ -121,15 +121,17 @@ class _OtherProcessLock:
         self._handle.close()
 
 
-def test_store_held_by_another_process_is_refused_before_any_work(ingestion: dict[str, Any]) -> None:
+def test_store_held_by_another_write_is_refused_before_any_work(ingestion: dict[str, Any]) -> None:
     store_path: Path = ingestion["store_path"]
-    other = _OtherProcessLock(store_path.with_name(f"{store_path.name}.lock"))
+    other = services._acquire_store_lock(store_path)  # another ingest of this store, in the writer
+    assert other.acquire(blocking=False)
     try:
         with pytest.raises(HTTPException) as error:
             _create(ingestion)
         assert error.value.status_code == 409
         assert ingestion["plugin"].fetched == []
         assert not store_path.exists()
+        assert not store_path.with_name(f"{store_path.name}.lock").exists(), "no lock file beside the store"
     finally:
         other.release()
 
@@ -140,8 +142,8 @@ def test_store_held_by_another_process_is_refused_before_any_work(ingestion: dic
 def test_store_contention_is_refused_before_plugin_is_created(
     ingestion: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store_path: Path = ingestion["store_path"]
-    other = _OtherProcessLock(store_path.with_name(f"{store_path.name}.lock"))
+    other = services._acquire_store_lock(ingestion["store_path"])
+    assert other.acquire(blocking=False)
     created: list[bool] = []
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: created.append(True))
     try:
