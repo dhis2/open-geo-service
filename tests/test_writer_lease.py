@@ -7,7 +7,6 @@ import sys
 from collections.abc import Generator
 from pathlib import Path
 
-import icechunk
 import pytest
 from fastapi.testclient import TestClient
 
@@ -76,18 +75,18 @@ def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subproce
     assert takeover.returncode != 0 and "server (pid" in takeover.stderr
 
 
-def test_a_read_only_process_runs_beside_the_writer_but_cannot_write(
-    other_writer: subprocess.Popen[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(api_config, "is_read_only", lambda: True)
-    interrupted = job_store.create_job_record(
+@pytest.fixture
+def interrupted_job() -> JobRecord:
+    """A job the writer was running, recorded before it starts."""
+    return job_store.create_job_record(
         JobRecord(job_id="interrupted", process_id="ingestion", status=JobStatus.RUNNING, created_at=utc_now())
     )
-    with TestClient(app) as client:
-        assert client.get("/info").json()["read_only"] is True
-    assert job_store.get_job_record("interrupted") == interrupted, "the writer's job is left to the writer"
 
-    # A script or notebook on the host, writing each kind of data without taking the lease first.
+
+def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
+    interrupted_job: JobRecord, other_writer: subprocess.Popen[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A script or notebook on the host, writing each kind of data and a record without taking the lease first.
     refused = rf"server \(pid {other_writer.pid} on .+\) is already writing"
     with pytest.raises(WriterLeaseHeld, match=refused):
         execute_ingestion(dataset_id="chirps3_precipitation_daily", start="2026-01-01", end="2026-01-02")
@@ -97,12 +96,25 @@ def test_a_read_only_process_runs_beside_the_writer_but_cannot_write(
         )
     with pytest.raises(WriterLeaseHeld, match=refused):
         write_rows(dataset_id="precip_districts", collection_id="districts", rows=[], period_type="monthly")
+    with pytest.raises(WriterLeaseHeld, match=refused):
+        job_store.upsert_job_record(interrupted_job.model_copy(update={"status": JobStatus.FAILED}))
+
+    monkeypatch.setattr(api_config, "is_read_only", lambda: True)
+    with TestClient(app) as client:
+        assert client.get("/info").json()["read_only"] is True
+        assert job_store.get_job_record("interrupted") == interrupted_job, "the writer's job is left to the writer"
+        with pytest.raises(WriterLeaseHeld, match="This server is read-only"):
+            job_store.upsert_job_record(interrupted_job.model_copy(update={"status": JobStatus.FAILED}))
 
 
-def test_opening_a_store_does_not_warn_about_concurrent_commits(
-    tmp_path: Path, capfd: pytest.CaptureFixture[str]
-) -> None:
-    icechunk.Repository.create(icechunk.local_filesystem_storage(str(tmp_path)))
-    icechunk.Repository.open(icechunk.local_filesystem_storage(str(tmp_path)))
+def test_opening_a_store_drops_only_the_concurrent_commits_warning(tmp_path: Path) -> None:
+    # A fresh process: Icechunk emits each of these warnings once per process.
+    script = (
+        "import open_geo_service.startup, icechunk, sys\n"
+        "icechunk.Repository.create(icechunk.local_filesystem_storage(sys.argv[1]))\n"
+        "icechunk.Repository.open(icechunk.local_filesystem_storage(sys.argv[1]))\n"
+    )
+    opened = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, check=True)
 
-    assert "not safe for concurrent commits" not in capfd.readouterr().err
+    assert "WARNING icechunk_storage.readback" in opened.stderr, "Icechunk's other warnings still show, formatted"
+    assert "concurrent commits" not in opened.stderr

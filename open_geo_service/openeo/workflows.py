@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 import portalocker
 
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.auth.tokens import Principal, Tier
 from open_geo_service.openeo.schemas import WorkflowListResponse, WorkflowRecord
 
@@ -230,6 +231,7 @@ def _load_entry_point_workflows() -> list[dict[str, object]]:
 
 
 def _mutate_records(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
+    writer_lease.ensure_held()
     _ensure_store()
     with open(WORKFLOW_INDEX_PATH, "r+", encoding="utf-8") as handle:
         portalocker.lock(handle, portalocker.LOCK_EX)

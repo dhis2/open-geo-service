@@ -17,7 +17,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import portalocker
 from fastapi import HTTPException
 
-from open_geo_service import __version__
+from open_geo_service import __version__, writer_lease
 from open_geo_service import config as api_config
 from open_geo_service.auth.tokens import Principal, Tier, owner_principal
 from open_geo_service.exports.retention import result_lease
@@ -131,6 +131,7 @@ def _load_raw_records() -> list[dict[str, object]]:
 
 
 def _mutate_store(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
+    writer_lease.ensure_held()
     _ensure_store()
     with open(_jobs_index(), "r+", encoding="utf-8") as fh:
         portalocker.lock(fh, portalocker.LOCK_EX)

@@ -162,13 +162,15 @@ async def _measure_missing_statistics(stop: threading.Event) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
-    """Take the writer lease, unless read-only, then run the services.
+    """Take the writer lease, or refuse every write if read-only, then run the services.
 
     Taken first, so a refused second writer starts nothing, and kept until the process exits:
     job workers are stopped without waiting and may still be writing after shutdown. A read-only
-    process may run beside the writer on the same data folder.
+    process may run beside the writer on the same data folder, and never becomes the writer.
     """
-    if not api_config.is_read_only():
+    if api_config.is_read_only():
+        writer_lease.refuse_writes()
+    else:
         writer_lease.ensure_held("server")
     async with _services():
         yield

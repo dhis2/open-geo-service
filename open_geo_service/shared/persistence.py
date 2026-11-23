@@ -12,6 +12,8 @@ from typing import Any
 
 import portalocker
 
+from open_geo_service import writer_lease
+
 # Read once at import: os.umask can only be read by setting it, which is not thread-safe later.
 _UMASK = os.umask(0)
 os.umask(_UMASK)
@@ -80,8 +82,10 @@ def atomic_json(path: Path, value: Any) -> None:
 def atomic_text(path: Path, text: str) -> None:
     """Replace *path* with *text* whole, so a reader sees the old file or the new one, never part of one.
 
-    Flushes contents and directory entries before returning to the caller.
+    Flushes contents and directory entries before returning to the caller. Raises
+    `WriterLeaseHeld` when this process may not write to the instance (`writer_lease.py`).
     """
+    writer_lease.ensure_held()
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(

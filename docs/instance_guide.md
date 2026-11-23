@@ -363,14 +363,16 @@ reads are constant, and reads scale without more writers.
 - **The writer** holds the writer lease: a lock on `writer.lock` in the data folder, with who
   holds it in `writer.json` beside it. The server of an instance without `read_only: true`
   takes it at startup, and any other process at its first write (a raster store, a feature
-  collection or a table). Each keeps it until it exits. A read-only server recovers no jobs,
-  leaving them to the writer.
-- **A second writer is refused.** A second server on the same data folder (another replica,
-  another uvicorn worker), a host command such as `migrate_layout`, or a script that writes
-  stops with an error naming the holder, its process id and host. Nothing waits: stop the
-  writer first, or make the second server read-only.
+  collection, a table, or a record such as a job). Each keeps it until it exits.
+- **A second writer is refused.** A second server on the same data folder (another replica),
+  a host command such as `migrate_layout`, or a script that writes stops with an error naming
+  the holder, its process id and host. Nothing waits: stop the writer first, or make the
+  second server read-only.
+- **One worker.** Run a writing server with one uvicorn worker. With `--workers 2`, the second
+  worker is refused and uvicorn stops the whole server.
 - **Readers run beside it.** Any number of `read_only: true` servers can serve the same data
-  folder to more users. They take no lease.
+  folder to more users. They take no lease, recover no jobs and refuse every write, so a
+  read-only server never becomes the writer, not even when none is running.
 - **Different datasets are no exception.** Two writers on different datasets are not
   supported either.
 

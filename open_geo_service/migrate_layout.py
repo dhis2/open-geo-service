@@ -1,7 +1,8 @@
 """Move an instance onto the rasters/vectors folder layout (CLIM-1253).
 
-Run once per instance, with its server stopped (it refuses while a writing server runs), from
-the directory its ``.env`` is in:
+Run once per instance, with its server stopped, from the directory its ``.env`` is in. It
+refuses while a server that holds the writer lease runs, but a server from before the lease
+holds none, so during an upgrade stopping the server is up to you:
 
     python -m open_geo_service.migrate_layout [--dry-run]
 

@@ -1,6 +1,6 @@
 """Concurrent writers and interrupted replacement must retain committed job state."""
 
-import multiprocessing
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -12,10 +12,7 @@ from open_geo_service.jobs.models import JobRecord, JobStatus
 from open_geo_service.shared.time import utc_now
 
 
-def _increment(directory: str, ready: Any, start: Any):
-    store.JOBS_DIR = Path(directory)
-    store.JOBS_INDEX_PATH = store.JOBS_DIR / "jobs.json"
-    ready.put(True)
+def _increment(start: threading.Barrier):
     start.wait(10)
     for _ in range(10):
 
@@ -26,7 +23,8 @@ def _increment(directory: str, ready: Any, start: Any):
         store.mutate_job_record("counter", mutate)
 
 
-def test_processes_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_writers_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Threads of the one writing process: a second process is refused by the writer lease.
     monkeypatch.setattr(store, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(store, "JOBS_INDEX_PATH", tmp_path / "jobs.json")
     store.create_job_record(
@@ -38,24 +36,12 @@ def test_processes_do_not_lose_updates_across_atomic_replacement(tmp_path: Path,
             request={"count": 0},
         )
     )
-    ctx = multiprocessing.get_context("spawn")
-    ready, start = ctx.Queue(), ctx.Event()
-    workers = [ctx.Process(target=_increment, args=(str(tmp_path), ready, start)) for _ in range(4)]
-    try:
-        for worker in workers:
-            worker.start()
-        for _ in workers:
-            assert ready.get(timeout=20)
-        start.set()
-        for worker in workers:
-            worker.join(20)
-            assert worker.exitcode == 0
-    finally:
-        for worker in workers:
-            if worker.is_alive():
-                worker.terminate()
-                worker.join()
-        ready.close()
+    start = threading.Barrier(4)
+    workers = [threading.Thread(target=_increment, args=(start,)) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(20)
     record = store.get_job_record("counter")
     assert record is not None and record.request["count"] == 40
 

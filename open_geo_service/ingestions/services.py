@@ -101,11 +101,9 @@ StoreResult = TypeVar("StoreResult")
 class StoreWriteLock:
     """Exclusive writer lock for one Icechunk store, across threads and across processes.
 
-    The thread lock alone was invisible to a second OGS process: an overlapping restart, an
-    auto-reload, or a second worker could run a write against the same store at the same
-    time, and Icechunk then rejected one of them with a commit conflict. The file lock beside
-    the store makes the second writer refuse up front instead. The operating system releases
-    it when the holding process exits, so a crash never leaves a store locked.
+    The writer lease keeps every process but the instance's writer from getting this far, so
+    across processes the file lock beside the store is a second guard, not how writers
+    coordinate. Within the writer, the thread lock keeps two ingests of one store apart.
     """
 
     def __init__(self, store_path: Path) -> None:
@@ -1708,9 +1706,9 @@ def _remove_rebuild_leftover(target: Path) -> bool:
 def remove_leftover_rebuilds() -> int:
     """Remove every ``*.icechunk.rebuild`` left in the store directory; returns how many.
 
-    Run at startup before this process recovers jobs. An older process may still be rebuilding
-    during an overlapping restart, so remove a leftover only while holding the target store's
-    writer lock. Recovery at the start of each ingest also removes one, but a dataset that is
+    Run by the writer at startup, before it recovers jobs. The writer lease keeps an older
+    process from still rebuilding, and the target store's writer lock keeps this one's own
+    ingests out. Recovery at the start of each ingest also removes one, but a dataset that is
     never synced again would otherwise keep a partial copy of its whole store indefinitely.
     """
     directory = Path(downloader.DOWNLOAD_DIR)
