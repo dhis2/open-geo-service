@@ -396,4 +396,6 @@ The lock is only seen by processes that share the data folder's filesystem:
   and FUSE mounts such as gcsfuse or s3fs may not. Keep the writer's data folder local.
 - **Rolling restarts:** a new writer is refused while the old one runs. On Kubernetes, use the
   `Recreate` deployment strategy rather than `RollingUpdate`, so the old pod stops first.
-  Docker Compose stops the old container before starting the new one.
+  Docker Compose stops the old container before starting the new one. Versions before the
+  writer lease do not take it, so when upgrading from one, stop the old server before starting
+  the new one.

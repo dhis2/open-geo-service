@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.features.services import refresh_feature_collection
+from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.processes import execute_ingestion
 from open_geo_service.jobs import store as job_store
 from open_geo_service.jobs.models import JobRecord, JobStatus
@@ -84,7 +85,7 @@ def interrupted_job() -> JobRecord:
 
 
 def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
-    interrupted_job: JobRecord, other_writer: subprocess.Popen[str], monkeypatch: pytest.MonkeyPatch
+    interrupted_job: JobRecord, other_writer: subprocess.Popen[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # A script or notebook on the host, writing each kind of data and a record without taking the lease first.
     refused = rf"server \(pid {other_writer.pid} on .+\) is already writing"
@@ -106,6 +107,12 @@ def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
         with pytest.raises(WriterLeaseHeld, match="This server is read-only"):
             job_store.upsert_job_record(interrupted_job.model_copy(update={"status": JobStatus.FAILED}))
 
+        # Started before the writer has created any index: reads serve none and create none.
+        monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "records.json")
+        for path in ("/datasets", "/stac/catalog.json"):
+            assert client.get(path).status_code == 200, path
+        assert list(tmp_path.iterdir()) == []
+
 
 def test_opening_a_store_drops_only_the_concurrent_commits_warning(tmp_path: Path) -> None:
     # A fresh process: Icechunk emits each of these warnings once per process.
@@ -116,5 +123,6 @@ def test_opening_a_store_drops_only_the_concurrent_commits_warning(tmp_path: Pat
     )
     opened = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, check=True)
 
-    assert "WARNING icechunk_storage.readback" in opened.stderr, "Icechunk's other warnings still show, formatted"
+    assert "conditional PUT is enabled" in opened.stderr, "Icechunk's other warnings still show"
     assert "concurrent commits" not in opened.stderr
+    assert "WARNING" not in opened.stderr, "importing GeoService leaves the root logger to the application"

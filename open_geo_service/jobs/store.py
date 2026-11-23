@@ -19,13 +19,6 @@ JOBS_DIR = _resolve_jobs_dir()
 JOBS_INDEX_PATH = JOBS_DIR / "jobs.json"
 
 
-def ensure_store() -> None:
-    """Create the jobs metadata store if it does not exist."""
-    with index_lock(JOBS_INDEX_PATH):
-        if not JOBS_INDEX_PATH.exists():
-            atomic_json(JOBS_INDEX_PATH, [])
-
-
 def list_job_records() -> list[JobRecord]:
     """Return all persisted job records."""
     return [JobRecord.model_validate(raw) for raw in _load_records()]
@@ -83,14 +76,18 @@ def mutate_job_record(job_id: str, mutation: Callable[[JobRecord], JobRecord]) -
 
 
 def _load_records() -> list[dict[str, object]]:
-    ensure_store()
-    return _read_records_from_disk()
+    # A read never creates the index: a read-only server may not write.
+    with index_lock(JOBS_INDEX_PATH):
+        return _read_records_from_disk()
 
 
 def _read_records_from_disk() -> list[dict[str, object]]:
-    with index_lock(JOBS_INDEX_PATH):
+    """The stored records, for a caller holding the index lock; none before the first write."""
+    try:
         with open(JOBS_INDEX_PATH, encoding="utf-8") as handle:
             payload = json.load(handle)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("jobs.json must contain a list")
     if not all(isinstance(item, dict) for item in payload):
@@ -99,13 +96,8 @@ def _read_records_from_disk() -> list[dict[str, object]]:
 
 
 def _mutate_records(mutation: Callable[[list[dict[str, object]]], JobRecord]) -> JobRecord:
-    ensure_store()
     with index_lock(JOBS_INDEX_PATH):
-        with open(JOBS_INDEX_PATH, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if not isinstance(payload, list):
-            raise ValueError("jobs.json must contain a list")
-        records = payload
+        records = _read_records_from_disk()
         result = mutation(records)
         _atomic_write_records(records)
         return result

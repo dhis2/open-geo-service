@@ -29,8 +29,8 @@ def _route_icechunk_logs() -> None:
     open. The writer lease (`writer_lease.py`) keeps a second process from committing, so it
     says nothing an operator can act on. Only that message
     is dropped: other warnings from the same module, such as failed requests, still show, through
-    the root logger's handler. ICECHUNK_LOG still filters them; ICECHUNK_LOG_DESTINATION, when
-    set, decides where they go instead.
+    the root logger, which the server entry point configures (`cli.py`). ICECHUNK_LOG still
+    filters them; ICECHUNK_LOG_DESTINATION, when set, decides where they go instead.
     """
     if os.environ.get("ICECHUNK_LOG_DESTINATION"):
         return
@@ -42,8 +42,6 @@ def _route_icechunk_logs() -> None:
     logging.getLogger("icechunk_arrow_object_store").addFilter(
         lambda record: "not safe for concurrent commits" not in record.getMessage()
     )
-    # Leaves a root handler that is already configured alone.
-    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
 
 _route_icechunk_logs()

@@ -12,15 +12,18 @@ from open_geo_service.jobs.models import JobRecord, JobStatus
 from open_geo_service.shared.time import utc_now
 
 
-def _increment(start: threading.Barrier):
-    start.wait(10)
-    for _ in range(10):
+def _increment(start: threading.Barrier, errors: list[BaseException]):
+    try:
+        start.wait(10)
+        for _ in range(10):
 
-        def mutate(record: JobRecord):
-            time.sleep(0.002)
-            return record.model_copy(update={"request": {"count": record.request["count"] + 1}})
+            def mutate(record: JobRecord):
+                time.sleep(0.002)
+                return record.model_copy(update={"request": {"count": record.request["count"] + 1}})
 
-        store.mutate_job_record("counter", mutate)
+            store.mutate_job_record("counter", mutate)
+    except BaseException as error:
+        errors.append(error)
 
 
 def test_writers_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -37,11 +40,15 @@ def test_writers_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, m
         )
     )
     start = threading.Barrier(4)
-    workers = [threading.Thread(target=_increment, args=(start,)) for _ in range(4)]
+    errors: list[BaseException] = []
+    # Daemon threads, so one that deadlocks fails the test rather than keeping pytest alive.
+    workers = [threading.Thread(target=_increment, args=(start, errors), daemon=True) for _ in range(4)]
     for worker in workers:
         worker.start()
     for worker in workers:
         worker.join(20)
+    assert not any(worker.is_alive() for worker in workers), "a writer hung"
+    assert errors == []
     record = store.get_job_record("counter")
     assert record is not None and record.request["count"] == 40
 

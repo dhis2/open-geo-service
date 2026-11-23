@@ -61,7 +61,7 @@ def hold(role: str) -> Generator[None]:
             _release(data_root)
 
 
-def ensure_held(role: str = "a process writing a store") -> None:
+def ensure_held(role: str = "a script or notebook") -> None:
     """Take the writer lease for the rest of this process, unless it already holds it.
 
     Called by the writing server at startup and before every write to a store or a record.

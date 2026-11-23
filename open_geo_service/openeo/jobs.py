@@ -121,7 +121,8 @@ def _ensure_store() -> None:
 
 
 def _load_raw_records() -> list[dict[str, object]]:
-    _ensure_store()
+    if not _jobs_index().exists():
+        return []  # a read never creates the index
     with open(_jobs_index(), encoding="utf-8") as fh:
         portalocker.lock(fh, portalocker.LOCK_SH)
         try:

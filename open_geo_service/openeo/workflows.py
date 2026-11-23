@@ -148,7 +148,8 @@ def delete_workflow(process_graph_id: str, by: Principal) -> bool:
 
 
 def _load_records() -> list[dict[str, object]]:
-    _ensure_store()
+    if not WORKFLOW_INDEX_PATH.exists():
+        return []  # a read never creates the index
     return _read_records_from_disk()
 
 

@@ -207,16 +207,6 @@ ARTIFACTS_DIR = _resolve_artifacts_dir()
 ARTIFACTS_INDEX_PATH = ARTIFACTS_DIR / "records.json"
 
 
-def ensure_store() -> None:
-    """Create the artifact metadata store if it does not exist."""
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    if ARTIFACTS_INDEX_PATH.exists():
-        return
-    with index_lock(ARTIFACTS_INDEX_PATH):
-        if not ARTIFACTS_INDEX_PATH.exists():
-            atomic_text(ARTIFACTS_INDEX_PATH, "[]\n")
-
-
 def list_artifacts() -> ArtifactListResponse:
     """Return all stored artifacts."""
     return ArtifactListResponse(items=_materialized_records(_load_records()))
@@ -2548,14 +2538,16 @@ def _encode_records(records: list[ArtifactRecord]) -> str:
 
 
 def _load_records() -> list[ArtifactRecord]:
-    ensure_store()
-    raw = json.loads(ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8"))
-    return [_decode_record(item) for item in raw]
+    """The stored records; none before the first write, so a read never creates the index."""
+    try:
+        raw = ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return [_decode_record(item) for item in json.loads(raw or "[]")]
 
 
 def _save_records(records: list[ArtifactRecord]) -> None:
     global _records_write_count
-    ensure_store()
     with index_lock(ARTIFACTS_INDEX_PATH):
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1
@@ -2729,10 +2721,8 @@ def _mutate_records(mutation: Callable[[list[ArtifactRecord]], MutationResult]) 
     see the records before the write or after it and never a partly written file.
     """
     global _records_write_count
-    ensure_store()
     with index_lock(ARTIFACTS_INDEX_PATH):
-        raw = ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8")
-        records = [_decode_record(item) for item in json.loads(raw or "[]")]
+        records = _load_records()
         result = mutation(records)
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1
