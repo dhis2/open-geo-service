@@ -1255,7 +1255,8 @@ class OpenEOJobService:
             return delay if updated.status == OpenEOJobStatus.QUEUED else None
 
         def _fail(r: OpenEOJobRecord) -> OpenEOJobRecord:
-            outcome = "failed with a permanent error, not retried" if permanent else "failed"
+            retryable = r.attempt < r.max_attempts
+            outcome = "failed with a permanent error, not retried" if permanent and retryable else "failed"
             return r.model_copy(
                 update={
                     "status": OpenEOJobStatus.ERROR,
