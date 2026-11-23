@@ -68,6 +68,13 @@ def _reader(rows: list[dict[str, Any]]) -> pa.RecordBatchReader:
     return pa.RecordBatchReader.from_batches(schema, [batch])
 
 
+def _catalog(*releases: str) -> dict[str, Any]:
+    """Overture's root STAC catalogue, its last release the latest."""
+    children = [{"rel": "child", "href": f"https://stac.overturemaps.org/{r}/catalog.json"} for r in releases]
+    root = {"rel": "self", "href": "https://stac.overturemaps.org/catalog.json"}
+    return {"latest": releases[-1], "links": [root, *children]}
+
+
 @pytest.fixture
 def stub_reader(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     """Substitute the network seam, recording the arguments it was called with."""
@@ -79,7 +86,8 @@ def stub_reader(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def
             return None if rows is None else _reader(rows)
 
         monkeypatch.setattr(overture, "_record_batch_reader", _fake)
-        monkeypatch.setattr(overture, "_releases", lambda: (["r", "2026-09-23.0", "2026-11-18.0"], "2026-11-18.0"))
+        monkeypatch.setattr(overture, "_catalog", lambda: calls["catalog"])
+        calls["catalog"] = _catalog("r", "2026-09-23.0", "2026-11-18.0")
         return calls
 
     return _install
@@ -457,6 +465,11 @@ def test_the_provider_reports_the_release_it_read_the_latest_unless_named(stub_r
     # Overture removes releases after about two months; a pin to one is refused naming those there are.
     with pytest.raises(ValueError, match=r"'2026-08-20\.0' is no longer published.*'2026-11-18\.0'"):
         overture.overture_features(release="2026-08-20.0", bbox=SIERRA_LEONE)
+
+    # A server process reads the catalogue again on every run, so it follows a new release.
+    calls["catalog"] = _catalog("2026-10-21.0", "2026-11-18.0", "2026-12-16.0")
+    _collection, release = overture.overture_features(bbox=SIERRA_LEONE)
+    assert release == "2026-12-16.0"
 
 
 def test_the_reported_release_becomes_the_collection_version(

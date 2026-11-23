@@ -47,6 +47,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from open_geo_service.extents.services import get_extent
 from open_geo_service.features.providers import feature_provider
@@ -72,6 +75,7 @@ _THEME_DEFAULT_TYPE = {
 # `names` is a struct -- its `primary` is flattened to a plain `name`, see `_properties`.
 _DEFAULT_COLUMNS = ("id", "subtype", "class", "names", "country", "region", "admin_level")
 
+_STAC_CATALOG = "https://stac.overturemaps.org/catalog.json"
 _GEOMETRY_COLUMN = "geometry"
 _COUNTRY_COLUMN = "country"
 
@@ -175,11 +179,26 @@ def overture_features(
 
 
 def _releases() -> tuple[list[str], str]:
-    """The releases Overture publishes now, and the latest, from its STAC catalogue (cached by the client)."""
-    from overturemaps import core
+    """The releases Overture publishes now, and the latest, from its STAC catalogue."""
+    catalog = _catalog()
+    # Each release is a child catalogue at `<root>/<release>/catalog.json`.
+    available = [
+        urlparse(link["href"]).path.strip("/").split("/")[0] for link in catalog["links"] if link.get("rel") == "child"
+    ]
+    return available, str(catalog["latest"])
 
-    available, latest = core.get_available_releases()
-    return list(available), str(latest)
+
+def _catalog() -> dict[str, Any]:
+    """Overture's STAC catalogue, fetched on every run.
+
+    Not `overturemaps.core.get_available_releases`: the client keeps the first catalogue it reads
+    for the life of the process, so a server would refresh from that release until Overture
+    removed it.
+    """
+    response = httpx.get(_STAC_CATALOG, timeout=60)
+    response.raise_for_status()
+    catalog: dict[str, Any] = response.json()
+    return catalog
 
 
 def _record_batch_reader(overture_type: str, *, bbox: tuple[float, float, float, float], release: str, stac: bool):  # type: ignore[no-untyped-def]
