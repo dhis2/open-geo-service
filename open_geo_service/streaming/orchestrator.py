@@ -289,24 +289,27 @@ async def run_streaming_ingest(
                     ds, fallback_crs=fallback_crs, time_dim=time_dim, x_dim=x_dim, y_dim=y_dim
                 )
                 ds = prepared.dataset
-                # to_zarr reads a variable without dask chunks whole, so loading it costs no extra
-                # memory and spares the check below a second read of the source. A dask-backed
-                # period stays lazy so to_zarr can write it chunk by chunk.
-                if all(var.chunks is None for var in ds.data_vars.values()):
-                    ds.load()
                 # Infer the grid from the first fetched period, before _strip_cf_encoding
                 # so the nodata sentinel survives into the spec.
                 if spec is None:
                     spec = _grid_spec_from_dataset(ds, time_dim=time_dim, x_dim=x_dim, y_dim=y_dim, crs=prepared.crs)
-                # A source can list a period before its data is filled in. Writing it would end the
-                # sync at an empty period that, being stored, is never fetched again.
-                checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
-                if _all_values_missing(ds[checked]):
-                    raise RuntimeError(
-                        f"Every value of {checked!r} for {period_id} is missing: the source lists this period "
-                        "but has likely not published its data yet. Nothing was written for it, and a later "
-                        "sync fetches it again."
-                    )
+                # A source can list its newest period shortly before the data is written. Storing it
+                # would end the sync at an empty period that is never fetched again. Only the last
+                # period of the run is checked: an empty one before it has had time to be filled, so
+                # it is empty for a reason of its own (water, cloud) and is written as it is.
+                if period_id == all_periods[-1]:
+                    # to_zarr reads a variable without dask chunks whole, so loading it costs no extra
+                    # memory and spares the check a second read of the source. A dask-backed period
+                    # stays lazy so to_zarr can write it chunk by chunk.
+                    if all(var.chunks is None for var in ds.data_vars.values()):
+                        ds.load()
+                    checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
+                    if _all_values_missing(ds[checked]):
+                        raise RuntimeError(
+                            f"Every value of {checked!r} for {period_id} is missing: the source lists it, but "
+                            "may not have published its data yet. Nothing was written for it, and a later sync "
+                            "fetches it again."
+                        )
                 _strip_cf_encoding(ds, period_type, time_dim=spec.time_dim)
                 apply_cf_metadata(ds, cf_attrs, variable=template_variable, overwrite=True)
                 try:

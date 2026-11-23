@@ -63,9 +63,14 @@ retain older periods already stored by Open Geo Service. Requests wholly within 
 coverage do not query the source. Extending backwards or repairing an existing gap
 requires the source to reproduce the complete union, including committed history.
 
-`periods()` need not read data values to check that a listed period is filled in: the
-framework refuses to write a period whose values are all missing, and fetches it again on
-a later sync.
+**`periods()` lists what the source says is available.** Read it from metadata (a
+catalogue, a file listing, an archive's time axis) rather than opening the data to check
+its values. A source can list its newest period shortly before the data is written. The
+framework refuses to store the last period of a run if all of its values are missing, and
+fetches it again on a later sync. A period whose values are truly all missing, such as one
+masked by water or cloud, is written once it is no longer the last period, by which time
+the source has had time to fill it in. A period that is only partly written is stored as
+it is, so if a source fills a period in pieces, clamp `periods()` to the last complete one.
 
 **`fetch_period`** — fetches exactly one period and returns it as an `xarray.Dataset`
 normalized to `(t, y, x)`. Write it as a regular (blocking) method and the framework runs

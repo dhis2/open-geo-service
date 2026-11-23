@@ -582,7 +582,7 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
 
 
 class _UnpublishedTailPlugin(_FakePlugin):
-    """Lists 2026-01-03 before its values are filled in: every cell is ``missing`` until ``published``."""
+    """2026-01-02 is empty for good; the newest, 2026-01-03, is listed empty until ``published``."""
 
     def __init__(self, dtype: str, missing: float) -> None:
         self.dtype = dtype
@@ -593,14 +593,14 @@ class _UnpublishedTailPlugin(_FakePlugin):
         ds = await super().fetch_period(period_id, bbox, **params)
         ds["precip"] = ds["precip"].astype(self.dtype)
         ds["precip"].encoding["_FillValue"] = self.missing
-        if period_id == "2026-01-03" and not self.published:
+        if period_id == "2026-01-02" or (period_id == "2026-01-03" and not self.published):
             ds["precip"][:] = self.missing
         return ds
 
 
 @pytest.mark.parametrize(("dtype", "missing"), [("float32", np.nan), ("uint8", 255)])
 def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Path, dtype: str, missing: float) -> None:
-    """The refused period is not committed, so the next sync fetches it again (CLIM-1878)."""
+    """Only the newest period is refused, and it is fetched again by the next sync (CLIM-1878)."""
     store_path = tmp_path / "streaming-store.icechunk"
     plugin = _UnpublishedTailPlugin(dtype, missing)
 
@@ -626,7 +626,7 @@ def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Pa
 
     plugin.published = True
     assert sync() == 1
-    assert committed()[1] == [1.0, 2.0, 3.0]
+    np.testing.assert_array_equal(committed()[1], [1, missing, 3])
 
 
 def test_orchestrator_resume_supports_custom_time_dimension(tmp_path: Path) -> None:
