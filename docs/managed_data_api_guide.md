@@ -447,7 +447,7 @@ curl -s "http://127.0.0.1:9000/stac/chirps3_precipitation_daily/collection.json"
 What this means:
 
 - `/stac` is the public STAC discovery surface for published datasets, raster and vector alike
-- native FastAPI no longer exposes `/collections`
+- `/collections` is the openEO collection listing, not a second STAC catalogue
 - dataset responses include `/stac/{dataset_id}/collection.json`
 
 ### Raster and feature collections are described differently
