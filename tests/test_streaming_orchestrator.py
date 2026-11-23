@@ -581,6 +581,54 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
     assert rerun.periods_written == 0
 
 
+class _UnpublishedTailPlugin(_FakePlugin):
+    """Lists 2026-01-03 before its values are filled in: every cell is ``missing`` until ``published``."""
+
+    def __init__(self, dtype: str, missing: float) -> None:
+        self.dtype = dtype
+        self.missing = missing
+        self.published = False
+
+    async def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
+        ds = await super().fetch_period(period_id, bbox, **params)
+        ds["precip"] = ds["precip"].astype(self.dtype)
+        ds["precip"].encoding["_FillValue"] = self.missing
+        if period_id == "2026-01-03" and not self.published:
+            ds["precip"][:] = self.missing
+        return ds
+
+
+@pytest.mark.parametrize(("dtype", "missing"), [("float32", np.nan), ("uint8", 255)])
+def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Path, dtype: str, missing: float) -> None:
+    """The refused period is not committed, so the next sync fetches it again (CLIM-1878)."""
+    store_path = tmp_path / "streaming-store.icechunk"
+    plugin = _UnpublishedTailPlugin(dtype, missing)
+
+    def sync() -> int:
+        return run_streaming_ingest_sync(
+            plugin=plugin,
+            params={},
+            bbox=[0.0, 0.0, 1.0, 1.0],
+            start="2026-01-01",
+            end="2026-01-03",
+            store_path=store_path,
+            period_type="daily",
+        ).periods_written
+
+    def committed() -> tuple[list[str], list[float]]:
+        repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+        with xr.open_zarr(repo.readonly_session("main").store) as ds:
+            return [str(t)[:10] for t in ds["t"].values], ds["precip"].values[:, 0, 0].tolist()
+
+    with pytest.raises(RuntimeError, match="for 2026-01-03 is missing"):
+        sync()
+    assert committed()[0] == ["2026-01-01", "2026-01-02"]
+
+    plugin.published = True
+    assert sync() == 1
+    assert committed()[1] == [1.0, 2.0, 3.0]
+
+
 def test_orchestrator_resume_supports_custom_time_dimension(tmp_path: Path) -> None:
     store_path = tmp_path / "streaming-store-custom-time.icechunk"
 

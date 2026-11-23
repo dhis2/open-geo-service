@@ -63,6 +63,10 @@ retain older periods already stored by Open Geo Service. Requests wholly within 
 coverage do not query the source. Extending backwards or repairing an existing gap
 requires the source to reproduce the complete union, including committed history.
 
+`periods()` need not read data values to check that a listed period is filled in: the
+framework refuses to write a period whose values are all missing, and fetches it again on
+a later sync.
+
 **`fetch_period`** — fetches exactly one period and returns it as an `xarray.Dataset`
 normalized to `(t, y, x)`. Write it as a regular (blocking) method and the framework runs
 it in a worker thread, so ordinary blocking I/O is fine; the framework appends the result

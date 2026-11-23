@@ -351,4 +351,4 @@ Ingest and sync enumerate the complete source-valid union before writing. A forw
 
 ### The append execution mode avoids re-downloading history
 
-`append` writes only the source-available periods missing from the committed Icechunk store. The committed store is authoritative for existing history, while a temporary Icechunk branch preserves the pre-ingest snapshot until normalization and artifact registration succeed. Earlier requests, gaps, and release-style updates instead build a complete sibling replacement.
+`append` writes only the source-available periods missing from the committed Icechunk store. The committed store is authoritative for existing history, while a temporary Icechunk branch preserves the pre-ingest snapshot until normalization and artifact registration succeed. Earlier requests, gaps, and release-style updates instead build a complete sibling replacement. The orchestrator refuses a fetched period whose values are all missing, as when a source lists a period before filling it in: the run fails with the earlier periods kept, and a later sync fetches that period again.
