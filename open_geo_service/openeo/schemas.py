@@ -105,6 +105,9 @@ class OpenEOJobRecord(BaseModel):
     # Persisted internal state (underscore prefix excluded from openEO output)
     error_message: str | None = Field(default=None, exclude=True)
     cancel_requested: bool = Field(default=False, exclude=True)
+    # When the job last failed. Unlike `updated`, an edit to a failed job leaves it alone, so the
+    # failure keeps its log entry id.
+    failed_at: datetime | None = Field(default=None, exclude=True)
     # The principal that created the job through the API (docs/authentication.md).
     owner: str | None = Field(default=None, exclude=True)
     # Set on jobs a pipeline run or a derived dataset refresh creates: who owns the job, and the

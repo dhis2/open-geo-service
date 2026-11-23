@@ -223,6 +223,7 @@ def _serialize(record: OpenEOJobRecord) -> dict[str, object]:
     data["attempt"] = record.attempt
     data["max_attempts"] = record.max_attempts
     data["retry_at"] = record.retry_at.isoformat() if record.retry_at is not None else None
+    data["failed_at"] = record.failed_at.isoformat() if record.failed_at is not None else None
     data["publishing"] = record.publishing
     data["publication"] = record.publication.model_dump(mode="json") if record.publication is not None else None
     data["events"] = [event.model_dump(mode="json", by_alias=True) for event in record.events]
@@ -468,6 +469,7 @@ class OpenEOJobService:
                     "status": OpenEOJobStatus.ERROR,
                     "error_message": _with_attempts("Interrupted by server restart", r),
                     "updated": utc_now(),
+                    "failed_at": utc_now(),
                     "publishing": False,
                     "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} interrupted by a server restart")
                     if r.max_attempts > 1
@@ -870,9 +872,9 @@ class OpenEOJobService:
                 time, message = None, line
             entries.append(OpenEOLogEntry(id=str(index), level="info", message=message, time=time))
         if record.status == OpenEOJobStatus.ERROR and record.error_message:
-            failure_id = f"error-{record.updated.isoformat()}" if record.updated else "error"
+            failure_id = f"error-{record.failed_at.isoformat()}" if record.failed_at else "error"
             entries.append(
-                OpenEOLogEntry(id=failure_id, level="error", message=record.error_message, time=record.updated)
+                OpenEOLogEntry(id=failure_id, level="error", message=record.error_message, time=record.failed_at)
             )
         if offset is not None:
             ids = [entry.id for entry in entries]
@@ -1264,6 +1266,7 @@ class OpenEOJobService:
                     "status": OpenEOJobStatus.ERROR,
                     "error_message": _with_attempts(error, r),
                     "updated": utc_now(),
+                    "failed_at": utc_now(),
                     "publishing": _commit_pending(r),
                     "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} {outcome}: {error}")
                     if r.max_attempts > 1

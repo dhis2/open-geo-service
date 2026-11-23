@@ -583,6 +583,9 @@ def test_a_failed_job_links_to_logs_that_carry_its_error(client: TestClient) -> 
     assert [entry["level"] for entry in entries] == ["error"]
     assert "no_such_dataset" in entries[0]["message"]
     assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
+    # Editing the failed job does not make its failure a new entry.
+    assert client.patch(f"/jobs/{job_id}", json={"title": "renamed"}).status_code == 204
+    assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
     # A client polling from the first failure still sees the second one after a re-run.
     run_until_failed()
     after_rerun = client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
