@@ -351,4 +351,15 @@ Ingest and sync enumerate the complete source-valid union before writing. A forw
 
 ### The append execution mode avoids re-downloading history
 
-`append` writes only the source-available periods missing from the committed Icechunk store. The committed store is authoritative for existing history, while a temporary Icechunk branch preserves the pre-ingest snapshot until normalization and artifact registration succeed. Earlier requests, gaps, and release-style updates instead build a complete sibling replacement. The orchestrator refuses to write the last period of a run if all of its values are missing, as when a source lists its newest period shortly before the data is written. The run fails with the earlier periods kept, and a later sync fetches that period again. A period whose values are truly all missing, such as one masked by water or cloud, is written once it is no longer the last period, by which time the source has had time to fill it in.
+`append` writes only the source-available periods missing from the committed Icechunk store. The committed store is authoritative for existing history, while a temporary Icechunk branch preserves the pre-ingest snapshot until normalization and artifact registration succeed. Earlier requests, gaps, and release-style updates instead build a complete sibling replacement.
+
+### Empty periods at the end of a run are not stored
+
+A source can list periods before their data is written. dynamical.org's CHIRPS3 mirror extends its time axis to the day of each update first and writes the data minutes later, so for those minutes it lists several days with no values; ERA5-Heat once listed a day whose every hour was NaN. A sync resumes after the newest stored period, so storing such a period would keep it empty for good.
+
+The orchestrator therefore checks each fetched period for values that are all missing (NaN, or the variable's `_FillValue`). On the first empty period, E, it commits nothing further and keeps fetching, holding only E, to see whether a later period has data:
+
+1. **A later period L has data.** E and every period up to L are empty for a reason of their own, such as water or cloud over the whole extent. E is committed, ingestion resumes from the period after E, and the periods up to L are fetched again and committed without checking.
+2. **No later period has data.** The source has not filled them yet. The run fails with the periods before E kept, and nothing from E on is written. A later sync fetches them again.
+
+Only one period is held in memory. The cost is fetching the periods from E to L twice in case 1, which reads nothing new from a plugin that caches its source, and fetching the unfilled periods once each in case 2. The newest period of a run that is truly empty is refused until a later period is listed, then written.

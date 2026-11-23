@@ -582,25 +582,28 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
 
 
 class _UnpublishedTailPlugin(_FakePlugin):
-    """2026-01-02 is empty for good; the newest, 2026-01-03, is listed empty until ``published``."""
+    """2026-01-02 and 03 are a real gap; the newest two days are listed empty until ``published``."""
 
     def __init__(self, dtype: str, missing: float) -> None:
         self.dtype = dtype
         self.missing = missing
         self.published = False
 
+    async def periods(self, start: str, end: str) -> list[str]:
+        return [f"2026-01-0{day}" for day in range(1, 7)]
+
     async def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
         ds = await super().fetch_period(period_id, bbox, **params)
         ds["precip"] = ds["precip"].astype(self.dtype)
         ds["precip"].encoding["_FillValue"] = self.missing
-        if period_id == "2026-01-02" or (period_id == "2026-01-03" and not self.published):
+        if period_id in ("2026-01-02", "2026-01-03") or (period_id >= "2026-01-05" and not self.published):
             ds["precip"][:] = self.missing
         return ds
 
 
 @pytest.mark.parametrize(("dtype", "missing"), [("float32", np.nan), ("uint8", 255)])
-def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Path, dtype: str, missing: float) -> None:
-    """Only the newest period is refused, and it is fetched again by the next sync (CLIM-1878)."""
+def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, dtype: str, missing: float) -> None:
+    """Empty periods at the end are fetched again by the next sync; a gap before data is written (CLIM-1878)."""
     store_path = tmp_path / "streaming-store.icechunk"
     plugin = _UnpublishedTailPlugin(dtype, missing)
 
@@ -610,7 +613,7 @@ def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Pa
             params={},
             bbox=[0.0, 0.0, 1.0, 1.0],
             start="2026-01-01",
-            end="2026-01-03",
+            end="2026-01-06",
             store_path=store_path,
             period_type="daily",
         ).periods_written
@@ -620,13 +623,13 @@ def test_orchestrator_refuses_a_period_whose_values_are_all_missing(tmp_path: Pa
         with xr.open_zarr(repo.readonly_session("main").store) as ds:
             return [str(t)[:10] for t in ds["t"].values], ds["precip"].values[:, 0, 0].tolist()
 
-    with pytest.raises(RuntimeError, match="for 2026-01-03 is missing"):
+    with pytest.raises(RuntimeError, match="missing for 2026-01-05 to 2026-01-06"):
         sync()
-    assert committed()[0] == ["2026-01-01", "2026-01-02"]
+    assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
 
     plugin.published = True
-    assert sync() == 1
-    np.testing.assert_array_equal(committed()[1], [1, missing, 3])
+    assert sync() == 2
+    np.testing.assert_array_equal(committed()[1], [1, missing, missing, 4, 5, 6])
 
 
 def test_orchestrator_resume_supports_custom_time_dimension(tmp_path: Path) -> None:

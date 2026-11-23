@@ -262,13 +262,61 @@ async def run_streaming_ingest(
         sync_fetch = cast("Callable[..., xr.Dataset]", plugin.fetch_period)
         return await asyncio.to_thread(sync_fetch, period_id, bbox, **params)
 
-    # Keep only a rolling fetch window in memory rather than creating one task
-    # for every pending period up front. This keeps long backfills bounded.
-    for _ in range(min(max_parallel, len(pending))):
-        period_id = next(period_queue, None)
-        if period_id is None:
-            break
-        in_flight.append((period_id, asyncio.create_task(_fetch(period_id))))
+    def _top_up() -> None:
+        # Keep only a rolling fetch window in memory rather than creating one task
+        # for every pending period up front. This keeps long backfills bounded.
+        while len(in_flight) < max_parallel and (queued := next(period_queue, None)) is not None:
+            in_flight.append((queued, asyncio.create_task(_fetch(queued))))
+
+    def _commit_period(period_id: str, ds: xr.Dataset) -> None:
+        nonlocal is_first_write, axes_checked, append_group
+        assert spec is not None
+        session = repo.writable_session("main")
+        if is_first_write:
+            ds.to_zarr(session.store, mode="w", zarr_format=3)
+            is_first_write = False
+        else:
+            if not axes_checked:
+                _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim)
+                # Where the data actually lives. A store promoted to a pyramid by an
+                # earlier sync keeps its variables in level groups, and appending at the
+                # root would create a second one-timestep array beside the pyramid,
+                # leaving the store unopenable. Resolved once per sync, since promotion
+                # only happens between syncs.
+                append_group = committed_data_group(store_path)
+                axes_checked = True
+            # xarray replaces the group's attrs with the period's on append. At the root
+            # write_geozarr_attrs restores them below; a pyramid level's are its own.
+            level_attrs = (
+                dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
+                if append_group is not None
+                else None
+            )
+            ds.to_zarr(
+                session.store,
+                group=append_group,
+                append_dim=spec.time_dim,
+                zarr_format=3,
+            )
+            if level_attrs is not None:
+                zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
+        # Root attrs are rewritten on every commit so later append sessions
+        # preserve GeoZarr metadata even if the underlying store layer only
+        # touches array content for the new period.
+        write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
+        session.commit(f"ingest: {period_id}")
+
+    def _checked_variable(ds: xr.Dataset) -> str:
+        return str(template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars)))
+
+    # See "Empty periods at the end of a run are not stored" in docs/architecture.md. `held` is
+    # the first empty period, kept while later ones show whether it is a real gap; pending
+    # periods before `gaps_confirmed_until` are known gaps and are committed without checking.
+    position = {period: index for index, period in enumerate(pending)}
+    held: tuple[str, xr.Dataset] | None = None
+    held_last = ""
+    gaps_confirmed_until = 0
+    _top_up()
     written = 0
     try:
         while in_flight:
@@ -277,6 +325,9 @@ async def run_streaming_ingest(
 
             period_id, task = in_flight.popleft()
             ds = await task
+            # The period committed this round: the one just fetched, or the held empty one once
+            # a later period has data. None while checking ahead of a held period.
+            target: tuple[str, xr.Dataset] | None = None
             # Always release the fetched dataset's backing handles (open_rasterio /
             # open_dataset / remote HTTP) once it is written, so long backfills don't
             # leak file descriptors one period at a time.
@@ -293,91 +344,83 @@ async def run_streaming_ingest(
                 # so the nodata sentinel survives into the spec.
                 if spec is None:
                     spec = _grid_spec_from_dataset(ds, time_dim=time_dim, x_dim=x_dim, y_dim=y_dim, crs=prepared.crs)
-                # A source can list its newest period shortly before the data is written. Storing it
-                # would end the sync at an empty period that is never fetched again. Only the last
-                # period of the run is checked: an empty one before it has had time to be filled, so
-                # it is empty for a reason of its own (water, cloud) and is written as it is.
-                if period_id == all_periods[-1]:
+                if position[period_id] < gaps_confirmed_until:
+                    target = (period_id, ds)
+                else:
                     # to_zarr reads a variable without dask chunks whole, so loading it costs no extra
                     # memory and spares the check a second read of the source. A dask-backed period
                     # stays lazy so to_zarr can write it chunk by chunk.
                     if all(var.chunks is None for var in ds.data_vars.values()):
                         ds.load()
-                    checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
-                    if _all_values_missing(ds[checked]):
-                        raise RuntimeError(
-                            f"Every value of {checked!r} for {period_id} is missing: the source lists it, but "
-                            "may not have published its data yet. Nothing was written for it, and a later sync "
-                            "fetches it again."
-                        )
-                _strip_cf_encoding(ds, period_type, time_dim=spec.time_dim)
-                apply_cf_metadata(ds, cf_attrs, variable=template_variable, overwrite=True)
-                try:
-                    spatial_shape = (int(ds.sizes[spec.y_dim]), int(ds.sizes[spec.x_dim]))
-                except KeyError as exc:
-                    raise RuntimeError(
-                        f"Fetched dataset for {period_id} is missing expected spatial dimensions "
-                        f"'{spec.y_dim}' and '{spec.x_dim}'"
-                    ) from exc
-                if expected_spatial_shape is None:
-                    expected_spatial_shape = spatial_shape
-                elif spatial_shape != expected_spatial_shape:
-                    raise RuntimeError(
-                        f"Fetched dataset for {period_id} has spatial shape {spatial_shape}, "
-                        f"expected {expected_spatial_shape}"
-                    )
+                    if _all_values_missing(ds[_checked_variable(ds)]):
+                        held = held or (period_id, ds)
+                        held_last = period_id
+                    elif held is None:
+                        target = (period_id, ds)
+                    else:
+                        # The held period and every one up to this are real gaps. Commit the held
+                        # one now; the rest are fetched again below and committed in order.
+                        target = held
+                        gaps_confirmed_until = position[period_id]
 
-                session = repo.writable_session("main")
-                if is_first_write:
-                    ds.to_zarr(session.store, mode="w", zarr_format=3)
-                    is_first_write = False
-                else:
-                    if not axes_checked:
-                        _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim)
-                        # Where the data actually lives. A store promoted to a pyramid by an
-                        # earlier sync keeps its variables in level groups, and appending at the
-                        # root would create a second one-timestep array beside the pyramid,
-                        # leaving the store unopenable. Resolved once per sync, since promotion
-                        # only happens between syncs.
-                        append_group = committed_data_group(store_path)
-                        axes_checked = True
-                    # xarray replaces the group's attrs with the period's on append. At the root
-                    # write_geozarr_attrs restores them below; a pyramid level's are its own.
-                    level_attrs = (
-                        dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
-                        if append_group is not None
-                        else None
-                    )
-                    ds.to_zarr(
-                        session.store,
-                        group=append_group,
-                        append_dim=spec.time_dim,
-                        zarr_format=3,
-                    )
-                    if level_attrs is not None:
-                        zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
-                # Root attrs are rewritten on every commit so later append sessions
-                # preserve GeoZarr metadata even if the underlying store layer only
-                # touches array content for the new period.
-                write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
-                session.commit(f"ingest: {period_id}")
+                if target is not None:
+                    write_id, write_ds = target
+                    _strip_cf_encoding(write_ds, period_type, time_dim=spec.time_dim)
+                    apply_cf_metadata(write_ds, cf_attrs, variable=template_variable, overwrite=True)
+                    try:
+                        spatial_shape = (int(write_ds.sizes[spec.y_dim]), int(write_ds.sizes[spec.x_dim]))
+                    except KeyError as exc:
+                        raise RuntimeError(
+                            f"Fetched dataset for {write_id} is missing expected spatial dimensions "
+                            f"'{spec.y_dim}' and '{spec.x_dim}'"
+                        ) from exc
+                    if expected_spatial_shape is None:
+                        expected_spatial_shape = spatial_shape
+                    elif spatial_shape != expected_spatial_shape:
+                        raise RuntimeError(
+                            f"Fetched dataset for {write_id} has spatial shape {spatial_shape}, "
+                            f"expected {expected_spatial_shape}"
+                        )
+                    _commit_period(write_id, write_ds)
             finally:
-                ds.close()
+                if held is None or held[1] is not ds:
+                    ds.close()
+
+            if target is None:
+                _top_up()
+                continue
+            if target is held:
+                assert held is not None
+                held[1].close()
+                held = None
+                # Fetch again from the period after the committed gap.
+                for _, queued_task in in_flight:
+                    queued_task.cancel()
+                await asyncio.gather(*(queued_task for _, queued_task in in_flight), return_exceptions=True)
+                in_flight.clear()
+                period_queue = iter(pending[position[target[0]] + 1 :])
 
             written += 1
             if save_cursor and (written % commit_batch_size == 0 or written == len(pending)):
-                save_cursor({"last_committed": period_id})
+                save_cursor({"last_committed": target[0]})
             if on_progress:
                 on_progress(
                     len(all_periods) - len(pending) + written,
                     len(all_periods),
-                    f"Wrote {period_id}",
+                    f"Wrote {target[0]}",
                 )
+            _top_up()
 
-            next_period = next(period_queue, None)
-            if next_period is not None:
-                in_flight.append((next_period, asyncio.create_task(_fetch(next_period))))
+        if held is not None:
+            span = held[0] if held_last == held[0] else f"{held[0]} to {held_last}"
+            raise RuntimeError(
+                f"Every value of {_checked_variable(held[1])!r} is missing for {span}, at the end of this run: "
+                "the source lists these periods, but may not have published their data yet. Nothing from "
+                f"{held[0]} on was written, and a later sync fetches it again."
+            )
     finally:
+        if held is not None:
+            held[1].close()
         tasks_to_cancel = [task for _, task in in_flight if not task.done()]
         for task in tasks_to_cancel:
             task.cancel()
