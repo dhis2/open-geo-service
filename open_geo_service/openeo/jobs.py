@@ -77,6 +77,7 @@ from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
 from open_geo_service.shared.time import utc_now
+from open_geo_service.shared.urls import is_segment_safe_id
 from open_geo_service.shared.vectors import (
     FEATURE_ID_COORD,
     dimension_holds_shapes,
@@ -1698,9 +1699,10 @@ def _write_managed_zarr(
     dataset_id = options["dataset_id"]
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"'dataset_id' option must be a non-empty string, got {type(dataset_id).__name__}")
-    if Path(dataset_id).name != dataset_id:
+    if not is_segment_safe_id(dataset_id):
         raise ValueError(
-            f"Invalid dataset_id '{dataset_id}': must be a plain name with no path separators or traversal segments"
+            f"Invalid dataset_id '{dataset_id}': it names one store and one segment of every URL that points at "
+            "the dataset, so it must start with a letter or digit and carry only letters, digits, '.', '_' or '-'"
         )
 
     from open_geo_service.data_registry.services import datasets as _reg
