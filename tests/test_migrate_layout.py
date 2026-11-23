@@ -108,6 +108,12 @@ def test_running_it_again_changes_nothing(instance: Path, capsys: pytest.Capture
     assert "Nothing to migrate" in capsys.readouterr().out
     assert (instance / "data" / "artifacts" / "records.json").read_text() == records
 
+    # A mistyped data_dir is reported as having nothing to migrate, and not created.
+    (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data-typo'}\nplugins_dir: ./plugins\n")
+    api_config._cache = None
+    assert migrate_layout.main([]) == 0
+    assert not (instance / "data-typo").exists()
+
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_rewriting_the_records_keeps_their_mode(instance: Path) -> None:

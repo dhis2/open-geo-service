@@ -109,8 +109,10 @@ def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
 
         # Started before the writer has created any index: reads serve none and create none.
         monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "records.json")
+        monkeypatch.setattr(job_store, "JOBS_INDEX_PATH", tmp_path / "jobs" / "jobs.json")
         for path in ("/datasets", "/stac/catalog.json"):
             assert client.get(path).status_code == 200, path
+        assert job_store.list_job_records() == []
         assert list(tmp_path.iterdir()) == []
 
 

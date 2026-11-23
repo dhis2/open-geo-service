@@ -72,7 +72,7 @@ from open_geo_service.shared.compute import get_job_slots, max_concurrent_jobs
 from open_geo_service.shared.display import display_midpoint, display_range, range_spec
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.netcdf import write_netcdf
-from open_geo_service.shared.persistence import execution_lease
+from open_geo_service.shared.persistence import atomic_json, execution_lease
 from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
@@ -117,7 +117,7 @@ def _jobs_index() -> Path:
 def _ensure_store() -> None:
     _JOBS_DIR.mkdir(parents=True, exist_ok=True)
     if not _jobs_index().exists():
-        _jobs_index().write_text("[]\n", encoding="utf-8")
+        atomic_json(_jobs_index(), [])
 
 
 def _load_raw_records() -> list[dict[str, object]]:

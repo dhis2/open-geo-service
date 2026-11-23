@@ -15,6 +15,7 @@ from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.auth.tokens import Principal, Tier
 from open_geo_service.openeo.schemas import WorkflowListResponse, WorkflowRecord
+from open_geo_service.shared.persistence import atomic_json
 
 _T = TypeVar("_T")
 
@@ -32,7 +33,7 @@ WORKFLOW_INDEX_PATH = WORKFLOW_DIR / "process_graphs.json"
 def _ensure_store() -> None:
     WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
     if not WORKFLOW_INDEX_PATH.exists():
-        WORKFLOW_INDEX_PATH.write_text("[]\n", encoding="utf-8")
+        atomic_json(WORKFLOW_INDEX_PATH, [])
 
 
 class WorkflowAccessError(Exception):

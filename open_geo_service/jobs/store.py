@@ -76,13 +76,13 @@ def mutate_job_record(job_id: str, mutation: Callable[[JobRecord], JobRecord]) -
 
 
 def _load_records() -> list[dict[str, object]]:
-    # A read never creates the index: a read-only server may not write.
-    with index_lock(JOBS_INDEX_PATH):
-        return _read_records_from_disk()
+    # No lock: the index is replaced whole, and taking the lock would create files a read-only
+    # server may not write.
+    return _read_records_from_disk()
 
 
 def _read_records_from_disk() -> list[dict[str, object]]:
-    """The stored records, for a caller holding the index lock; none before the first write."""
+    """The stored records; none before the first write."""
     try:
         with open(JOBS_INDEX_PATH, encoding="utf-8") as handle:
             payload = json.load(handle)

@@ -215,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         # The plan is built under the lease, so no writer changes what it read before it is applied.
-        with nullcontext() if args.dry_run else writer_lease.hold("migrate_layout"):
+        # Without a data folder there is nothing for a server to write, and taking the lease would create one.
+        writing = not args.dry_run and api_config.get_data_root().is_dir()
+        with writer_lease.hold("migrate_layout") if writing else nullcontext():
             plan = build_plan()
             if plan.empty:
                 print("Nothing to migrate: this instance already uses rasters/ and vectors/.")

@@ -72,7 +72,10 @@ def ensure_held(role: str = "a script or notebook") -> None:
     if _read_only:
         raise WriterLeaseHeld(f"This server is read-only and does not write to {data_root}.")
     if _acquire(data_root, role):
-        logger.info("Took the writer lease of %s for this process, as %s", data_root, role)
+        # A warning for a script or notebook, so it shows under the default logging: while it
+        # runs, the server refuses to start.
+        level = logging.INFO if role == "server" else logging.WARNING
+        logger.log(level, "Took the writer lease of %s for this process, as %s", data_root, role)
 
 
 def refuse_writes() -> None:
