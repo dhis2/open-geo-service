@@ -98,15 +98,8 @@ def scan() -> list[Any]:
 
 
 def _collect() -> list[Any]:
-    import xclim
     import xclim.indicators  # noqa: F401  # pyright: ignore[reportUnusedImport]  # fills the registry
     from xclim.core import InputKind
-
-    # Log rather than warn about inputs whose CF metadata differs from what an indicator expects,
-    # such as a precipitation rate from amount2rate (`lwe_precipitation_rate` where xclim names
-    # `precipitation_flux`); the results are unaffected. Set once for the process, since xclim's
-    # options are process-wide and jobs run in threads (see `_single_output`).
-    xclim.set_options(cf_compliance="log")
     from xclim.core.calendar import select_time
     from xclim.core.indicator import registry
 
