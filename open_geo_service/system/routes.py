@@ -14,6 +14,7 @@ from starlette.responses import RedirectResponse, StreamingResponse
 
 from open_geo_service import config as api_config
 from open_geo_service.auth.middleware import principal_of
+from open_geo_service.shared.negotiation import wants_json
 from open_geo_service.shared.time import has_calendar_periods
 from open_geo_service.shared.urls import absolute_base, mount_prefix
 
@@ -26,7 +27,6 @@ from .templates import (
     render_maps,
     render_workflow_page,
     render_workflows_page,
-    wants_json,
 )
 
 router = APIRouter()

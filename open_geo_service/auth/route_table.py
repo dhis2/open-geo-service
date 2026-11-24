@@ -3,6 +3,9 @@
 A route the application serves that the table does not list gets the operator tier, and
 `tests/test_authentication.py` fails until it is listed. A path no route serves is left to the
 application, which answers 404. HEAD is decided as GET.
+
+With `authentication.gate_reads`, every public route outside `UNGATED` needs the authenticated
+tier. The table's tiers stay as listed, since read-only mode reads them.
 """
 
 from __future__ import annotations
@@ -144,6 +147,32 @@ ROUTE_TABLE: dict[Tier, frozenset[str]] = {
 }
 
 
+# Public even with reads gated: what a client needs to find out how to sign in, and the sign-in
+# itself. A public route added later is gated by default.
+UNGATED: frozenset[str] = frozenset(
+    {
+        # `GET /` is openEO capabilities for a client; for a browser it is the landing page, which
+        # lists the catalogue, so `gated` decides it by what the request asks for.
+        "GET /",
+        "GET /.well-known/openeo",
+        "GET /api",
+        "GET /credentials/basic",
+        "GET /credentials/oidc",
+        "GET /docs",
+        "GET /docs/oauth2-redirect",
+        "GET /file_formats",
+        "GET /health",
+        "GET /me",
+        "GET /openapi.json",
+        "GET /redoc",
+        "GET /service_types",
+        "GET /sign-in",
+        "POST /sign-in",
+        "POST /sign-out",
+    }
+)
+
+
 def _compile() -> list[tuple[str, re.Pattern[str], Tier]]:
     entries: list[tuple[str, re.Pattern[str], Tier]] = []
     for tier, routes in ROUTE_TABLE.items():
@@ -172,3 +201,16 @@ def route_tier(method: str, path: str) -> Tier:
     """The tier a request needs: the listed one, or the operator tier for an unlisted route."""
     tier = listed_tier(method, path)
     return Tier.OPERATOR if tier is None else tier
+
+
+def gated(method: str, path: str, *, page: bool) -> bool:
+    """Whether a public route needs the authenticated tier once reads are gated.
+
+    *page* says the request asks for HTML, which makes `GET /` the landing page rather than
+    openEO capabilities.
+    """
+    method = "GET" if method.upper() == "HEAD" else method.upper()
+    path = path.rstrip("/") or "/"
+    if (method, path) == ("GET", "/"):
+        return page
+    return f"{method} {path}" not in UNGATED

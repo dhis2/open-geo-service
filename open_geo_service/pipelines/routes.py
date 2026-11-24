@@ -31,9 +31,9 @@ from open_geo_service.pipelines.schemas import (
     ValidationResult,
 )
 from open_geo_service.shared.api_errors import body_error, error_responses
+from open_geo_service.shared.negotiation import wants_json
 from open_geo_service.shared.time import utc_now
 from open_geo_service.shared.urls import mount_prefix
-from open_geo_service.system.templates import wants_json
 
 router = APIRouter()
 

@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import threading
+import urllib.parse
 from copy import deepcopy
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
+from open_geo_service.auth.tokens import reads_gated
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -46,7 +48,7 @@ from open_geo_service.shared.time import (
     period_type_to_iso_step,
     resolve_iso_period_step,
 )
-from open_geo_service.shared.urls import absolute_url, path_segment, self_url
+from open_geo_service.shared.urls import absolute_base, absolute_url, path_segment, self_url
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
 
 CATALOG_DESCRIPTION = (
@@ -113,6 +115,7 @@ WEB_MAP_LINKS_EXTENSION = "https://stac-extensions.github.io/web-map-links/v1.3.
 PROCESSING_EXTENSION = "https://stac-extensions.github.io/processing/v1.2.0/schema.json"
 FILE_EXTENSION = "https://stac-extensions.github.io/file/v2.1.0/schema.json"
 # The versioned profile URI is Portolan's only conformance signal; it defines no fields of its own.
+AUTHENTICATION_EXTENSION = "https://stac-extensions.github.io/authentication/v1.2.0/schema.json"
 PORTOLAN_SCHEMA = "https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"
 DEFAULT_STAC_LICENSE = "various"
 _UNBOUNDED_TEMPORAL_EXTENT: list[list[datetime | None]] = [[None, None]]
@@ -211,7 +214,7 @@ def build_catalog(request: Request) -> dict[str, object]:
                 "type": "application/json",
             }
         )
-    return {
+    catalog: dict[str, Any] = {
         "stac_version": STAC_VERSION,
         "stac_extensions": [PORTOLAN_SCHEMA],
         "type": "Catalog",
@@ -224,6 +227,7 @@ def build_catalog(request: Request) -> dict[str, object]:
         **({"updated": _stac_datetime(max(a.created_at for a in artifacts.values()))} if artifacts else {}),
         "links": links,
     }
+    return _declare_authentication(catalog, request)
 
 
 def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
@@ -249,10 +253,48 @@ def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, req
     return a newer record after a concurrent refresh, and the document would then mix the two.
     """
     if artifact.format == ArtifactFormat.GEOPARQUET:
-        return _build_feature_collection(dataset_id, artifact, request)
-    if artifact.format == ArtifactFormat.PARQUET:
-        return _build_table_collection(dataset_id, artifact, request)
-    return _build_raster_collection(dataset_id, artifact, request)
+        collection = _build_feature_collection(dataset_id, artifact, request)
+    elif artifact.format == ArtifactFormat.PARQUET:
+        collection = _build_table_collection(dataset_id, artifact, request)
+    else:
+        collection = _build_raster_collection(dataset_id, artifact, request)
+    return _declare_authentication(collection, request)
+
+
+# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
+# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
+_AUTH_SCHEMES: dict[str, dict[str, str]] = {
+    "basic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "An API token's id as the username and its secret as the password.",
+    },
+    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
+}
+
+
+def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
+    """With reads gated, a copy that declares how to sign in, and which links and assets need it.
+
+    Only links and assets on this instance are marked; a source page or licence elsewhere is
+    not. With reads public the document is returned unchanged.
+    """
+    if not reads_gated():
+        return document
+    base = absolute_base(request)
+    refs = sorted(_AUTH_SCHEMES)
+
+    def mark(target: dict[str, Any]) -> dict[str, Any]:
+        href = str(target.get("href", ""))
+        here = href.startswith(f"{base}/") or not urllib.parse.urlsplit(href).scheme
+        return {**target, "auth:refs": refs} if here else target
+
+    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
+    declared["links"] = [mark(link) for link in document.get("links", [])]
+    if "assets" in document:
+        declared["assets"] = {key: mark(asset) for key, asset in document["assets"].items()}
+    return declared
 
 
 def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:

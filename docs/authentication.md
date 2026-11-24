@@ -1,8 +1,8 @@
 # Authentication and authorization
 
-This note records how Open Geo Service authenticates callers and decides what they may do. The first two steps
+This note records how Open Geo Service authenticates callers and decides what they may do. The first three steps
 of the [order of delivery](#order-of-delivery) are in place: named tokens, tiers and the route
-table, and web interface sign-in, configured as described in
+table, web interface sign-in, and optional gating of reads, configured as described in
 [Authentication](instance_guide.md#authentication). The rest is design.
 
 ## The principle
@@ -66,11 +66,22 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment can gate them with an explicit setting, and
-the STAC catalog then advertises the scheme through the STAC Authentication extension so STAC
-Browser can offer a sign-in. Advertising a scheme does not make every reader send the credential.
-Until signed links exist (see [Private data](#private-data)), gating reads can leave the map
-viewer, QGIS and the Zarr, PMTiles and GeoParquet assets linked from STAC unable to load.
+Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+every public route then needs the authenticated tier, except the few a client needs to find out
+how to sign in (openEO discovery, the API reference, `/health`, `/me` and sign-in itself). `GET /`
+is both: openEO capabilities stay public, and the landing page, which lists the catalogue, is
+gated. The table's tiers do not change, so read-only mode, which reads them, still serves reads
+to a token. A signed-out browser asking for a page is sent to sign in and brought back.
+
+The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
+Authentication extension (v1.2.0), and mark the links and assets on this instance with
+`auth:refs`. Basic carries the token id and secret, which QGIS, GDAL and STAC Browser can send;
+the middleware already accepts it on every route. STAC Browser offers a sign-in from its own
+`authConfig`, not from the catalog's schemes, and supports only basic among HTTP schemes, so it is
+deployed with `authConfig` set to http basic. The web interface and its map viewer read with
+the session cookie, since their requests are same-origin. Advertising a scheme does not make
+every reader send the credential: until signed links exist (see [Private data](#private-data)), a
+reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet assets.
 
 ## Where it is enforced
 
