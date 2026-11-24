@@ -33,9 +33,9 @@ Or call `GET /processes` directly and search by keyword. In the [openEO Web Edit
 
 ## Precipitation totals and rates
 
-Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. Two things need a **rate** instead:
+Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. [SPI](#standardized-precipitation-index-spi) takes them as they are. Two things need a **rate** instead:
 
-- **xclim's precipitation indicators** (SPI, SPEI, CDD, CWD and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
+- **xclim's other precipitation indicators** (SPEI's `water_budget`, CDD, CWD and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
 - **Comparisons across periods of different length.** January's total covers 31 days and February's 28 or 29, so a February total looks drier than the same daily rainfall in January. As a rate in mm/d, months compare directly with each other and with daily data.
 
 Convert in the process graph with `amount2rate`, between `load_collection` and whatever needs the rate. In the openEO Python client:
@@ -70,19 +70,21 @@ As a process graph:
 
 ### Why totals
 
-Totals are what users expect, what reporting products and the Climate App use, and how [WMO-No. 1203](https://library.wmo.int/idurl/4/55797) treats precipitation: a sum parameter, where the monthly value is the month's total, the monthly normal is the mean of the monthly totals, and the annual normal is the sum of the monthly normals. One stored copy serves both needs, since rates come from `amount2rate`.
+Totals are what users expect, what reporting products and the Climate App use, and how [WMO-No. 1203](https://www.ncei.noaa.gov/pub/data/normals/WMO/Guidelines%20for%20the%20Calculation%20of%20Climate%20Normals.WMO%20No1203_en.pdf) treats precipitation: a sum parameter, where the monthly value is the month's total and the monthly normal is the mean of the monthly totals. One stored copy serves both needs, since rates come from `amount2rate`.
 
 ### Limitations
 
 - **At least 3 regular time steps.** The length of a step is inferred from the time axis, which needs at least 3 steps with none missing. A shorter or gappy cube is refused; widen `temporal_extent`.
 - **Climatologies are not converted.** A normal has a `dayofyear` or `month` axis rather than dates, so it is refused. A rate normal is about the monthly normal total divided by the days in the month, with February counted as 28.25 days as in WMO-No. 1203.
-- **SPI over several months** (`window` > 1) averages the monthly rates rather than summing the totals, so each month counts equally whatever its length. The result differs slightly from an SPI built on accumulated totals.
+- **SPI from a rate** over several months (`window` > 1) averages the monthly rates rather than summing the totals, so each month counts equally whatever its length. Pass the stored totals to `spi` instead to get the accumulation SPI.
 
 ---
 
 ## Standardized Precipitation Index (SPI)
 
-SPI is the primary drought monitoring index. The `window` parameter selects the accumulation timescale:
+SPI is the primary drought monitoring index. It takes the stored precipitation totals directly, daily or monthly: they are summed to monthly totals, and `window` accumulates those, so SPI-3 is fitted to 3-month totals as [WMO-No. 1090](https://uncclearn.org/resources/library/standardized-precipitation-index-user-guide) defines it. Load whole months, since a partial month at either end sums to too little. A rate, such as the output of `amount2rate`, is accepted too.
+
+The `window` parameter selects the accumulation timescale:
 
 | Process call | Timescale |
 |---|---|
@@ -102,12 +104,11 @@ precip = conn.load_collection(
     "chirps3_precipitation_daily",
     temporal_extent=["2000-01-01", "2023-12-31"],
 )
-rate = precip.process("amount2rate", arguments={"data": precip})
 
-spi3 = rate.process(
+spi3 = precip.process(
     "spi",
     arguments={
-        "pr": rate,
+        "pr": precip,
         "window": 3,
         "freq": "MS",
         "cal_start": "2000-01-01",
@@ -131,14 +132,10 @@ job.start_and_wait()
         "temporal_extent": ["2000-01-01", "2023-12-31"]
       }
     },
-    "rate": {
-      "process_id": "amount2rate",
-      "arguments": { "data": { "from_node": "load" } }
-    },
     "spi": {
       "process_id": "spi",
       "arguments": {
-        "pr": { "from_node": "rate" },
+        "pr": { "from_node": "load" },
         "window": 3,
         "freq": "MS",
         "cal_start": "2000-01-01",
@@ -154,11 +151,11 @@ job.start_and_wait()
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `pr` | datacube | — | Precipitation rate, such as mm/d; convert stored totals with `amount2rate` |
+| `pr` | datacube | — | Precipitation as stored, daily or monthly totals in mm, or a rate such as mm/d |
 | `window` | integer | `1` | Accumulation window in months (1=SPI-1, 3=SPI-3, 6=SPI-6) |
 | `cal_start` | string | start of record | Calibration period start (YYYY-MM-DD) |
 | `cal_end` | string | end of record | Calibration period end (YYYY-MM-DD) |
-| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input |
+| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input. Totals need `"MS"` |
 
 SPI values are standardised: `0` = climatological median, `±1` = moderate anomaly, `±2` = extreme anomaly.
 

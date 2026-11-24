@@ -174,14 +174,18 @@ def test_amount2rate_refuses_a_climatology() -> None:
         amount2rate(normal)
 
 
-def test_spi_of_daily_totals_through_amount2rate_matches_spi_of_rates(daily_precip: xr.DataArray) -> None:
-    totals = _totals(pd.DatetimeIndex(daily_precip.time.values), daily_precip.values)
-    rates = totals.assign_attrs(units="mm/d", standard_name="lwe_precipitation_rate")
+def test_spi_of_totals_is_the_spi_of_accumulated_totals(daily_precip: xr.DataArray) -> None:
+    """SPI-3 is SPI-1 of 3-month totals (WMO-No. 1090), computed here without the wrapper's
+    own monthly sum or xclim's window. In float64, as float32 sums differ in the last digits."""
+    totals = _totals(pd.DatetimeIndex(daily_precip.time.values), daily_precip.values).astype("float64")
+    three_months = totals.resample(t="MS").sum().rolling(t=3).sum()
+    reference = spi(three_months.assign_attrs(units="mm month-1"), window=1)
 
-    with pytest.raises(Exception, match="not compatible"):
-        spi(totals)
-    assert amount2rate(totals).isel(y=0, x=0).values == pytest.approx(totals.isel(y=0, x=0).values)
-    xr.testing.assert_allclose(spi(amount2rate(totals), window=3), spi(rates, window=3), atol=1e-3)
+    xr.testing.assert_allclose(spi(totals, window=3), reference)
+    # A rate, from amount2rate or stored, still goes to xclim as it is.
+    assert spi(amount2rate(totals), window=3).sizes["t"] == 60
+    with pytest.raises(ValueError, match="freq must be 'MS'"):
+        spi(totals, freq="YS")
 
 
 def test_spei_from_precipitation_totals_and_temperature() -> None:
