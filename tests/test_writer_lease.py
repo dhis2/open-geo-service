@@ -20,6 +20,7 @@ from open_geo_service.jobs.models import JobRecord, JobStatus
 from open_geo_service.jobs.service import reset_job_service
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import reset_openeo_job_service
+from open_geo_service.pipelines.store import delete_record as delete_pipeline_record
 from open_geo_service.shared.time import utc_now
 from open_geo_service.tables.store import write_rows
 from open_geo_service.writer_lease import WriterLeaseHeld
@@ -99,6 +100,8 @@ def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
         write_rows(dataset_id="precip_districts", collection_id="districts", rows=[], period_type="monthly")
     with pytest.raises(WriterLeaseHeld, match=refused):
         job_store.upsert_job_record(interrupted_job.model_copy(update={"status": JobStatus.FAILED}))
+    with pytest.raises(WriterLeaseHeld, match=refused):
+        delete_pipeline_record("monthly_export")
 
     monkeypatch.setattr(api_config, "is_read_only", lambda: True)
     with TestClient(app) as client:

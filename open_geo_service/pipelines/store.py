@@ -114,6 +114,7 @@ def save_record(record: PipelineRecord) -> PipelineRecord:
 
 def delete_record(pipeline_id: str) -> bool:
     """Remove a stored pipeline; True when something was removed."""
+    writer_lease.ensure_held()
     target = _path(pipeline_id)
     with index_lock(target):
         try:
