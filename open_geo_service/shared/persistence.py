@@ -12,6 +12,8 @@ from typing import Any
 
 import portalocker
 
+from open_geo_service import writer_lease
+
 # Read once at import: os.umask can only be read by setting it, which is not thread-safe later.
 _UMASK = os.umask(0)
 os.umask(_UMASK)
@@ -19,7 +21,12 @@ os.umask(_UMASK)
 
 @contextmanager
 def index_lock(path: Path) -> Generator[None]:
-    """Lock before opening the index; replacement must not replace the lock inode."""
+    """Lock before opening the index; replacement must not replace the lock inode.
+
+    For writes only. Raises `WriterLeaseHeld` before creating or waiting on the lock when this
+    process may not write to the instance (`writer_lease.py`).
+    """
+    writer_lease.ensure_held()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix(path.suffix + ".lock"), "a", encoding="utf-8") as handle:
         portalocker.lock(handle, portalocker.LOCK_EX)
@@ -35,7 +42,11 @@ class AlreadyLocked(Exception):
 
 @contextmanager
 def try_index_lock(path: Path) -> Generator[None]:
-    """Acquire the index lock without blocking; raise ``AlreadyLocked`` if held."""
+    """Acquire the index lock without blocking; raise ``AlreadyLocked`` if held.
+
+    Checks the writer lease first, as :func:`index_lock` does.
+    """
+    writer_lease.ensure_held()
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = portalocker.Lock(
         path.with_suffix(path.suffix + ".lock"),
@@ -80,8 +91,10 @@ def atomic_json(path: Path, value: Any) -> None:
 def atomic_text(path: Path, text: str) -> None:
     """Replace *path* with *text* whole, so a reader sees the old file or the new one, never part of one.
 
-    Flushes contents and directory entries before returning to the caller.
+    Flushes contents and directory entries before returning to the caller. Raises
+    `WriterLeaseHeld` when this process may not write to the instance (`writer_lease.py`).
     """
+    writer_lease.ensure_held()
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(

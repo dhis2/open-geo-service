@@ -353,10 +353,49 @@ ingestion and sync (the pages leave their forms out), stored process graph write
 schedules, pipelines and export delivery. No token lifts read-only mode.
 
 Read-only applies to HTTP only, so ingestion becomes an operator task on the host. Until a
-CLI command exists, run it inside the container or virtualenv:
+CLI command exists, run it inside the container or virtualenv. The process becomes the
+instance's writer at its first write (see [One writer per instance](#one-writer-per-instance)):
 
 ```python
 from open_geo_service.ingestions.processes import execute_ingestion
 
 execute_ingestion(dataset_id="era5land_temperature_monthly", start="2016-01", end="2016-12")
 ```
+
+### One writer per instance
+
+One process writes to an instance's data folder: ingestion, sync, scheduled runs, pipelines and
+jobs all run in it. This is a permanent rule, not a current limitation. Writes are periodic and
+reads are constant, and reads scale without more writers.
+
+- **The writer** holds the writer lease: a lock on `writer.lock` in the data folder, with who
+  holds it in `writer.json` beside it. The server of an instance without `read_only: true`
+  takes it at startup, and any other process at its first write (a raster store, a feature
+  collection, a table, or a record such as a job). Each keeps it until it exits.
+- **A second writer is refused.** A second server on the same data folder (another replica),
+  a host command such as `migrate_layout`, or a script that writes stops with an error naming
+  the holder, its process id and host. Nothing waits: stop the writer first, or make the
+  second server read-only.
+- **One worker.** Run a writing server with one uvicorn worker. With `--workers 2`, the second
+  worker is refused and uvicorn stops the whole server.
+- **Readers run beside it.** Any number of `read_only: true` servers can serve the same data
+  folder to more users. They take no lease, recover no jobs and refuse every write, so a
+  read-only server never becomes the writer, not even when none is running.
+- **Different datasets are no exception.** Two writers on different datasets are not
+  supported either.
+
+The operating system releases the lock when the writer exits, so a crashed writer never
+blocks the next one. A writer that hangs keeps it until it is stopped.
+
+The lock is only seen by processes that share the data folder's filesystem:
+
+- **Docker Desktop (macOS, Windows):** the server runs in a virtual machine, and a process on
+  the host probably does not see its lock. Run host commands inside the container
+  (`docker compose exec`), not beside it.
+- **Network filesystems:** NFS supports the lock when its lock service runs. SMB, Azure Files
+  and FUSE mounts such as gcsfuse or s3fs may not. Keep the writer's data folder local.
+- **Rolling restarts:** a new writer is refused while the old one runs. On Kubernetes, use the
+  `Recreate` deployment strategy rather than `RollingUpdate`, so the old pod stops first.
+  Docker Compose stops the old container before starting the new one. Versions before the
+  writer lease do not take it, so when upgrading from one, stop the old server before starting
+  the new one.

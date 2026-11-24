@@ -1,7 +1,8 @@
 """Concurrent writers and interrupted replacement must retain committed job state."""
 
-import multiprocessing
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -9,24 +10,27 @@ import pytest
 
 from open_geo_service.jobs import store
 from open_geo_service.jobs.models import JobRecord, JobStatus
+from open_geo_service.openeo import jobs as openeo_jobs
+from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
 from open_geo_service.shared.time import utc_now
 
 
-def _increment(directory: str, ready: Any, start: Any):
-    store.JOBS_DIR = Path(directory)
-    store.JOBS_INDEX_PATH = store.JOBS_DIR / "jobs.json"
-    ready.put(True)
-    start.wait(10)
-    for _ in range(10):
+def _increment(start: threading.Barrier, errors: list[BaseException]):
+    try:
+        start.wait(10)
+        for _ in range(10):
 
-        def mutate(record: JobRecord):
-            time.sleep(0.002)
-            return record.model_copy(update={"request": {"count": record.request["count"] + 1}})
+            def mutate(record: JobRecord):
+                time.sleep(0.002)
+                return record.model_copy(update={"request": {"count": record.request["count"] + 1}})
 
-        store.mutate_job_record("counter", mutate)
+            store.mutate_job_record("counter", mutate)
+    except BaseException as error:
+        errors.append(error)
 
 
-def test_processes_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_writers_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Threads of the one writing process: a second process is refused by the writer lease.
     monkeypatch.setattr(store, "JOBS_DIR", tmp_path)
     monkeypatch.setattr(store, "JOBS_INDEX_PATH", tmp_path / "jobs.json")
     store.create_job_record(
@@ -38,26 +42,34 @@ def test_processes_do_not_lose_updates_across_atomic_replacement(tmp_path: Path,
             request={"count": 0},
         )
     )
-    ctx = multiprocessing.get_context("spawn")
-    ready, start = ctx.Queue(), ctx.Event()
-    workers = [ctx.Process(target=_increment, args=(str(tmp_path), ready, start)) for _ in range(4)]
-    try:
-        for worker in workers:
-            worker.start()
-        for _ in workers:
-            assert ready.get(timeout=20)
-        start.set()
-        for worker in workers:
-            worker.join(20)
-            assert worker.exitcode == 0
-    finally:
-        for worker in workers:
-            if worker.is_alive():
-                worker.terminate()
-                worker.join()
-        ready.close()
+    start = threading.Barrier(4)
+    errors: list[BaseException] = []
+    # Daemon threads, so one that deadlocks fails the test rather than keeping pytest alive.
+    workers = [threading.Thread(target=_increment, args=(start, errors), daemon=True) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(20)
+    assert not any(worker.is_alive() for worker in workers), "a writer hung"
+    assert errors == []
     record = store.get_job_record("counter")
     assert record is not None and record.request["count"] == 40
+
+
+def test_first_openeo_jobs_written_at_once_are_all_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Each finds no index; none may create it over another's record.
+    monkeypatch.setattr(openeo_jobs, "_JOBS_DIR", tmp_path / "openeo_jobs")
+    start = threading.Barrier(8)
+
+    def create(index: int) -> None:
+        start.wait(10)
+        openeo_jobs.store_create_job(
+            OpenEOJobRecord(id=f"job-{index}", status=OpenEOJobStatus.QUEUED, created=utc_now())
+        )
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(create, range(8)))
+    assert sorted(job.id for job in openeo_jobs.store_list_jobs()) == [f"job-{index}" for index in range(8)]
 
 
 def test_failed_replace_preserves_reservations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

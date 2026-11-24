@@ -13,6 +13,7 @@ from starlette.responses import Response
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.auth import routes as auth_routes
 from open_geo_service.auth.middleware import AccessMiddleware
 from open_geo_service.auth.tokens import configured_tokens
@@ -162,6 +163,22 @@ async def _measure_missing_statistics(stop: threading.Event) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    """Take the writer lease, or refuse every write if read-only, then run the services.
+
+    Taken first, so a refused second writer starts nothing, and kept until the process exits:
+    job workers are stopped without waiting and may still be writing after shutdown. A read-only
+    process may run beside the writer on the same data folder, and never becomes the writer.
+    """
+    if api_config.is_read_only():
+        writer_lease.refuse_writes()
+    else:
+        writer_lease.ensure_held("server")
+    async with _services():
+        yield
+
+
+@asynccontextmanager
+async def _services() -> AsyncGenerator[None]:
     """Run lightweight startup recovery hooks for the application lifecycle."""
     from open_geo_service.plugins_diagnostics import log_plugin_loading
     from open_geo_service.shared.compute import install_shared_dask_pool
@@ -204,7 +221,9 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         notification_replay = asyncio.create_task(_replay_notifications_periodically())
         derived_refresh = asyncio.create_task(_refresh_derived_datasets_periodically())
     job_service = get_job_service()
-    job_service.recover_pending_jobs()
+    # Recovery requeues and takes over jobs, which only the writer runs.
+    if not api_config.is_read_only():
+        job_service.recover_pending_jobs()
     openeo_service = get_openeo_job_service()
     from open_geo_service.jobs import dispatch
     from open_geo_service.pipelines import runner as pipeline_runner
@@ -224,12 +243,13 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         derivations.on_job_finished(record)
 
     openeo_service.set_finished_listener(_job_finished)
-    openeo_service.recover_pending_jobs()
-    try:
-        # A job whose last attempt failed after its commit still owes that publication's event.
-        openeo_service.reconcile_publications()
-    except Exception:
-        logger.exception("openEO publication reconciliation failed; continuing startup")
+    if not api_config.is_read_only():
+        openeo_service.recover_pending_jobs()
+        try:
+            # A job whose last attempt failed after its commit still owes that publication's event.
+            openeo_service.reconcile_publications()
+        except Exception:
+            logger.exception("openEO publication reconciliation failed; continuing startup")
     try:
         pipeline_runner.reconcile()
     except Exception:
