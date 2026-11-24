@@ -767,6 +767,8 @@ def test_a_period_ends_on_its_last_day(period_type: str | None, start: date, end
         ({"name": "written_at", "type": "timestamp"}, "declares 'written_at'"),
         ({"name": "lead", "type": "duration"}, "column 'lead' has type 'duration'"),
         ({"name": "ratio", "type": "double", "unit": 1}, "column 'ratio' has unit 1, which is not text; quote it"),
+        ({"name": "ratio", "type": "double", "required": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
+        ({"name": "ratio", "type": "double", "nullable": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
         (
             {"name": "day", "type": "date", "represents": "period_start"},
             "'day' represents period_start, so it must be required and not nullable",

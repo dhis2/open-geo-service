@@ -305,6 +305,9 @@ def _column(declared: object, where: str) -> Column:
     unit = declared.get("unit")
     if unit is not None and not isinstance(unit, str):
         raise ValueError(f"{where}: column '{name}' has unit {unit!r}, which is not text; quote it")
+    required, nullable = declared.get("required", False), declared.get("nullable", True)
+    if not isinstance(required, bool) or not isinstance(nullable, bool):
+        raise ValueError(f"{where}: column '{name}' has a 'required' or 'nullable' that is not true or false")
     represents = declared.get("represents")
     if represents is None and (name in _REPRESENTED_ONCE or name == "value"):
         represents = name
@@ -313,7 +316,7 @@ def _column(declared: object, where: str) -> Column:
         type=kind,
         description=str(declared.get("description", "")),
         unit=unit,
-        required=bool(declared.get("required", False)),
-        nullable=bool(declared.get("nullable", True)),
+        required=required,
+        nullable=nullable,
         represents=str(represents) if represents is not None else None,
     )
