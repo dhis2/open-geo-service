@@ -8,6 +8,7 @@ import xarray as xr
 
 from open_geo_service.plugins.rasters.worldpop import (
     WorldPopYearlyPlugin,
+    _mosaic_url,
     _population_url,
     _resolve_variant,
     _worldpop_cache_dir,
@@ -64,6 +65,13 @@ def test_population_url_100m_and_1km_and_constrained_flavours() -> None:
     with pytest.raises(ValueError, match="Unsupported WorldPop resolution"):
         _population_url(2022, "SLE", "R2025A", "250m", True)
 
+    # the global mosaic: one file per year, 1 km constrained only
+    assert _mosaic_url(2022, "R2025A").endswith(
+        "/R2025A/2022/0_Mosaicked/v1/1km/constrained/global_pop_2022_CN_1km_R2025A_v1.tif"
+    )
+    with pytest.raises(ValueError, match="only as the 1km constrained mosaic"):
+        WorldPopYearlyPlugin(coverage="global", resolution="100m")
+
 
 def test_worldpop_plugin_fetch_period_reads_country_url(monkeypatch: pytest.MonkeyPatch) -> None:
     plugin = WorldPopYearlyPlugin(version="global2")
@@ -79,6 +87,25 @@ def test_worldpop_plugin_fetch_period_reads_country_url(monkeypatch: pytest.Monk
 
     assert "/2022/SLE/" in str(captured["url"])
     assert list(dataset.data_vars) == ["pop_total"]
+
+
+def test_worldpop_global_coverage_reads_mosaic_clipped_to_bbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = WorldPopYearlyPlugin(resolution="1km", coverage="global")
+    captured: dict[str, object] = {}
+
+    def fake_open(url: str, **_: object) -> xr.DataArray:
+        captured["url"] = url
+        return _fake_geotiff([[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]])
+
+    monkeypatch.setattr("open_geo_service.plugins.rasters.worldpop._open_worldpop_raster", fake_open)
+
+    # No country_code: the extent may span several countries.
+    dataset = plugin.fetch_period("2022", [0.5, 1.5, 2.5, 3.5])
+
+    assert "/2022/0_Mosaicked/" in str(captured["url"])
+    assert list(dataset["x"].values) == [1, 2]
+    assert list(dataset["y"].values) == [3, 2]
+    assert sorted(dataset["pop_total"].values.flatten().tolist()) == [2.0, 3.0, 6.0, 7.0]
 
 
 def test_worldpop_cache_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

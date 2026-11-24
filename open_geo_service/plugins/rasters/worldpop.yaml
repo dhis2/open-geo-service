@@ -46,6 +46,50 @@
     colormap: reds
     range: [0, p98]
 
+- id: worldpop_population_global2_1km
+  name: Total population (WorldPop Global2, 1km)
+  short_name: Total population
+  description: >-
+    Modelled number of people living in each 1 km grid cell, worldwide. Yearly estimates and
+    projections for 2015-2030 from the WorldPop Global2 R2025A release, read from the global
+    mosaic and clipped to the extent, so the extent needs no country_code and may span
+    several countries.
+  variable: pop_total
+  period_type: yearly
+  temporal_direction: spanning
+  sync:
+    kind: release
+    version:
+      value: R2025A
+      authority: worldpop
+  extents:
+    spatial:
+      bbox: [-180, -90, 180, 90]
+    temporal:
+      begin: "2015"
+      end: "2030"
+      resolution: P1Y
+  ingestion:
+    plugin: open_geo_service.plugins.rasters.worldpop.WorldPopYearlyPlugin
+    params:
+      version: global2
+      revision: R2025A
+      resolution: 1km
+      coverage: global
+      product: total
+      variable: pop_total
+  units: people
+  resolution: 1km x 1km
+  source: WorldPop Global2
+  source_url: https://hub.worldpop.org/project/categories?id=3
+  license: CC-BY-4.0
+  providers:
+    - name: WorldPop, University of Southampton
+      url: https://hub.worldpop.org/
+  display:
+    colormap: reds
+    range: [0, p98]
+
 - id: worldpop_population_change
   name: Population change (WorldPop Global2)
   short_name: Population change

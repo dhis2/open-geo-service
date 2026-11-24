@@ -125,7 +125,7 @@ name: Rwanda Geo Service           # display name shown in the web UI
 extent:
   name: Rwanda
   bbox: [28.8, -2.9, 30.9, -1.0]    # [xmin, ymin, xmax, ymax] in WGS84
-  country_code: RWA                   # ISO 3166-1 alpha-3, required for WorldPop
+  country_code: RWA                   # ISO 3166-1 alpha-3, required for WorldPop 100 m
 
 data_dir: ./data
 plugins_dir: ./plugins/
@@ -137,7 +137,7 @@ plugins_dir: ./plugins/
 | `name` | No | Display name shown in the web UI. Defaults to `Open Geo Service` |
 | `extent.bbox` | Yes | Bounding box in WGS84 decimal degrees |
 | `extent.name` | No | Human-readable label shown in API responses |
-| `extent.country_code` | No | ISO 3166-1 alpha-3 — required for WorldPop downloads |
+| `extent.country_code` | No | ISO 3166-1 alpha-3 — required for WorldPop 100 m (per country); the 1 km dataset clips the global mosaic instead |
 | `data_dir` | Yes | Directory for downloaded files and Zarr stores, resolved relative to the config file |
 | `plugins_dir` | No | Directory containing `rasters/`, `vectors/`, `processes/` and `workflows/` plugin subdirectories |
 | `read_only` | No | Set `true` to refuse all state-changing requests — see [Read-only instances](#read-only-instances). Defaults to `false` |

@@ -106,6 +106,26 @@ WorldPop Global2 provides gridded population estimates and projections at 100 m 
 
 **Transforms** — none applied; values are stored as received (population counts per pixel).
 
+**Extent** — needs the instance's `extent.country_code`: WorldPop publishes 100 m per country. For an extent that spans several countries, use the 1 km dataset below.
+
+---
+
+## WorldPop Global2 — total population, 1 km (yearly)
+
+| Property               | Value                                                                |
+| ---------------------- | -------------------------------------------------------------------- |
+| **Dataset ID**         | `worldpop_population_global2_1km`                                    |
+| **Variable**           | `pop_total`                                                          |
+| **Units**              | people                                                               |
+| **Period**             | Yearly                                                               |
+| **Spatial coverage**   | Global                                                               |
+| **Spatial resolution** | ~1 km                                                                |
+| **Record start**       | 2015                                                                 |
+| **Record end**         | 2030                                                                 |
+| **Source**             | [WorldPop Global2](https://hub.worldpop.org/project/categories?id=3) |
+
+The same population counts as above at 1 km, read from WorldPop's global mosaic and clipped to the instance's bbox. It needs no `country_code`, so it suits an extent covering a region of several countries. Each year's mosaic (~290 MB) is downloaded whole to the WorldPop cache under `data_dir`, as the hub does not serve partial reads. Sync and transforms are as for the 100 m dataset.
+
 ---
 
 ## ESA CCI / C3S — land cover class (yearly)

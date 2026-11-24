@@ -47,7 +47,7 @@ name: Rwanda Geo Service
 extent:
   name: Rwanda
   bbox: [28.8, -2.9, 30.9, -1.0]    # [xmin, ymin, xmax, ymax] in WGS84
-  country_code: RWA                   # ISO 3166-1 alpha-3, required for WorldPop
+  country_code: RWA                   # ISO 3166-1 alpha-3, required for WorldPop 100 m
 
 data_dir: ./data
 ```

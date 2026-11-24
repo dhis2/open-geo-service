@@ -10,15 +10,17 @@ Two plugins, both Global2 under stable dataset ids with the hub revision tracked
 release metadata (currently ``R2025A``):
 
 - ``WorldPopYearlyPlugin`` — population counts (hub category id=3), shaped to
-  ``(t, y, x)`` via ``normalize_period``. The URL builder also knows the 1 km
-  (``1km_ua``) and unconstrained layouts, but only the 100 m constrained template
-  ships today.
+  ``(t, y, x)`` via ``normalize_period``. Per country (100 m, needs the extent's
+  ``country_code``), or from the global 1 km mosaic clipped to the extent's bbox, for
+  extents that span several countries. The URL builder also knows the per-country
+  1 km (``1km_ua``) and unconstrained layouts.
 - ``WorldPopAgeSexYearlyPlugin`` — age/sex structures (hub category id=8): ~40
   per-(sex, age) rasters per country-year, combined into one ``population`` cube over
   ``sex`` and ``age_group`` dimensions (built directly, not via ``normalize_period``),
   100 m per-country only.
 
-Global 1 km mosaics are not yet supported (they are not COGs).
+The global mosaic is not a COG and the hub ignores Range requests, so each year's
+file (~290 MB) is downloaded whole to the cache, like the per-country files.
 """
 
 from __future__ import annotations
@@ -155,7 +157,10 @@ class WorldPopYearlyPlugin(BaseDatasetPlugin):
         version: WorldPop release variant. Only ``global2`` (2015–2030) is supported.
         revision: Hub revision tag, e.g. ``R2025A``.
         resolution: ``100m`` (per-country constrained) or ``1km`` (per-country
-            ``1km_ua``).
+            ``1km_ua``, or the global mosaic).
+        coverage: ``country`` (default) reads the extent's country, so the extent needs
+            ``country_code``. ``global`` reads the global 1 km constrained mosaic and
+            clips it to the extent's bbox, so it works for any extent.
         constrained: Use the constrained (settlement-masked) product. Defaults to
             ``True``; ``False`` selects the unconstrained product.
         product: WorldPop product selector. Currently only ``total`` (population
@@ -175,32 +180,42 @@ class WorldPopYearlyPlugin(BaseDatasetPlugin):
         constrained: bool = True,
         product: str = "total",
         variable: str = "pop_total",
+        coverage: str = "country",
         **_: object,
     ) -> None:
         if version != "global2":
             raise ValueError(f"Unsupported WorldPop version '{version}'; only 'global2' is supported")
+        if coverage not in ("country", "global"):
+            raise ValueError(f"Unsupported WorldPop coverage '{coverage}'; expected 'country' or 'global'")
+        if coverage == "global" and (resolution != "1km" or not constrained):
+            raise ValueError("WorldPop coverage 'global' is published only as the 1km constrained mosaic")
         self.version = version
         self.revision = revision
         self.resolution = resolution
         self.constrained = constrained
+        self.coverage = coverage
         self.variant = _resolve_variant(product=product, variable=variable)
 
     async def periods(self, start: str, end: str) -> list[str]:
         return _global2_years(start, end)
 
     def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
-        """Read one year's country GeoTIFF straight from the WorldPop hub.
+        """Read one year's GeoTIFF: the country's, or the global mosaic clipped to ``bbox``.
 
         A regular (blocking) method — the framework runs it in a worker thread.
         """
-        url = _population_url(
-            int(period_id), _required_country_code(params), self.revision, self.resolution, self.constrained
-        )
-        da = _open_worldpop_raster(url, chunks="auto")
+        if self.coverage == "global":
+            da = _open_worldpop_raster(_mosaic_url(int(period_id), self.revision), chunks="auto")
+            da = da.rio.clip_box(*bbox)
+        else:
+            # No bbox clip: WorldPop publishes one GeoTIFF per country, so we ingest the
+            # whole country rather than crop it to the instance extent.
+            url = _population_url(
+                int(period_id), _required_country_code(params), self.revision, self.resolution, self.constrained
+            )
+            da = _open_worldpop_raster(url, chunks="auto")
         # Mask the WorldPop sentinel (-99999) so the Zarr store uses NaN as the fill
-        # value for unpopulated / ocean cells. No bbox clip: WorldPop publishes one
-        # GeoTIFF per country, so we ingest the whole country rather than crop it to
-        # the instance extent.
+        # value for unpopulated / ocean cells.
         return normalize_period(da, variable=self.variant.output_variable, period=period_id, nodata=_WORLDPOP_NODATA)
 
 
@@ -290,6 +305,18 @@ def _population_url(year: int, country_code: str, revision: str, resolution: str
     if resolution == "1km":
         return f"{base}/1km_ua/{sub}/{cc_lower}_pop_{year}_{cn}_1km_{revision}_UA_v1.tif"
     raise ValueError(f"Unsupported WorldPop resolution '{resolution}'; expected '100m' or '1km'")
+
+
+def _mosaic_url(year: int, revision: str) -> str:
+    """Build the URL of the global 1 km constrained population mosaic for one year.
+
+    Verified Global2 layout (``data.worldpop.org/GIS/Population/Global_2015_2030``):
+    ``{rev}/{year}/0_Mosaicked/v1/1km/constrained/global_pop_{year}_CN_1km_{rev}_v1.tif``
+    """
+    return (
+        f"{_HUB}/Population/Global_2015_2030/{revision}/{year}/0_Mosaicked/v1/1km/constrained/"
+        f"global_pop_{year}_CN_1km_{revision}_v1.tif"
+    )
 
 
 def _agesex_url(year: int, country_code: str, revision: str, sex: str, age: str, constrained: bool) -> str:
