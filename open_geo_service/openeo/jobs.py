@@ -14,10 +14,9 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-import portalocker
 from fastapi import HTTPException
 
-from open_geo_service import __version__, writer_lease
+from open_geo_service import __version__
 from open_geo_service import config as api_config
 from open_geo_service.auth.tokens import Principal, Tier, owner_principal
 from open_geo_service.exports.retention import result_lease
@@ -72,7 +71,7 @@ from open_geo_service.shared.compute import get_job_slots, max_concurrent_jobs
 from open_geo_service.shared.display import display_midpoint, display_range, range_spec
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.netcdf import write_netcdf
-from open_geo_service.shared.persistence import atomic_json, execution_lease
+from open_geo_service.shared.persistence import atomic_json, execution_lease, index_lock
 from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
@@ -107,49 +106,33 @@ def _jobs_index() -> Path:
     """Return the openEO jobs index path, derived from ``_JOBS_DIR`` at call time.
 
     Derived at call time rather than import time so a test that monkeypatches ``_JOBS_DIR``
-    isolates the whole store. The previous module-level constant froze ``jobs.json`` at import;
-    ``_ensure_store`` then mkdir'd the patched ``tmp_path`` while ``write_text`` still targeted
-    the real XDG path, whose parent does not exist on a fresh runner (CLIM-849 CI failure).
+    isolates the whole store.
     """
     return _JOBS_DIR / "jobs.json"
 
 
-def _ensure_store() -> None:
-    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    if not _jobs_index().exists():
-        atomic_json(_jobs_index(), [])
-
-
 def _load_raw_records() -> list[dict[str, object]]:
-    if not _jobs_index().exists():
-        return []  # a read never creates the index
-    with open(_jobs_index(), encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_SH)
-        try:
+    """The stored records; none before the first write.
+
+    No lock: the index is replaced whole, and taking the lock would create files a read-only
+    server may not write.
+    """
+    try:
+        with open(_jobs_index(), encoding="utf-8") as fh:
             payload = json.load(fh)
-        finally:
-            portalocker.unlock(fh)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("openeo jobs.json must contain a list")
     return payload
 
 
 def _mutate_store(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
-    writer_lease.ensure_held()
-    _ensure_store()
-    with open(_jobs_index(), "r+", encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_EX)
-        try:
-            payload = json.load(fh)
-            records: list[dict[str, object]] = payload if isinstance(payload, list) else []
-            result = mutation(records)
-            fh.seek(0)
-            json.dump(records, fh, indent=2, default=str)
-            fh.write("\n")
-            fh.truncate()
-            return result
-        finally:
-            portalocker.unlock(fh)
+    with index_lock(_jobs_index()):
+        records = _load_raw_records()
+        result = mutation(records)
+        atomic_json(_jobs_index(), records)
+        return result
 
 
 def store_list_jobs() -> list[OpenEOJobRecord]:

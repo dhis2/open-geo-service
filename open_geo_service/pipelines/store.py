@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TypeVar
 
 from open_geo_service import config as api_config
-from open_geo_service import writer_lease
 from open_geo_service.pipelines.schemas import EventCheckpoint, PipelineRecord, PipelineSpec, ValidationResult
 from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.time import utc_now
@@ -62,7 +61,6 @@ def get_record(pipeline_id: str) -> PipelineRecord | None:
 
 def _write_record(record: PipelineRecord, target: Path) -> None:
     """Write atomically while the caller holds the record's lock."""
-    writer_lease.ensure_held()
     with tempfile.NamedTemporaryFile(
         "w", dir=target.parent, prefix=".pipeline-", encoding="utf-8", delete=False
     ) as handle:
@@ -114,7 +112,6 @@ def save_record(record: PipelineRecord) -> PipelineRecord:
 
 def delete_record(pipeline_id: str) -> bool:
     """Remove a stored pipeline; True when something was removed."""
-    writer_lease.ensure_held()
     target = _path(pipeline_id)
     with index_lock(target):
         try:

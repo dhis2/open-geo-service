@@ -132,6 +132,24 @@ def _release(data_root: Path) -> None:
             lock.release()
 
 
+def _forget_after_fork() -> None:
+    """Start a forked child with no lease, so it is refused while its parent holds one.
+
+    The child inherits the parent's locked file and `_held`. Only the child's copy of the file
+    is closed: unlocking it would release the lock the two share, and with it the parent's lease.
+    """
+    global _held_mutex
+    _held_mutex = threading.Lock()  # another thread may have held it at the fork
+    for lock in _held.values():
+        if lock.fh is not None:
+            lock.fh.close()
+    _held.clear()
+
+
+if hasattr(os, "register_at_fork"):  # not on Windows, which has no fork
+    os.register_at_fork(after_in_child=_forget_after_fork)
+
+
 def _refusal(data_root: Path) -> str:
     try:
         holder = json.loads((data_root / HOLDER_NAME).read_text(encoding="utf-8"))

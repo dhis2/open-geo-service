@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Generator
@@ -58,6 +59,8 @@ def _live_job_services() -> Generator[None]:
     reset_openeo_job_service()
 
 
+# The server runs threads; the forked child only checks the lease.
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded, use of fork:DeprecationWarning")
 def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subprocess.Popen[str]) -> None:
     with pytest.raises(WriterLeaseHeld, match=rf"server \(pid {other_writer.pid} on .+\) is already writing"):
         with TestClient(app):
@@ -67,6 +70,15 @@ def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subproce
     other_writer.wait()
     with TestClient(app) as client:
         assert client.get("/info").status_code == 200
+        if hasattr(os, "fork"):
+            child = os.fork()
+            if child == 0:  # inherits the locked file, but is not the writer
+                try:
+                    writer_lease.ensure_held()
+                except WriterLeaseHeld:
+                    os._exit(0)
+                os._exit(1)
+            assert os.waitpid(child, 0)[1] == 0, "a forked child was let write beside its parent"
 
     # Kept after shutdown, while job workers stopped without waiting may still write.
     takeover = subprocess.run(

@@ -2,6 +2,7 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,8 @@ import pytest
 
 from open_geo_service.jobs import store
 from open_geo_service.jobs.models import JobRecord, JobStatus
+from open_geo_service.openeo import jobs as openeo_jobs
+from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
 from open_geo_service.shared.time import utc_now
 
 
@@ -51,6 +54,22 @@ def test_writers_do_not_lose_updates_across_atomic_replacement(tmp_path: Path, m
     assert errors == []
     record = store.get_job_record("counter")
     assert record is not None and record.request["count"] == 40
+
+
+def test_first_openeo_jobs_written_at_once_are_all_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Each finds no index; none may create it over another's record.
+    monkeypatch.setattr(openeo_jobs, "_JOBS_DIR", tmp_path / "openeo_jobs")
+    start = threading.Barrier(8)
+
+    def create(index: int) -> None:
+        start.wait(10)
+        openeo_jobs.store_create_job(
+            OpenEOJobRecord(id=f"job-{index}", status=OpenEOJobStatus.QUEUED, created=utc_now())
+        )
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(create, range(8)))
+    assert sorted(job.id for job in openeo_jobs.store_list_jobs()) == [f"job-{index}" for index in range(8)]
 
 
 def test_failed_replace_preserves_reservations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

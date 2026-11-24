@@ -9,13 +9,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
-import portalocker
-
 from open_geo_service import config as api_config
-from open_geo_service import writer_lease
 from open_geo_service.auth.tokens import Principal, Tier
 from open_geo_service.openeo.schemas import WorkflowListResponse, WorkflowRecord
-from open_geo_service.shared.persistence import atomic_json
+from open_geo_service.shared.persistence import atomic_json, index_lock
 
 _T = TypeVar("_T")
 
@@ -28,12 +25,6 @@ def _resolve_workflow_dir() -> Path:
 
 WORKFLOW_DIR = _resolve_workflow_dir()
 WORKFLOW_INDEX_PATH = WORKFLOW_DIR / "process_graphs.json"
-
-
-def _ensure_store() -> None:
-    WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
-    if not WORKFLOW_INDEX_PATH.exists():
-        atomic_json(WORKFLOW_INDEX_PATH, [])
 
 
 class WorkflowAccessError(Exception):
@@ -149,18 +140,16 @@ def delete_workflow(process_graph_id: str, by: Principal) -> bool:
 
 
 def _load_records() -> list[dict[str, object]]:
-    if not WORKFLOW_INDEX_PATH.exists():
-        return []  # a read never creates the index
-    return _read_records_from_disk()
+    """The stored records; none before the first write.
 
-
-def _read_records_from_disk() -> list[dict[str, object]]:
-    with open(WORKFLOW_INDEX_PATH, encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_SH)
-        try:
+    No lock: the index is replaced whole, and taking the lock would create files a read-only
+    server may not write.
+    """
+    try:
+        with open(WORKFLOW_INDEX_PATH, encoding="utf-8") as handle:
             payload = json.load(handle)
-        finally:
-            portalocker.unlock(handle)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("process_graphs.json must contain a list")
     return payload
@@ -233,21 +222,11 @@ def _load_entry_point_workflows() -> list[dict[str, object]]:
 
 
 def _mutate_records(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
-    writer_lease.ensure_held()
-    _ensure_store()
-    with open(WORKFLOW_INDEX_PATH, "r+", encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_EX)
-        try:
-            payload = json.load(handle)
-            records: list[dict[str, object]] = payload if isinstance(payload, list) else []
-            result = mutation(records)
-            handle.seek(0)
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-            handle.truncate()
-            return result
-        finally:
-            portalocker.unlock(handle)
+    with index_lock(WORKFLOW_INDEX_PATH):
+        records = _load_records()
+        result = mutation(records)
+        atomic_json(WORKFLOW_INDEX_PATH, records)
+        return result
 
 
 # --- freezing a graph against the registry ---------------------------------------------------
