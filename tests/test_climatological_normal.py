@@ -58,22 +58,28 @@ def test_climatological_normal_monthly_reduces_time_to_month() -> None:
 
 
 @pytest.mark.parametrize(
-    ("cube", "frequency", "declared"),
+    ("cell_methods", "declared", "frequency", "refused"),
     [
-        # A monthly normal of daily totals would average them into a daily rate.
-        (_daily_cube(), "month", None),
-        (_daily_cube(), "month", "daily"),
-        (_daily_cube().resample(t="MS").sum(), "dayofyear", None),
-        # The template's declared period type wins over the spacing of the axis.
-        (_daily_cube(), "dayofyear", "monthly"),
+        # Totals over periods shorter than the normal's would average into a per-day amount.
+        ("time: sum", None, "month", True),
+        ("time: sum", "dekadal", "month", True),  # the declared period type wins over the axis
+        ("time: sum", None, "dayofyear", False),
+        # A quantity averaged over time, such as temperature or NDVI, is a mean of means.
+        ("time: mean", None, "month", False),
+        (None, "dekadal", "month", False),
     ],
 )
-def test_climatological_normal_requires_the_frequency_of_the_data(
-    cube: xr.DataArray, frequency: str, declared: str | None
+def test_climatological_normal_refuses_only_totals_shorter_than_its_period(
+    cell_methods: str | None, declared: str | None, frequency: str, refused: bool
 ) -> None:
-    stamp_cadence(cube, declared)
-    with pytest.raises(ValueError, match="normal is computed from"):
-        climatological_normal(cube, frequency=frequency)
+    cube = stamp_cadence(_daily_cube(), declared)
+    if cell_methods:
+        cube.attrs["cell_methods"] = cell_methods
+    if refused:
+        with pytest.raises(ValueError, match="compute it from a"):
+            climatological_normal(cube, frequency=frequency, smoothing_window=0)
+    else:
+        assert climatological_normal(cube, frequency=frequency, smoothing_window=0).sizes[frequency] > 0
 
 
 def test_climatological_normal_rejects_unknown_frequency() -> None:

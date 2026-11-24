@@ -21,8 +21,9 @@ from open_geo_service.shared.time import cadence_of, infer_cadence
 from open_geo_service.transforms.climatology import circular_rolling_mean
 
 _FREQUENCIES = ("dayofyear", "month")
-# The dataset period type each frequency is computed from.
-_REQUIRED_CADENCE = {"dayofyear": "daily", "month": "monthly"}
+# The period each frequency averages, and the dataset period types shorter than it.
+_PERIOD = {"dayofyear": "daily", "month": "monthly"}
+_SHORTER = {"dayofyear": {"hourly"}, "month": {"hourly", "daily", "weekly", "dekadal"}}
 
 
 @process(
@@ -63,14 +64,15 @@ def climatological_normal(data: xr.DataArray, frequency: str = "dayofyear", smoo
     if t_dim is None:
         raise ValueError("climatological_normal requires a datetime temporal dimension on the input cube")
     t_dim = str(t_dim)
-    # WMO-No. 1203 computes a normal from values at its own resolution. A monthly normal of daily
-    # precipitation totals would average them into a daily rate, wrong by a factor of about 30.
-    required = _REQUIRED_CADENCE[frequency]
+    # A quantity that adds up over time (CF `time: sum`, a WMO "sum parameter") has to be summed
+    # to the normal's period before it is averaged: the mean of daily precipitation totals is a
+    # daily amount, not a monthly one. A quantity averaged over time needs no such step.
     cadence = cadence_of(data) or infer_cadence(data[t_dim].values)
-    if cadence != required:
+    if "time: sum" in str(data.attrs.get("cell_methods", "")) and cadence in _SHORTER[frequency]:
+        period = _PERIOD[frequency]
         raise ValueError(
-            f"a {frequency} normal is computed from {required} data, but this cube is "
-            f"{cadence or 'of unknown cadence'}; load the {required} dataset instead"
+            f"the cube holds {cadence} totals (cell_methods 'time: sum'), and a {frequency} normal "
+            f"of a total is the mean of {period} totals; compute it from a {period} dataset"
         )
 
     # earthkit reduces the temporal axis to the day-of-year (1..366) or month (1..12) mean,

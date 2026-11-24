@@ -195,7 +195,7 @@ When the job finishes, the new change dataset appears under `/datasets` and on t
 
 `climate_normal` computes a **climatological normal** — a WMO-style multi-year average of a variable for each **day-of-year** (1–366) or **month** (1–12) over a reference period (e.g. 1991–2020) — and publishes it as a new managed dataset. Use it to derive a "what's typical" baseline from a collection you have already ingested for the reference period; the anomaly workflow below then compares observations against it.
 
-The `frequency` must match the dataset's period type: `dayofyear` for a daily dataset and `month` for a monthly one, as WMO-No. 1203 computes a normal from values at its own resolution. A monthly precipitation normal is then the mean of monthly totals. Any other pairing is refused; a monthly normal from daily precipitation, for one, would average daily totals into a daily rate.
+A variable that adds up over time, declared with `cell_methods: "time: sum"` (precipitation, for one), is a sum parameter in WMO-No. 1203: its monthly normal is the mean of monthly totals. Compute it from a dataset at the normal's period, a monthly one for `frequency: month`. On daily or dekadal totals it is refused, since averaging them gives a per-day or per-dekad amount rather than a monthly one. A variable averaged over time, such as temperature or NDVI, has no such limit: its monthly normal from daily data is the mean of the daily values.
 
 ### Parameters
 
