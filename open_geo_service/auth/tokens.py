@@ -107,14 +107,23 @@ def reads_gated() -> bool:
 def configured_tokens() -> tuple[NamedToken, ...]:
     """The named tokens, read from config and the environment; empty when authentication is off.
 
-    Raises ValueError on an invalid block, an unset variable, a secret shorter than
-    MIN_SECRET_LENGTH, or a repeated id or secret, so startup refuses a configuration that would
-    leave a client unable to authenticate or two clients indistinguishable. Also raises when
-    `gate_reads` is set without a token, which would leave reads open while seeming private.
+    Raises as :func:`access_settings` does.
+    """
+    return access_settings()[0]
+
+
+def access_settings() -> tuple[tuple[NamedToken, ...], bool]:
+    """The named tokens and whether reads are gated, from one read of the `authentication` block.
+
+    For the middleware, which needs both on every request. Raises ValueError on an invalid block,
+    an unset variable, a secret shorter than MIN_SECRET_LENGTH, or a repeated id or secret, so
+    startup refuses a configuration that would leave a client unable to authenticate or two
+    clients indistinguishable. Also raises when `gate_reads` is set without a token, which would
+    leave reads open while seeming private.
     """
     settings = _settings()
     if settings is None:
-        return ()
+        return (), False
     if settings.gate_reads and not settings.tokens:
         raise ValueError("authentication.gate_reads needs at least one token in authentication.tokens")
     tokens: list[NamedToken] = []
@@ -130,7 +139,7 @@ def configured_tokens() -> tuple[NamedToken, ...]:
         if any(hmac.compare_digest(token.secret, secret) for token in tokens):
             raise ValueError(f"{where}: the secret in {item.token_env} is used by an earlier token")
         tokens.append(NamedToken(id=item.id, tier=Tier[item.tier.upper()], secret=secret))
-    return tuple(tokens)
+    return tuple(tokens), settings.gate_reads
 
 
 def owner_principal(owner: str | None) -> Principal | None:

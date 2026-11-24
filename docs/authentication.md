@@ -68,10 +68,14 @@ openEO Web Editor today.
 
 Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
 every public route then needs the authenticated tier, except the few a client needs to find out
-how to sign in (openEO discovery, the API reference, `/health`, `/me` and sign-in itself). `GET /`
-is both: openEO capabilities stay public, and the landing page, which lists the catalogue, is
-gated. The table's tiers do not change, so read-only mode, which reads them, still serves reads
-to a token. A signed-out browser asking for a page is sent to sign in and brought back.
+how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
+sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
+lists the catalogue, is gated. The table's tiers do not change, so read-only mode, which reads
+them, still serves reads to a token. Responses are marked `Cache-Control: private`, so a caching
+proxy in front does not serve one caller's answer to another.
+
+Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
+sign in and brought back, rather than shown the JSON refusal a client gets.
 
 The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
 Authentication extension (v1.2.0), and mark the links and assets on this instance with

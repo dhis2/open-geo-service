@@ -491,6 +491,7 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     cookie = _session(client, CLIENT_SECRET)
     assert client.get("/datasets", headers={**cookie, **HTML}).status_code == 200
     assert client.get("/zarr/abc/zarr.json", headers=cookie).status_code not in (401, 403)
+    assert client.get("/datasets", headers=cookie).headers["cache-control"] == "private"
 
     # Read-only refuses writes by the table's tiers, so gated reads still answer a token.
     monkeypatch.setitem(api_config._cache or {}, "read_only", True)
@@ -520,11 +521,6 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     assert not any("auth:refs" in link for link in collection["links"][:2])
     assert "auth:refs" not in raster["assets"]["zarr"]
 
-    # Gating with no token to read with would leave reads open while seeming private.
-    _configure(monkeypatch, [], gate_reads=True)
-    with pytest.raises(ValueError, match="gate_reads needs at least one token"):
-        configured_tokens()
-
 
 # --- configuration -----------------------------------------------------------------------
 
@@ -549,6 +545,8 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
             ],
             "secret in GEOSERVICE_TEST_SAME is used by an earlier token",
         ),
+        # With gate_reads (set when no token is given), which would leave reads open while seeming private.
+        ([], "gate_reads needs at least one token"),
     ],
 )
 def test_an_unusable_token_refuses_startup(
@@ -559,7 +557,7 @@ def test_an_unusable_token_refuses_startup(
     monkeypatch.setenv("GEOSERVICE_TEST_SHORT", "short")
     monkeypatch.setenv("GEOSERVICE_TEST_SAME", OPERATOR_SECRET)
     monkeypatch.delenv("GEOSERVICE_TEST_UNSET", raising=False)
-    _configure(monkeypatch, tokens)
+    _configure(monkeypatch, tokens, gate_reads=not tokens)
 
     with pytest.raises(ValueError, match=error) as raised:
         configured_tokens()

@@ -346,8 +346,9 @@ reference, `/health` and `/me`. The STAC catalog and collections declare `basic`
 schemes with the STAC Authentication extension. A client may send `Basic` with the token id as
 the username and the secret as the password, which is what QGIS, GDAL (`GDAL_HTTP_USERPWD`) and
 STAC Browser can send; deploy STAC Browser with `authConfig: {type: "http", scheme: "basic"}`,
-since it does not offer a sign-in from the catalog's schemes. Open Geo Service refuses to start
-with `gate_reads` and no token.
+since it does not offer a sign-in from the catalog's schemes. Every response is marked
+`Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
+another. Open Geo Service refuses to start with `gate_reads` and no token.
 
 The design and the later steps are in [Authentication and authorization](authentication.md).
 
