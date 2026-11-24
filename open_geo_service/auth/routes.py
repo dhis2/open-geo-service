@@ -47,8 +47,9 @@ def _local_path(candidate: str | None, mount: str) -> str:
     """A path on this instance to return to after signing in; the landing page for anything else."""
     split = urllib.parse.urlsplit(candidate or "")
     path = split.path
-    # Only a path under the mount, never another origin or a scheme-relative `//host`.
-    if split.scheme or split.netloc or not path.startswith(f"{mount}/") or path.startswith("//"):
+    # Only a path under the mount, never another origin or a scheme-relative `//host`; browsers
+    # read a backslash as a slash, so `/\host` is one too.
+    if split.scheme or split.netloc or not path.startswith(f"{mount}/") or path.startswith("//") or "\\" in path:
         return f"{mount}/"
     if path in (f"{mount}/sign-in", f"{mount}/sign-out"):
         return f"{mount}/"

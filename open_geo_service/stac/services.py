@@ -286,7 +286,8 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
 
     def mark(target: dict[str, Any]) -> dict[str, Any]:
         href = str(target.get("href", ""))
-        here = href.startswith(f"{base}/") or not urllib.parse.urlsplit(href).scheme
+        split = urllib.parse.urlsplit(href)
+        here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
         return {**target, "auth:refs": refs} if here else target
 
     declared = {**document, "auth:schemes": _AUTH_SCHEMES}

@@ -389,6 +389,7 @@ def test_web_sign_in_opens_the_forms_its_tier_allows(
         "/sign-in", data={"token": CLIENT_SECRET, "next": "//elsewhere.example/"}, headers=SAME_ORIGIN
     )
     assert off_site.url.path == "/"
+    assert 'name="next" value="/"' in client.get("/sign-in?next=/%5Celsewhere.example/").text
 
     # An authenticated token signs in, but the pages' forms need an operator.
     client_cookie = _session(client, CLIENT_SECRET)
@@ -500,7 +501,10 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
         "type": "Collection",
         "id": "rain",
         "stac_extensions": [],
-        "links": [{"rel": "via", "href": "https://source.example/rain"}],
+        "links": [
+            {"rel": "via", "href": "https://source.example/rain"},
+            {"rel": "license", "href": "//source.example/licence"},
+        ],
         "assets": {"zarr": {"href": "https://testserver/zarr/rain"}},
     }
     synced = datetime(2026, 1, 1, tzinfo=UTC)
@@ -513,7 +517,8 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     assert all(link["auth:refs"] == ["basic", "bearer"] for link in catalog["links"])
     collection = client.get("/stac/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
     assert collection["assets"]["zarr"]["auth:refs"] == ["basic", "bearer"]
-    assert "auth:refs" not in collection["links"][0] and "auth:refs" not in raster["assets"]["zarr"]
+    assert not any("auth:refs" in link for link in collection["links"][:2])
+    assert "auth:refs" not in raster["assets"]["zarr"]
 
     # Gating with no token to read with would leave reads open while seeming private.
     _configure(monkeypatch, [], gate_reads=True)
