@@ -797,11 +797,20 @@
         // invisible at country zoom, wrong as you zoom in. The store knows which it holds
         // and the viewer does not, so let the library read the store.
 
+        // Opening reads `repo`, the snapshot and a manifest; a newer dataset may be chosen
+        // meanwhile, and then neither this store nor its failure is shown. `published` is what
+        // GeoService serves; `main` can hold a sync in progress.
+        let store;
         try {
-          // Opening reads `repo`, the snapshot and a manifest; a newer dataset may be chosen
-          // meanwhile. `published` is what GeoService serves; `main` can hold a sync in progress.
-          const store = await IcechunkStore.open(icechunk.href, { branch: "published" });
+          store = await IcechunkStore.open(icechunk.href, { branch: "published" });
+        } catch (err) {
           if (superseded()) return;
+          setStatus(`Failed to open the dataset's repository: ${err.message}`, true);
+          return;
+        }
+        if (superseded()) return;
+
+        try {
           activeLayer = new ZarrLayer({
             id: "zarr-layer",
             store,

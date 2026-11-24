@@ -1,6 +1,6 @@
 // Time to the first drawn map and bytes fetched by the map viewer, cold and warm.
-// Needs Google Chrome and `npm install playwright-core`; run against a live instance:
-//   [LATENCY_MS=100] [MBPS=10] node map_viewer_reads.mjs http://127.0.0.1:9000 5 <dataset id>...
+// Needs Google Chrome and `bun add playwright-core`; run against a live instance:
+//   [LATENCY_MS=100] [MBPS=10] bun map_viewer_reads.mjs http://127.0.0.1:9000 5 <dataset id>...
 // To compare two read paths, run it against an instance of each. Not collected by pytest.
 // Each run: a fresh browser context (cold cache), then a reload in it (warm cache). A view has
 // loaded when its data requests (to /icechunk or /zarr) have started and then stopped.
@@ -24,7 +24,11 @@ async function load(page, url, traffic) {
   const began = Date.now();
   let stableSince = null;
   let lastCount = 0;
-  while (Date.now() - began < TIMEOUT_MS) {
+  for (;;) {
+    if (Date.now() - began >= TIMEOUT_MS) {
+      const what = traffic.length ? "data requests still pending" : "no data requested";
+      throw new Error(`${what} for ${url} after ${TIMEOUT_MS / 1000} s`);
+    }
     const pending = traffic.some((t) => !t.done);
     if (traffic.length === 0 || pending || traffic.length !== lastCount) {
       lastCount = traffic.length;
@@ -34,7 +38,6 @@ async function load(page, url, traffic) {
     }
     await new Promise((r) => setTimeout(r, 50));
   }
-  if (traffic.length === 0) throw new Error(`no data requested for ${url}`);
   const done = traffic.filter((t) => t.done);
   return {
     lastData: Math.max(...done.map((t) => t.end)), // ms since navigation
