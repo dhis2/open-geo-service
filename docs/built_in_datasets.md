@@ -208,7 +208,7 @@ CDSE_S3_SECRET_KEY=<your-secret-key>
 | **Item type**        | Feature collection (GeoParquet), not a raster                           |
 | **Identity**         | `id_property: id` — Overture's own division id                          |
 | **Spatial coverage** | Global; extracted for this instance's configured extent                 |
-| **Version**          | The pinned Overture release, e.g. `2026-09-23.0`                        |
+| **Version**          | The Overture release read, e.g. `2026-11-18.0`                          |
 | **Licence**          | ODbL-1.0 — attribution **and** share-alike                              |
 | **Source**           | [Overture Maps divisions](https://docs.overturemaps.org/guides/divisions/) |
 
@@ -230,20 +230,18 @@ country's divisions come back too. Add `country` to `filters` when that matters.
   id_property: id
   provider: overture
   params:
-    release: 2026-09-23.0
     theme: divisions
     filters: { subtype: county, country: SL }
 ```
 
 **Refreshing** — Overture publishes monthly and the release id *is* the recorded version, so
 comparing what an instance holds against the latest release answers "is this stale" without
-reading the data. Bumping `release` selects which release the **next** provider run extracts; it
-does not itself trigger one. A feature collection is not on the raster sync path — `POST
-/sync/{id}` refuses it — so refreshing means re-running the provider: **Fetch** on its template
-page, or `POST /features/{id}/refresh` (add `Prefer: respond-async` to run it as a background
-job). The release is pinned
-rather than resolved to `latest`, so an upgrade is a visible configuration change and an extract
-is reproducible.
+reading the data. Each provider run reads the latest release. A feature collection is not on the
+raster sync path — `POST /sync/{id}` refuses it — so refreshing means re-running the provider:
+**Fetch** on its template page, or `POST /features/{id}/refresh` (add `Prefer: respond-async` to
+run it as a background job). A template may name a `release`, but Overture keeps only its latest
+few, about two months of them, so a named release stops working once Overture removes it and is
+then refused with the releases there are.
 
 **Other themes** — the provider is generic: `theme` selects the family (`divisions`, `buildings`,
 `places`, `transportation`, `addresses`, `base`) and resolves to the type worth extracting, or
