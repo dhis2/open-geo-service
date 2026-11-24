@@ -17,6 +17,17 @@ _cache: list[Any] | None = None
 # `generic` are left out.
 _REALMS = ("atmos", "land", "seaIce")
 
+# Deprecated indicators left out for their replacements; docs/climate_indices.md gives the
+# arguments that keep their values. Another indicator xclim deprecates stays registered, marked
+# deprecated, until it is added here, so the process list changes only by a change to this list.
+REPLACED = {
+    "cdd": "dry_spell_max_length",
+    "cwd": "wet_spell_max_length",
+    "heat_wave_index": "hot_spell_total_length",
+    "cold_spell_days": "cold_spell_total_length",
+    "maximum_consecutive_warm_days": "hot_spell_max_length",
+}
+
 
 def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     """Call an xclim function, mapping the OGS ``t`` dimension to/from ``time``.
@@ -104,8 +115,7 @@ def _collect() -> list[Any]:
     # Registry keys are lower-cased identifiers, used as process ids. Dotted keys are the anuclim,
     # cf and icclim collections, which repeat the core indicators under their own names.
     for indicator_id, obj in registry.items():
-        # A deprecated indicator has a named replacement, which is registered instead.
-        if "." in indicator_id or obj.realm not in _REALMS or obj.version_deprecated:
+        if "." in indicator_id or obj.realm not in _REALMS or indicator_id in REPLACED:
             continue
 
         # Every spec below declares a single datacube return, so an indicator producing
@@ -147,6 +157,11 @@ def _collect() -> list[Any]:
             "parameters": params,
             "returns": {"schema": {"type": "object", "subtype": "datacube"}},
         }
+        if obj.version_deprecated:
+            since, alternative = obj.version_deprecated
+            meta["deprecated"] = True
+            if alternative:
+                meta["description"] = f"{obj.abstract}\n\nDeprecated since xclim {since}; use `{alternative}` instead."
         extra = {name for name, p in obj.parameters.items() if p.kind is InputKind.KWARGS}
         accepted: set[str] | None = None
         # Other keyword parameters, such as the fire-model options `dc` and `dmc` take as `params`

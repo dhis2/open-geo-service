@@ -12,7 +12,7 @@ The indicators come from three xclim realms:
 
 | Module | Domain | Examples |
 |---|---|---|
-| `atmos` | Atmospheric | SPI, CDD, CWD, TX days above, heat wave frequency, frost days, growing degree days, … |
+| `atmos` | Atmospheric | SPI, dry and wet spells, TX days above, heat wave frequency, frost days, growing degree days, … |
 | `land` | Land surface | Snow water equivalent, soil freeze/thaw, … |
 | `seaIce` | Sea ice | Ice extent, concentration trends |
 
@@ -141,6 +141,20 @@ tmax.process(
     },
 )
 ```
+
+### Indicators replaced in xclim 1.0
+
+xclim 1.0 deprecated five indicators in favour of more general spell indicators, and Open Geo Service lists only the replacements. Process graphs that use an old id need its replacement, with the arguments below: the replacements' own defaults differ, so the id alone changes the result (`hot_spell_total_length` counts spells of 3 days above 30 °C, where `heat_wave_index` counted 5 days above 25 °C).
+
+| Old id | Replacement | Arguments that keep the old values |
+|---|---|---|
+| `cdd` | `dry_spell_max_length` | `thresh: "1 mm"`, `window: 1` |
+| `cwd` | `wet_spell_max_length` | `thresh: "1 mm"`, `window: 1` |
+| `heat_wave_index` | `hot_spell_total_length` | `thresh: "25 degC"`, `window: 5` |
+| `cold_spell_days` | `cold_spell_total_length` | the same `thresh`, `window: 5` |
+| `maximum_consecutive_warm_days` | `hot_spell_max_length` | `thresh: "25 degC"` |
+
+`cdd` and `cwd` took the threshold as a rate (`1 mm/day`); their replacements take a daily amount and have no `condition` or `min_gap`. The `op` of `heat_wave_index` and `maximum_consecutive_warm_days` is `condition` in their replacements. Other arguments carry over. An indicator xclim deprecates later stays listed, marked deprecated, until it is reviewed and added to this table.
 
 ---
 

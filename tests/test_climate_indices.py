@@ -7,8 +7,10 @@ import pandas as pd
 import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
+from xclim.core.indicator import registry
 
 from open_geo_service.openeo.plugin_processes import load_plugin_processes
+from open_geo_service.openeo.xclim_processes import _REALMS, REPLACED
 from open_geo_service.plugins.processes.climate_indices import spi
 from open_geo_service.process import get_process_metadata
 
@@ -128,8 +130,15 @@ def test_spells_and_tx_appear_in_get_processes(client: TestClient) -> None:
     response = client.get("/processes")
     ids = {p["id"] for p in response.json()["processes"]}
     assert {"dry_spell_max_length", "wet_spell_max_length", "tx_days_above"} <= ids
-    # Deprecated in xclim 1.0; their replacements above are registered instead.
-    assert not {"cdd", "cwd", "heat_wave_index", "cold_spell_days", "maximum_consecutive_warm_days"} & ids
+    assert set(REPLACED.values()) <= ids
+    assert not set(REPLACED) & ids
+    # A newly deprecated indicator fails here, so it leaves the process list only by review.
+    deprecated = {
+        key: obj.version_deprecated[1]
+        for key, obj in registry.items()
+        if "." not in key and obj.realm in _REALMS and obj.version_deprecated
+    }
+    assert deprecated == REPLACED
 
 
 def test_dry_spell_catalog_metadata(client: TestClient) -> None:
@@ -160,11 +169,36 @@ def test_dry_spell_registered_callable_computes(daily_precip: xr.DataArray) -> N
     assert "time" in result.dims
 
 
-def test_dry_and_wet_spell_callables_differ(daily_precip: xr.DataArray) -> None:
-    procs = dict(load_plugin_processes())
-    r_cdd = xr.DataArray(procs["dry_spell_max_length"](pr=daily_precip))
-    r_cwd = xr.DataArray(procs["wet_spell_max_length"](pr=daily_precip))
-    assert not np.allclose(r_cdd.values, r_cwd.values, equal_nan=True)
+@pytest.mark.parametrize(
+    ("old", "variable", "old_args", "new_args"),
+    [
+        ("cdd", "pr", {}, {"thresh": "1 mm", "window": 1}),
+        ("cwd", "pr", {}, {"thresh": "1 mm", "window": 1}),
+        ("heat_wave_index", "tasmax", {}, {"thresh": "25 degC", "window": 5}),
+        ("cold_spell_days", "tas", {"thresh": "15 degC"}, {"thresh": "15 degC", "window": 5}),
+        ("maximum_consecutive_warm_days", "tasmax", {}, {"thresh": "25 degC"}),
+    ],
+)
+def test_a_replacement_gives_the_deprecated_indicators_values_with_the_documented_arguments(
+    old: str,
+    variable: str,
+    old_args: dict[str, str],
+    new_args: dict[str, str],
+    daily_precip: xr.DataArray,
+    daily_tasmax: xr.DataArray,
+) -> None:
+    from xclim.core.options import set_options
+
+    # The fixture's flux would make every day wet; as a daily amount it has spells of both.
+    data = daily_precip.assign_attrs(units="mm/day") if variable == "pr" else daily_tasmax
+    with set_options(as_dataset=False):
+        expected = registry[old](**{variable: data}, **old_args)
+    new = dict(load_plugin_processes())[REPLACED[old]]
+    assert float(expected.sum()) > 0
+    np.testing.assert_array_equal(new(**{variable: data}, **new_args).values, expected.values)
+    if old in ("cdd", "heat_wave_index"):
+        # The replacement's own defaults count other spells.
+        assert not np.array_equal(new(**{variable: data}, **old_args).values, expected.values)
 
 
 def test_tx_days_above_registered_callable_higher_threshold_gives_fewer_days(daily_tasmax: xr.DataArray) -> None:
