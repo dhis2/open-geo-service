@@ -1873,13 +1873,16 @@ def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
     assert output_path.endswith(".zarr")
 
 
-# Path separators, and ids that name one file but not one URL segment (shared.urls).
-@pytest.mark.parametrize("bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain"])
+# Path separators, ids that name one file but not one URL segment (shared.urls),
+# and supplied ids that are empty or not text.
+@pytest.mark.parametrize(
+    "bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "", None, 0]
+)
 def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
-    job_service: OpenEOJobService, bad_id: str
+    job_service: OpenEOJobService, bad_id: object
 ) -> None:
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": bad_id})
-    with pytest.raises(ValueError, match="Invalid dataset_id"):
+    with pytest.raises(ValueError, match="dataset_id"):
         job_service._persist_result("job-traversal", envelope)
 
 

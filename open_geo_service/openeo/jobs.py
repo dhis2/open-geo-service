@@ -1343,7 +1343,9 @@ class OpenEOJobService:
             result = result.data
         # Writing to a managed dataset updates the public catalogue, which needs the operator tier.
         # The route table cannot see this option inside the job body, so it is checked here.
-        if options.get("dataset_id") and owner is not None and owner.tier < Tier.OPERATOR:
+        # Key presence, not truthiness: an empty or non-string id must reach validation, not fall through.
+        managed = "dataset_id" in options
+        if managed and owner is not None and owner.tier < Tier.OPERATOR:
             raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs an operator token")
 
         # Resolve a lazy dask_geopandas GeoDataFrame before any tabular path,
@@ -1367,7 +1369,7 @@ class OpenEOJobService:
 
         if isinstance(result, xr.Dataset):
             # Zarr format with dataset_id → write directly to managed Icechunk/Zarr store
-            if fmt == "ZARR" and options.get("dataset_id"):
+            if fmt == "ZARR" and managed:
                 _write_managed_zarr(result, options, job_id=job_id, provenance=provenance)
                 # Managed datasets are not served as job-local files; advertise the
                 # managed dataset via a marker that _result_assets expands into
