@@ -357,9 +357,9 @@ Ingest and sync enumerate the complete source-valid union before writing. A forw
 
 A source can list periods before their data is written. dynamical.org's CHIRPS3 mirror extends its time axis to the day of each update first and writes the data minutes later, so for those minutes it lists several days with no values; ERA5-Heat once listed a day whose every hour was NaN. A sync resumes after the newest stored period, so storing such a period would keep it empty for good.
 
-The orchestrator therefore checks each fetched period for values that are all missing (NaN, or the variable's `_FillValue`). On the first empty period, E, it commits nothing further and keeps fetching, holding only E, to see whether a later period has data:
+The orchestrator therefore commits every period as usual, and checks each for values that are all missing (NaN, or the variable's `_FillValue`). Whether an empty period E is kept depends on what follows it in the run:
 
-1. **A later period L has data.** E and every period up to L are empty for a reason of their own, such as water or cloud over the whole extent. E is committed, ingestion resumes from the period after E, and the periods up to L are fetched again and committed without checking.
-2. **No later period has data.** The source has not filled them yet. The run fails with the periods before E kept, and nothing from E on is written. A later sync fetches them again.
+1. **A later period L has data.** E and every empty period up to L are empty for a reason of their own, such as water or cloud over the whole extent, and are kept.
+2. **No later period has data.** The source has not filled them yet. When the run ends, the store's `main` branch is reset to the snapshot before E, as a failed sync is rolled back, and the run fails. The periods before E are kept, and a later sync fetches the rest again.
 
-Only one period is held in memory. The cost is fetching the periods from E to L twice in case 1, which reads nothing new from a plugin that caches its source, and fetching the unfilled periods once each in case 2. The newest period of a run that is truly empty is refused until a later period is listed, then written.
+The reset also runs when the run fails or is cancelled part way, so empty periods are never left at the end of the store. The newest period of a run that is truly empty is refused until a later period is listed, then written.
