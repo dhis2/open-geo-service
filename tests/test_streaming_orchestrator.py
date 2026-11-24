@@ -610,7 +610,7 @@ def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, 
     store_path = tmp_path / "streaming-store.icechunk"
     plugin = _UnpublishedTailPlugin(dtype, missing)
 
-    def sync() -> int:
+    def sync() -> list[str]:
         return run_streaming_ingest_sync(
             plugin=plugin,
             params={},
@@ -619,7 +619,7 @@ def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, 
             end="2026-01-06",
             store_path=store_path,
             period_type="daily",
-        ).periods_written
+        ).held_back
 
     def committed() -> tuple[list[str], list[float]]:
         repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
@@ -633,12 +633,11 @@ def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, 
     assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
 
     plugin.fails_on = None
-    with pytest.raises(RuntimeError, match="missing for 2026-01-05 to 2026-01-06"):
-        sync()
+    assert sync() == ["2026-01-05", "2026-01-06"]
     assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
 
     plugin.published = True
-    assert sync() == 2
+    assert sync() == []
     np.testing.assert_array_equal(committed()[1], [1, missing, missing, 4, 5, 6])
 
 

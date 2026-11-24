@@ -1389,6 +1389,7 @@ def _create_streaming_artifact(
         materialization_scope = request_scope.model_copy(update={"start": plan.start, "end": plan.end})
 
         ingest_path = store_path
+        held_back: list[str] = []
         if plan.action == SyncAction.REMATERIALIZE and store_path.exists():
             # Build a prepend/overwrite beside the published store. Fetching is the least
             # reliable part of ingestion, so the current data remains readable until the
@@ -1439,6 +1440,7 @@ def _create_streaming_artifact(
                 committed_periods=plan.committed_periods if ingest_path == store_path else [],
             )
             ingest_completed = True
+            held_back = result.held_back
             if result.periods_written == 0 and not ingest_path.exists():
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
@@ -1459,10 +1461,12 @@ def _create_streaming_artifact(
         # the raw user request. The latter remains on the record as operation provenance.
         # A brand-new store may legitimately clamp its end to source availability; an
         # update was already planned from the source's exact available period sequence.
+        # A run that held back empty periods at its end (see "Empty periods at the end of a run are
+        # not stored" in docs/architecture.md) ends before the plan, like a first ingest may.
         if coverage.temporal.start is not None:
             coverage_matches_plan = (
                 _temporal_coverage_matches_request_scope(coverage.temporal, materialization_scope)
-                if plan.has_committed_periods
+                if plan.has_committed_periods and not held_back
                 else _temporal_coverage_matches_streaming_request_scope(coverage.temporal, materialization_scope)
             )
             if not coverage_matches_plan:

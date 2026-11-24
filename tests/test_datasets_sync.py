@@ -243,9 +243,11 @@ def test_sync_dataset_append_policy_falls_back_to_rematerialize_without_icechunk
     assert any("requires an existing Icechunk artifact" in message for message in messages)
 
 
+@pytest.mark.parametrize("stored_end", ["2026-02-10", "2026-02-08"])
 def test_sync_dataset_append_policy_uses_store_based_append_for_plugin_backed_dataset(
     every_day_available: None,
     monkeypatch: pytest.MonkeyPatch,
+    stored_end: str,
 ) -> None:
     dataset_id = "chirps3_precipitation_daily_sle"
     latest = _artifact(
@@ -271,7 +273,7 @@ def test_sync_dataset_append_policy_uses_store_based_append_for_plugin_backed_da
 
     def fake_create_artifact(**kwargs: object) -> ArtifactRecord:
         captured.update(kwargs)
-        return _artifact(artifact_id="a2", managed_dataset_id=dataset_id, end="2026-02-10")
+        return _artifact(artifact_id="a2", managed_dataset_id=dataset_id, end=stored_end)
 
     monkeypatch.setattr(services, "create_artifact", fake_create_artifact)
     monkeypatch.setattr(services, "get_dataset_or_404", lambda _: _dataset_detail(dataset_id))
@@ -298,6 +300,9 @@ def test_sync_dataset_append_policy_uses_store_based_append_for_plugin_backed_da
     assert result.message is not None
     assert "appending missing periods" in result.message
     assert "committed store" in result.message
+    # A sync that held back empty newest periods (CLIM-1878) says which.
+    held_back = "The source lists periods up to 2026-02-10, but those after 2026-02-08 have no values yet"
+    assert (held_back in result.message) == (stored_end == "2026-02-08")
 
 
 def test_plan_sync_for_plugin_backed_icechunk_uses_committed_store_state(
@@ -2031,7 +2036,7 @@ def test_an_interrupted_swap_is_healed_before_ingest_reads_the_store(
         else:
             store_path.mkdir(parents=True, exist_ok=True)
             history.write_text("2026-01-03", encoding="utf-8")
-        return SimpleNamespace(periods_written=1)
+        return SimpleNamespace(periods_written=1, held_back=[])
 
     monkeypatch.setattr(downloader, "get_icechunk_path", lambda _dataset: target)
     monkeypatch.setattr(ingestion_services, "run_streaming_ingest_sync", fake_ingest)

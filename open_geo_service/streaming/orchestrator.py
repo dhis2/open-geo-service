@@ -20,7 +20,7 @@ import inspect
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -63,6 +63,9 @@ class StreamingIngestResult:
     store_path: Path
     period_type: str | None
     periods_written: int
+    # Periods at the end of the run whose values were all missing, and so were not kept. A later
+    # sync fetches them again.
+    held_back: list[str] = field(default_factory=list)
 
 
 def _strip_cf_encoding(ds: xr.Dataset, period_type: str, *, time_dim: str) -> None:
@@ -383,10 +386,11 @@ async def run_streaming_ingest(
 
         if empty_tail:
             span = empty_tail[0] if len(empty_tail) == 1 else f"{empty_tail[0]} to {empty_tail[-1]}"
-            raise RuntimeError(
-                f"Every value is missing for {span}, at the end of this run: the source lists these periods, "
-                f"but may not have published their data yet. Nothing from {empty_tail[0]} on was kept, and a "
-                "later sync fetches it again."
+            logger.warning(
+                "Every value is missing for %s at the end of this run, in %s: the source lists these periods "
+                "but may not have published their data yet. They were not kept; a later sync fetches them again.",
+                span,
+                store_path,
             )
     finally:
         if empty_tail:
@@ -415,7 +419,12 @@ async def run_streaming_ingest(
     except Exception:
         logger.warning("expire_snapshots failed for %s — store remains valid", store_path, exc_info=True)
 
-    return StreamingIngestResult(store_path=store_path, period_type=period_type, periods_written=written)
+    return StreamingIngestResult(
+        store_path=store_path,
+        period_type=period_type,
+        periods_written=written - len(empty_tail),
+        held_back=list(empty_tail),
+    )
 
 
 def run_streaming_ingest_sync(

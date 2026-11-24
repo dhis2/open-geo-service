@@ -31,6 +31,7 @@ class _GridPlugin(BaseDatasetPlugin):
     def __init__(self, *, categorical: bool = False) -> None:
         self.available = [f"2026-01-0{day}" for day in (1, 2, 3)]
         self.categorical = categorical
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         return [period for period in self.available if start <= period <= end]
@@ -42,6 +43,8 @@ class _GridPlugin(BaseDatasetPlugin):
         else:
             values = rng.normal(5.0, 3.0, size=(NY, NX)).astype("float32")
             values[rng.random((NY, NX)) < 0.1] = np.nan
+        if period_id in self.empty:
+            values[:] = np.nan
         data = xr.DataArray(
             values,
             dims=("y", "x"),
@@ -216,6 +219,25 @@ def test_a_sync_with_nothing_new_leaves_the_store_alone(pyramid_sync: dict[str, 
 
     assert downloader.append_pyramid_levels(state["store"]) == 0
     assert repo.lookup_branch("main") == before
+
+
+def test_a_sync_holds_back_empty_newest_periods_and_appends_them_once_filled(pyramid_sync: dict[str, Any]) -> None:
+    """The source lists 2026-01-05 before writing it: the sync succeeds without it (CLIM-1878)."""
+    state = pyramid_sync
+    _ingest(state, "2026-01-03")
+    state["plugin"].available += ["2026-01-04", "2026-01-05"]
+    state["plugin"].empty = {"2026-01-05"}
+
+    def lengths() -> set[int]:
+        root = _root(state["store"])
+        return {(root[path] if path else root)["t"].shape[0] for path in ["", *root.group_keys()]}
+
+    assert _ingest(state, "2026-01-05").coverage.temporal.end == "2026-01-04"
+    assert lengths() == {4}
+
+    state["plugin"].empty = set()
+    assert _ingest(state, "2026-01-05").coverage.temporal.end == "2026-01-05"
+    assert lengths() == {5}
 
 
 def test_a_failed_record_write_rolls_back_the_appended_levels(
