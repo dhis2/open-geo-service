@@ -50,7 +50,7 @@ def test_a_valid_template_loads() -> None:
     [
         pytest.param({"id": None}, "missing or invalid id", id="no_id"),
         pytest.param({"id": ""}, "missing or invalid id", id="blank_id"),
-        pytest.param({"id": "a/b"}, "cannot be used in a URL", id="unsafe_id"),
+        pytest.param({"id": "a/b"}, "invalid feature template id", id="unsafe_id"),
         pytest.param({"name": None}, "non-empty 'name'", id="no_name"),
         pytest.param({"name": "  "}, "non-empty 'name'", id="blank_name"),
         pytest.param({"id_property": None}, "non-empty 'id_property'", id="no_id_property"),

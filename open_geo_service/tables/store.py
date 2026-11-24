@@ -48,7 +48,7 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.persistence import index_lock
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ def _dataset_lock(dataset_id: str) -> AbstractContextManager[None]:
     """
     from open_geo_service.ingestions import services as ingestion_services
 
-    _require_id(dataset_id, "table dataset")
+    require_segment_safe_id(dataset_id, "table dataset id")
     return index_lock(Path(ingestion_services.ARTIFACTS_DIR) / "locks" / f"table-{dataset_id}")
 
 
@@ -254,8 +254,8 @@ def check_rows(
     from other datasets than the stored ones, as *provenance* names them, are refused
     (`_require_same_sources`).
     """
-    _require_id(dataset_id, "table dataset")
-    _require_id(collection_id, "feature collection")
+    require_segment_safe_id(dataset_id, "table dataset id")
+    require_segment_safe_id(collection_id, "feature collection id")
     require_table_id(dataset_id)
     period_type = _dataset_period_type(dataset_id, period_type)
     existing = latest_record(dataset_id)
@@ -701,11 +701,3 @@ def require_table_id(dataset_id: str) -> None:
     for record in ingestion_services.group_datasets().get(dataset_id, []):
         if record.format != ArtifactFormat.PARQUET:
             raise ValueError(f"dataset id '{dataset_id}' is held by a {record.format} dataset; choose another id")
-
-
-def _require_id(value: str, kind: str) -> None:
-    if not is_segment_safe_id(value):
-        raise ValueError(
-            f"invalid {kind} id {value!r}; it names a folder and a URL segment, so it must start with a "
-            "letter or digit and carry only letters, digits, '.', '_' or '-'"
-        )

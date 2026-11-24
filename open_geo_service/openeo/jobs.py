@@ -77,6 +77,7 @@ from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
 from open_geo_service.shared.time import utc_now
+from open_geo_service.shared.urls import require_segment_safe_id
 from open_geo_service.shared.vectors import (
     FEATURE_ID_COORD,
     dimension_holds_shapes,
@@ -1342,8 +1343,13 @@ class OpenEOJobService:
             result = result.data
         # Writing to a managed dataset updates the public catalogue, which needs the operator tier.
         # The route table cannot see this option inside the job body, so it is checked here.
-        if options.get("dataset_id") and owner is not None and owner.tier < Tier.OPERATOR:
+        # Key presence, not truthiness: an empty or non-string id must reach validation, not fall through.
+        managed = "dataset_id" in options
+        if managed and owner is not None and owner.tier < Tier.OPERATOR:
             raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs an operator token")
+        # Every other path writes a job-local file, so an id there would be dropped without a word.
+        if managed and ("export" in options or fmt != "ZARR" or not isinstance(result, (xr.Dataset, xr.DataArray))):
+            raise ValueError("'dataset_id' writes a managed raster dataset: it needs a raster in Zarr, no 'export'")
 
         # Resolve a lazy dask_geopandas GeoDataFrame before any tabular path,
         # including named exports, so a lazy frame never reaches a renderer.
@@ -1366,7 +1372,7 @@ class OpenEOJobService:
 
         if isinstance(result, xr.Dataset):
             # Zarr format with dataset_id → write directly to managed Icechunk/Zarr store
-            if fmt == "ZARR" and options.get("dataset_id"):
+            if fmt == "ZARR" and managed:
                 _write_managed_zarr(result, options, job_id=job_id, provenance=provenance)
                 # Managed datasets are not served as job-local files; advertise the
                 # managed dataset via a marker that _result_assets expands into
@@ -1698,10 +1704,7 @@ def _write_managed_zarr(
     dataset_id = options["dataset_id"]
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"'dataset_id' option must be a non-empty string, got {type(dataset_id).__name__}")
-    if Path(dataset_id).name != dataset_id:
-        raise ValueError(
-            f"Invalid dataset_id '{dataset_id}': must be a plain name with no path separators or traversal segments"
-        )
+    require_segment_safe_id(dataset_id, "'dataset_id' option")
 
     from open_geo_service.data_registry.services import datasets as _reg
     from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
