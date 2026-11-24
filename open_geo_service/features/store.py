@@ -23,7 +23,7 @@ from open_geo_service.features import tiles
 from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.shared import geoparquet
 from open_geo_service.shared.crs import canonical_crs_code, transform_bbox
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import require_segment_safe_id
 
 if TYPE_CHECKING:
     import geopandas as gpd
@@ -83,13 +83,7 @@ def validate_collection_id(dataset_id: str) -> str:
     trusted — see `shared.urls.SEGMENT_SAFE_ID_PATTERN` for what the id has to satisfy and why.
     The same constraint governs raster template ids, because both become URL path segments.
     """
-    if not is_segment_safe_id(dataset_id):
-        raise ValueError(
-            f"invalid feature collection id {dataset_id!r}; it names one file in the feature store "
-            "and one segment of every URL that points at the collection, so it must start with a "
-            "letter or digit and carry only letters, digits, '.', '_' or '-'"
-        )
-    return dataset_id
+    return require_segment_safe_id(dataset_id, "feature collection id")
 
 
 def new_collection_file(dataset_id: str) -> Path:

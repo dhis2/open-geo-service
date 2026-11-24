@@ -1886,6 +1886,23 @@ def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
         job_service._persist_result("job-traversal", envelope)
 
 
+# Every path but a Zarr raster writes a job-local file, which would drop the id without a word.
+@pytest.mark.parametrize(
+    ("data", "fmt", "options"),
+    [
+        pytest.param(_small_dataset(), "GTiff", {}, id="not_zarr"),
+        pytest.param(_small_dataset(), "Zarr", {"export": "table"}, id="with_export"),
+        pytest.param(pd.DataFrame({"v": [1]}), "Zarr", {}, id="not_raster"),
+    ],
+)
+def test_persist_result_refuses_dataset_id_it_cannot_write(
+    job_service: OpenEOJobService, data: object, fmt: str, options: dict[str, Any]
+) -> None:
+    envelope = SaveResultEnvelope(data, fmt, {"dataset_id": "rain", **options})
+    with pytest.raises(ValueError, match="managed raster dataset"):
+        job_service._persist_result("job-dropped-id", envelope)
+
+
 def test_persist_result_rejects_unknown_dataset_id(
     job_service: OpenEOJobService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -186,6 +186,17 @@ def is_segment_safe_id(value: str) -> bool:
     return bool(SEGMENT_SAFE_ID_PATTERN.fullmatch(value))
 
 
+def require_segment_safe_id(value: str, what: str, where: str = "") -> str:
+    """Return *value*, or raise `ValueError` naming it as *what* (in *where*) when it breaks the rule."""
+    if not is_segment_safe_id(value):
+        place = f" in {where}" if where else ""
+        raise ValueError(
+            f"invalid {what} {value!r}{place}; it becomes a URL path segment, so it must start with a "
+            "letter or digit and carry only letters, digits, '.', '_' or '-'"
+        )
+    return value
+
+
 def path_segment(value: str) -> str:
     """Return *value* escaped so it is one path segment, for the characters escaping can fix.
 
