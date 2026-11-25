@@ -753,7 +753,7 @@ def test_the_collection_omits_the_thumbnail_when_there_is_none(client: TestClien
     assert "zarr" in payload["assets"]
 
 
-def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
+def test_the_route_serves_the_thumbnail(client: TestClient, _published: None) -> None:
     written = _write_a_thumbnail()
 
     response = client.get("/datasets/thumb_dataset/thumbnail.png")
@@ -765,5 +765,5 @@ def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
     assert client.head("/datasets/thumb_dataset/thumbnail.png").status_code == 200
 
 
-def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient) -> None:
+def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient, _published: None) -> None:
     assert client.get("/datasets/thumb_dataset/thumbnail.png").status_code == 404

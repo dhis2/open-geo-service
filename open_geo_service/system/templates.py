@@ -354,7 +354,7 @@ def _dataset_view(dataset: Any, template: dict[str, Any] | None) -> dict[str, An
     colormap = _declared_colormap((template or {}).get("display"))
     status = "published" if dataset.publication.status == "published" else "unpublished"
     try:
-        has_thumbnail = layout.thumbnail(layout.kind_of(dataset.item_type), dataset.dataset_id).is_file()
+        has_thumbnail = layout.find_thumbnail(dataset.item_type, dataset.dataset_id) is not None
     except OSError:
         has_thumbnail = False
     description = " ".join((dataset.description or "").split())

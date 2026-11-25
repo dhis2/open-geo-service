@@ -75,13 +75,13 @@ def thumbnail(kind: Kind, dataset_id: str) -> Path:
     return local(f"thumbnails/{dataset_id}.png")
 
 
-def find_thumbnail(dataset_id: str) -> Path | None:
-    """The thumbnail of *dataset_id*, whichever its kind, or None when it has none."""
-    for kind in Kind:
-        path = thumbnail(kind, dataset_id)
-        if path.is_file():
-            return path
-    return None
+def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
+    """The thumbnail of *dataset_id*, or None when it has none.
+
+    *stored_as* is the dataset's `ArtifactFormat` or `DatasetItemType`, as for :func:`kind_of`.
+    """
+    path = thumbnail(kind_of(stored_as), dataset_id)
+    return path if path.is_file() else None
 
 
 def staging_dir() -> Path:
