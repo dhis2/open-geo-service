@@ -2093,12 +2093,15 @@ def _adopt_write_branch(store_path: Path, published: bool) -> bool:
     Its writers committed to `main`, and its readers opened `published` once it was published.
     The write branch takes the tip of `main`, and `main` takes the tip of `published`, or goes back
     to the initial, empty snapshot when the store was never published. A store published before
-    either branch existed (*published* with no `published` branch) keeps `main` where it is.
+    either branch existed (*published* with no `published` branch) keeps `main` where it is, marked
+    complete so a rollback may return to it.
     """
     repo = open_or_create_repo(store_path)
     branches = repo.list_branches()
     if WRITE_BRANCH in branches:
         return False
+    if published and _OLD_PUBLISHED_BRANCH not in branches:
+        seal_version(store_path, PUBLISHED_BRANCH)
     repo.create_branch(WRITE_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
     if _OLD_PUBLISHED_BRANCH in branches:
         repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
@@ -2116,8 +2119,9 @@ def reconcile_published_branches() -> int:
     so a crash between the two leaves a newest record that is not marked published, or that
     describes an earlier snapshot than `main` holds; the record then follows the branch. A store
     with a published record and nothing on `main` is published from its write branch. A store
-    written before the write branch existed is moved to the current layout first. There is no
-    unpublishing, so nothing else leaves the two apart.
+    written before the write branch existed is moved to the current layout first, including one
+    with no record, such as a first ingestion that stopped part way, so a retry can write to it.
+    There is no unpublishing, so nothing else leaves the two apart.
     """
     by_store: dict[str, list[ArtifactRecord]] = {}
     for record in _load_records():
@@ -2149,6 +2153,15 @@ def reconcile_published_branches() -> int:
             continue
         changed += 1
         logger.warning("Brought the publication of '%s' and its record into step", store_path.name)
+    registered = {Path(path).resolve() for path in by_store}
+    directory = Path(downloader.DOWNLOAD_DIR)
+    for store_path in directory.glob("*.icechunk") if directory.is_dir() else []:
+        if store_path.resolve() in registered or not (store_path / "repo").exists():
+            continue
+        try:
+            changed += _adopt_write_branch(store_path, published=False)
+        except Exception:
+            logger.warning("Could not move '%s' to the current branch layout", store_path, exc_info=True)
     return changed
 
 

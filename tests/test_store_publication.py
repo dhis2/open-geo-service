@@ -72,6 +72,7 @@ def store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     state: dict[str, Any] = {"plugin": _ValuePlugin(1.0), "path": tmp_path / "stores" / "tg.icechunk"}
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: state["plugin"])
     monkeypatch.setattr(downloader, "get_icechunk_path", lambda _: state["path"])
+    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", state["path"].parent)
     return state
 
 
@@ -234,8 +235,10 @@ def test_main_decides_what_readers_see(store: dict[str, Any], monkeypatch: pytes
     unpublished = _ingest(store, overwrite=False, end=DAYS[1])
     assert _published(store["path"]) is None, "an unpublished raster has nothing on main"
     assert unpublished.publication.status == PublicationStatus.UNPUBLISHED
-    # Written before the write branch existed, its data moves off `main` at startup.
+    # Written before the write branch existed, its data moves off `main` at startup, even with no
+    # record, as a first ingestion that stopped part way leaves it.
     _old_layout(store["path"], published=None)
+    services._mutate_records(lambda records: records.clear())
     assert services.reconcile_published_branches() == 1
     assert _branches(store["path"]) == {"main", "ingest"}
     assert _published(store["path"]) is None
@@ -288,6 +291,20 @@ def _old_layout(path: Path, published: str | None) -> None:
         repo.create_branch("published", published)
     repo.reset_branch("main", repo.lookup_branch("ingest"))
     repo.delete_branch("ingest")
+
+
+def test_a_store_published_before_either_branch_stays_a_rollback_target(store: dict[str, Any]) -> None:
+    _ingest(store, overwrite=False, end=DAYS[1], publish=True)
+    _repo(store["path"]).writable_session("ingest").commit("not marked complete", allow_empty=True)
+    _old_layout(store["path"], published=None)
+    assert services.reconcile_published_branches() == 1
+    served = _published(store["path"])
+    assert served == str(_repo(store["path"]).lookup_branch("ingest"))
+
+    synced = _ingest(store, overwrite=False)
+    assert _published(store["path"]) != served
+    services.publish_artifact_record(synced.artifact_id, snapshot_id=served)
+    assert _published(store["path"]) == served
 
 
 def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> None:
