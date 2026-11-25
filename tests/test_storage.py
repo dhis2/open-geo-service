@@ -6,6 +6,7 @@ import errno
 import os
 import stat
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
 
 
 def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart_writer: Callable[[], None]
 ) -> None:
     data = tmp_path / "data"
     write_one_of_each(data, monkeypatch)
@@ -105,8 +106,7 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
         dataset_id="towns", features={"type": "FeatureCollection", "features": [_box("T1")]}, id_property="orgUnitCode"
     )
 
-    with TestClient(app):  # the writer starts
-        pass
+    restart_writer()
 
     assert not stopped_vector.exists() and not stopped_table.exists() and not unrecorded.exists()
     assert fresh.exists(), "a file younger than the grace period waits for the next start"
