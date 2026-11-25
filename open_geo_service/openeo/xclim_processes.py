@@ -17,6 +17,17 @@ _cache: list[Any] | None = None
 # `generic` are left out.
 _REALMS = ("atmos", "land", "seaIce")
 
+# Deprecated indicators left out for their replacements; docs/climate_indices.md gives the
+# arguments that keep their values. An xclim upgrade that deprecates another indicator fails
+# `test_every_deprecated_indicator_is_replaced` until it is reviewed and added here.
+REPLACED = {
+    "cdd": "dry_spell_max_length",
+    "cwd": "wet_spell_max_length",
+    "heat_wave_index": "hot_spell_total_length",
+    "cold_spell_days": "cold_spell_total_length",
+    "maximum_consecutive_warm_days": "hot_spell_max_length",
+}
+
 
 def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     """Call an xclim function, mapping the OGS ``t`` dimension to/from ``time``.
@@ -104,7 +115,7 @@ def _collect() -> list[Any]:
     # Registry keys are lower-cased identifiers, used as process ids. Dotted keys are the anuclim,
     # cf and icclim collections, which repeat the core indicators under their own names.
     for indicator_id, obj in registry.items():
-        if "." in indicator_id or obj.realm not in _REALMS:
+        if "." in indicator_id or obj.realm not in _REALMS or indicator_id in REPLACED:
             continue
 
         # Every spec below declares a single datacube return, so an indicator producing
@@ -173,22 +184,12 @@ def _make_callable(indicator: Any, meta: dict[str, Any], accepted: set[str] | No
         if unknown:
             known = ", ".join(p["name"] for p in meta["parameters"])
             raise TypeError(f"{meta['id']} has no parameter {', '.join(unknown)}; its parameters are {known}")
-        return _single_output(call_with_ogs_time_dim(indicator, **kwargs))
+        from xclim.core.options import set_options
+
+        # xclim 1.0 indicators return a Dataset by default; a process returns the cube itself.
+        # The option is per thread since xclim 1.0.1, so concurrent jobs do not see it (CLIM-1767).
+        with set_options(as_dataset=False):
+            return call_with_ogs_time_dim(indicator, **kwargs)
 
     setattr(_call, _GEOSERVICE_PROCESS_ATTR, meta)
     return _call
-
-
-def _single_output(result: Any) -> Any:
-    """Return the one cube of a single-output indicator.
-
-    xclim 1.0 indicators return a Dataset by default. Its ``as_dataset`` option is a process-wide
-    global with no per-call override, and jobs run in threads, so we unwrap the result here
-    rather than switch the option off around the call (CLIM-1767).
-    """
-    import xarray as xr
-
-    if isinstance(result, xr.Dataset):
-        (name,) = result.data_vars
-        return result[name]
-    return result
