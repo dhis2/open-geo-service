@@ -1,4 +1,4 @@
-"""Move an instance onto the current data folder layout (docs/data_folder_layout.md).
+"""Move an instance onto the catalog layout (docs/data_folder_layout.md).
 
 Run once per instance, with its server stopped, from the directory its ``.env`` is in. It
 refuses while a server that holds the writer lease runs, but a server from before the lease
@@ -6,22 +6,18 @@ holds none, so during an upgrade stopping the server is up to you:
 
     python -m open_geo_service.migrate_layout [--dry-run]
 
-Two steps, each made only where it is still needed:
+Every dataset moves from ``rasters/``, ``vectors/``, ``tables/`` and ``thumbnails/`` into a folder
+of its own, ``catalog/<kind>/<id>/``, with its thumbnail. Pending-collection markers move to
+``gc-pending/``; the empty per-store lock files and the old ``.superseded`` markers are deleted.
+The store paths in ``artifacts/records.json`` and ``openeo_jobs/jobs.json`` are rewritten to
+match. It refuses to run while a record's id breaks the id rule, which the routes would refuse
+to serve from its new folder.
 
-1. The rasters/vectors names (CLIM-1253). In the data directory, ``downloads/`` becomes
-   ``rasters/`` and ``features/`` becomes ``vectors/``. Under ``plugins_dir``, ``datasets/``
-   becomes ``rasters/`` and ``features/`` becomes ``vectors/``, and the ``ingestion.plugin``
-   paths and plugin imports that name the old folders are rewritten.
-2. The catalog (CLIM-1968). Every dataset moves into a folder of its own,
-   ``catalog/<kind>/<id>/``, with its thumbnail. Pending-collection markers move to
-   ``gc-pending/``; the empty per-store lock files and the old ``.superseded`` markers are
-   deleted. It refuses to run while a record's id breaks the id rule, which the routes would
-   refuse to serve from its new folder.
-
-Both rewrite the store paths in ``artifacts/records.json`` to match, and the second also those
-in ``openeo_jobs/jobs.json``. Open Geo Service reads only the current layout, so an instance
-that has not been migrated starts with no stores. Running it again once done changes nothing.
-It refuses to run when a file or folder it would move to already exists, rather than merging.
+Open Geo Service reads only the catalog layout, so an instance that has not been migrated starts
+with no stores. Running it again once done changes nothing. It refuses to run when a file or
+folder it would move to already exists, rather than merging. An instance still on the layout
+before ``rasters/`` and ``vectors/`` (CLIM-1253) runs ``migrate_layout`` of a release from before
+November 2026 first.
 """
 
 from __future__ import annotations
@@ -42,174 +38,12 @@ from open_geo_service.shared import layout
 from open_geo_service.shared.persistence import atomic_text
 from open_geo_service.shared.urls import ID_RULE, is_segment_safe_id
 
-DATA_RENAMES = (("downloads", "rasters"), ("features", "vectors"))
-PLUGIN_RENAMES = (("datasets", "rasters"), ("features", "vectors"))
-
 _PATH_FIELDS = ("path", "asset_paths")
 
 
 class MigrationError(RuntimeError):
     """The layout cannot be migrated without a decision this command will not make."""
 
-
-@dataclass
-class Plan:
-    """What a migration does, so a dry run can report it and a real run can carry it out."""
-
-    renames: list[tuple[Path, Path]] = field(default_factory=list)
-    records: tuple[Path, list[Any]] | None = None
-    rewrites: list[tuple[Path, str]] = field(default_factory=list)
-
-    @property
-    def empty(self) -> bool:
-        return not self.renames and self.records is None and not self.rewrites
-
-
-def _plan_rename(parent: Path, old: str, new: str, plan: Plan) -> None:
-    source, target = parent / old, parent / new
-    if not source.exists():
-        return
-    if target.exists():
-        raise MigrationError(f"both {source} and {target} exist; move their contents by hand, then run again")
-    plan.renames.append((source, target))
-
-
-def _migrated_path(raw: str, root: Path) -> str:
-    """The same store path with its first folder renamed, written relative when it is ours.
-
-    A path under root comes back relative, the portable form `artifact_paths.to_portable`
-    writes, so a migrated data directory can be moved or copied. A path outside root is
-    claimed only when it no longer exists here and the same store does exist under root:
-    a container's `/app/data/downloads/x` seen from the host. One that still exists is a store
-    deliberately kept elsewhere, even when root holds a store of the same name, and is left alone.
-    """
-    mapping = dict(DATA_RENAMES)
-    # Absolute is decided by the native path, so a Windows record (`C:\\data\\downloads\\...`)
-    # is recognised on Windows; relative records are always written with forward slashes.
-    if not Path(raw).is_absolute():
-        parts = PurePosixPath(raw).parts
-        if parts and parts[0] in mapping:
-            return PurePosixPath(mapping[parts[0]], *parts[1:]).as_posix()
-        return raw
-    candidate = Path(raw)
-    try:
-        # Resolved, as root is, so a data directory reached through a symlink still matches.
-        relative = candidate.resolve(strict=False).relative_to(root)
-    except ValueError:
-        pass
-    else:
-        parts = relative.parts
-        if parts and parts[0] in mapping:
-            parts = (mapping[parts[0]], *parts[1:])
-        return PurePosixPath(*parts).as_posix()
-    if candidate.exists():
-        return raw  # a store deliberately kept outside the data directory
-    parts = candidate.parts
-    for index in range(1, len(parts) - 1):
-        if parts[index] in mapping and root.joinpath(*parts[index:]).exists():
-            return PurePosixPath(mapping[parts[index]], *parts[index + 1 :]).as_posix()
-    return raw  # nothing under root matches: keep what was recorded
-
-
-def _plan_records(data_root: Path, plan: Plan) -> None:
-    index = data_root / "artifacts" / "records.json"
-    if not index.is_file():
-        return
-    records = json.loads(index.read_text(encoding="utf-8"))
-    changed = False
-    for record in records:
-        for key in _PATH_FIELDS:
-            value = record.get(key)
-            if isinstance(value, str):
-                new = _migrated_path(value, data_root)
-                changed |= new != value
-                record[key] = new
-            elif isinstance(value, list):
-                new_list = [_migrated_path(item, data_root) if isinstance(item, str) else item for item in value]
-                changed |= new_list != value
-                record[key] = new_list
-    if changed:
-        plan.records = (index, records)
-
-
-# In a dataset template, the old folder as the first component of the plugin path or after the
-# built-in package: `plugin: datasets.x.Class`, `plugin: open_geo_service.plugins.datasets.x.Class`.
-# In a plugin module, only imports of the built-in folders (`from open_geo_service.plugins.datasets.x
-# import y`): no plugin imports a sibling by the bare folder name, and a bare `datasets` or `features`
-# is as likely another package. Nothing else is touched: the words are common.
-_YAML_PLUGIN = re.compile(
-    r"^(\s*plugin:\s*['\"]?)((?:open_geo_service\.plugins\.)?)(datasets|features)(?=\.)", re.MULTILINE
-)
-_PY_IMPORT = re.compile(
-    r"^(\s*(?:from|import)\s+)(open_geo_service\.plugins\.)(datasets|features)(?=[.\s,]|$)", re.MULTILINE
-)
-
-
-def _rewritten(text: str, pattern: re.Pattern[str]) -> str:
-    mapping = dict(PLUGIN_RENAMES)
-    return pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}{mapping[m.group(3)]}", text)
-
-
-def _plan_plugin_files(plugins_root: Path, plan: Plan) -> None:
-    """Dataset templates in the template folders; Python modules anywhere under plugins_dir.
-
-    plugins_dir is on `sys.path`, so a module in `processes/` or `exports/` can import from
-    `datasets` or `features` as readily as a plugin next to its template can.
-    """
-    candidates: list[tuple[Path, re.Pattern[str]]] = []
-    for folder in {old for old, _ in PLUGIN_RENAMES} | {new for _, new in PLUGIN_RENAMES}:
-        directory = plugins_root / folder
-        if directory.is_dir():
-            candidates += [(path, _YAML_PLUGIN) for path in directory.rglob("*") if path.suffix in {".yaml", ".yml"}]
-    for path in plugins_root.rglob("*.py"):
-        if not any(part.startswith(".") or part == "__pycache__" for part in path.relative_to(plugins_root).parts):
-            candidates.append((path, _PY_IMPORT))
-    for path, pattern in sorted(candidates):
-        text = path.read_text(encoding="utf-8")
-        new = _rewritten(text, pattern)
-        if new != text:
-            plan.rewrites.append((path, new))
-
-
-def _plugins_root() -> Path | None:
-    config = api_config.get_config()
-    raw = config.get("plugins_dir") if config else None
-    if not raw:
-        return None
-    config_path = api_config.get_config_path()
-    base = config_path.parent if config_path else Path()
-    root = (base / raw).resolve()
-    return root if root.is_dir() else None
-
-
-def build_plan() -> Plan:
-    """Work out every change for the configured instance, without making any."""
-    plan = Plan()
-    data_root = api_config.get_data_root().resolve()
-    if data_root.is_dir():
-        for old, new in DATA_RENAMES:
-            _plan_rename(data_root, old, new, plan)
-        _plan_records(data_root, plan)
-    plugins_root = _plugins_root()
-    if plugins_root is not None:
-        for old, new in PLUGIN_RENAMES:
-            _plan_rename(plugins_root, old, new, plan)
-        _plan_plugin_files(plugins_root, plan)
-    return plan
-
-
-def apply(plan: Plan) -> None:
-    """Rewrite files first, while their paths are the ones planned, then rename the folders."""
-    for path, text in plan.rewrites:
-        path.write_text(text, encoding="utf-8")
-    if plan.records is not None:
-        index, records = plan.records
-        atomic_text(index, f"{json.dumps(records, indent=2)}\n")
-    for source, target in plan.renames:
-        source.rename(target)
-
-
-# --- step 2: the catalog -------------------------------------------------------------------------
 
 OLD_KIND_FOLDERS = tuple(kind.value for kind in layout.Kind)
 _RASTER_STORE = re.compile(r"(?P<id>.+)\.(?:icechunk|zarr)")
@@ -255,8 +89,9 @@ def _catalog_key(key: PurePosixPath) -> PurePosixPath | None:
 def _old_key(raw: str, root: Path) -> PurePosixPath | None:
     """The old-layout key of a recorded path, or None when it is not a dataset file of ours.
 
-    A path outside root counts when the same file exists under root: a container's
-    ``/app/data/rasters/x.icechunk`` seen from the host.
+    A path outside root counts when it no longer exists there and the same file exists under
+    root: a container's ``/app/data/rasters/x.icechunk`` seen from the host. One that still exists
+    is a store deliberately kept elsewhere, and is left alone.
     """
     if not Path(raw).is_absolute():
         return PurePosixPath(raw)
@@ -265,6 +100,8 @@ def _old_key(raw: str, root: Path) -> PurePosixPath | None:
         return PurePosixPath(candidate.resolve(strict=False).relative_to(root).as_posix())
     except ValueError:
         pass
+    if candidate.exists():
+        return None
     parts = candidate.parts
     for index in range(1, len(parts) - 1):
         if parts[index] in OLD_KIND_FOLDERS and root.joinpath(*parts[index:]).exists():
@@ -437,18 +274,9 @@ def describe_catalog(plan: CatalogPlan) -> list[str]:
     return lines
 
 
-def describe(plan: Plan) -> list[str]:
-    """One line per change, in the order `apply` makes them."""
-    lines = [f"rename {source} -> {target.name}/" for source, target in plan.renames]
-    if plan.records is not None:
-        lines.append(f"rewrite store paths in {plan.records[0]}")
-    lines += [f"rewrite plugin paths in {path}" for path, _ in plan.rewrites]
-    return lines
-
-
 def main(argv: list[str] | None = None) -> int:
     """Migrate the configured instance, or report what would change with ``--dry-run``."""
-    parser = argparse.ArgumentParser(description="Move an instance onto the current data folder layout.")
+    parser = argparse.ArgumentParser(description="Move an instance onto the catalog layout.")
     parser.add_argument("--dry-run", action="store_true", help="report the changes without making them")
     args = parser.parse_args(argv)
     prefix = "would " if args.dry_run else ""
@@ -457,29 +285,18 @@ def main(argv: list[str] | None = None) -> int:
         # Without a data folder there is nothing for a server to write, and taking the lease would create one.
         writing = not args.dry_run and api_config.get_data_root().is_dir()
         with writer_lease.hold("migrate_layout") if writing else nullcontext():
-            # Checked before either step, so a refused migration moves nothing.
-            if invalid := build_catalog_plan().invalid_ids:
-                raise MigrationError(_invalid_ids_message(invalid))
-            plan = build_plan()
-            if not plan.empty:
-                for line in describe(plan):
-                    print(prefix + line)
-                if args.dry_run:
-                    print(
-                        "then move the datasets into catalog/; run --dry-run again after migrating to list those moves"
-                    )
-                    return 0
-                apply(plan)
             catalog = build_catalog_plan()
-            if plan.empty and catalog.empty:
-                print("Nothing to migrate: this instance already uses the current layout.")
-            elif not catalog.empty:
+            if catalog.invalid_ids:
+                raise MigrationError(_invalid_ids_message(catalog.invalid_ids))
+            if catalog.empty:
+                print("Nothing to migrate: this instance already uses the catalog layout.")
+            else:
                 print(f"In {catalog.root}:")
             for line in describe_catalog(catalog):
                 print(prefix + line)
             for path in catalog.leftovers:
                 print(f"{'would leave' if args.dry_run else 'leave'} {path}: not a dataset file this migration knows")
-            if args.dry_run or (plan.empty and catalog.empty):
+            if args.dry_run or catalog.empty:
                 return 0
             apply_catalog(catalog)
     except (MigrationError, writer_lease.WriterLeaseHeld) as exc:

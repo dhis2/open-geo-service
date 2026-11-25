@@ -188,8 +188,11 @@ def _parse_entry_point_feature_templates() -> list[tuple[str, dict[str, Any]]]:
                 file_templates = yaml.safe_load(resource.read_text(encoding="utf-8"))
                 if not isinstance(file_templates, list):
                     raise ValueError(f"{plugin_name} ({resource.name}) must contain a list of feature templates")
+                source = f"plugin '{plugin_name}' ({resource.name})"
                 for template in file_templates:
-                    _validate_feature_template(template, source=f"plugin '{plugin_name}' ({resource.name})")
+                    if has_refused_id(template, "feature template", source):
+                        continue
+                    _validate_feature_template(template, source=source)
                     results.append((plugin_name, template))
         except Exception:
             logger.exception("Error loading feature templates from plugin '%s'", plugin_name)

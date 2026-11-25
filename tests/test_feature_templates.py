@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from open_geo_service import config as api_config
+from open_geo_service import plugin_discovery
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.features import providers as feature_providers
 from open_geo_service.features import services as feature_services
@@ -99,12 +100,28 @@ def test_a_non_object_template_is_refused() -> None:
 # --- precedence: built-in, then installed plugin, then plugins_dir ---------------------------
 
 
-def test_entry_point_plugin_template_is_discovered(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        feature_templates, "_load_entry_point_feature_templates", lambda: [("overture", VALID_TEMPLATE)]
+def test_entry_point_plugin_template_is_discovered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    """Read from the package, where one template with an id the rule refuses is skipped, not fatal."""
+    (tmp_path / "districts.yaml").write_text(
+        "- id: districts\n  name: District boundaries\n  id_property: orgUnitCode\n"
+        "- id: Districts.v2\n  name: Saved under the older rule\n  id_property: orgUnitCode\n",
+        encoding="utf-8",
     )
+    monkeypatch.setattr(
+        plugin_discovery,
+        "iter_plugin_subdirs",
+        lambda subdir: iter([("overture", "overture", tmp_path)] if subdir == "vectors" else []),
+    )
+    monkeypatch.setattr(
+        feature_templates, "_load_entry_point_feature_templates", feature_templates._parse_entry_point_feature_templates
+    )
+    feature_templates.reset_feature_template_caches()
+    request.addfinalizer(feature_templates.reset_feature_template_caches)
+
     ids = [t["id"] for t in feature_templates.list_feature_templates()]
-    assert "districts" in ids
+    assert "districts" in ids and "Districts.v2" not in ids
 
 
 def test_entry_point_plugin_template_overrides_builtin(monkeypatch: pytest.MonkeyPatch) -> None:

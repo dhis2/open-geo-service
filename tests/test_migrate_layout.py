@@ -1,4 +1,4 @@
-"""Moving an instance onto the current layout: rasters/vectors (CLIM-1253), then catalog/ (CLIM-1968)."""
+"""Moving an instance from the rasters/vectors folders into catalog/ (CLIM-1968)."""
 
 from __future__ import annotations
 
@@ -28,65 +28,32 @@ VECTOR = {"dataset_id": "districts", "format": "geoparquet"}
 
 @pytest.fixture
 def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An instance on the old layout: data under downloads/ and features/, plugins under datasets/."""
+    """An instance on the layout before catalog/: a raster store and a feature file, recorded four ways."""
     data = tmp_path / "data"
-    (data / "downloads" / "chirps.icechunk").mkdir(parents=True)
-    (data / "downloads" / "chirps.icechunk.lock").write_text("")
-    (data / "features").mkdir()
-    (data / "features" / f"districts.{UUID}.parquet").write_bytes(b"PAR1")
+    (data / "rasters" / "chirps.icechunk").mkdir(parents=True)
+    (data / "rasters" / "chirps.icechunk.lock").write_text("")
+    (data / "vectors").mkdir()
+    (data / "vectors" / f"districts.{UUID}.parquet").write_bytes(b"PAR1")
     (data / "artifacts").mkdir()
     records = [
-        {
-            **RASTER,
-            "artifact_id": "a",
-            "path": "downloads/chirps.icechunk",
-            "asset_paths": ["downloads/chirps.icechunk"],
-        },
-        {**VECTOR, "artifact_id": "b", "path": str(data / "features" / f"districts.{UUID}.parquet"), "asset_paths": []},
-        {**RASTER, "artifact_id": "c", "path": "/mnt/elsewhere/downloads/era5.icechunk", "asset_paths": []},
-        {**RASTER, "artifact_id": "d", "path": "/app/data/downloads/chirps.icechunk", "asset_paths": []},
+        {**RASTER, "artifact_id": "a", "path": "rasters/chirps.icechunk", "asset_paths": ["rasters/chirps.icechunk"]},
+        {**VECTOR, "artifact_id": "b", "path": str(data / "vectors" / f"districts.{UUID}.parquet"), "asset_paths": []},
+        {**RASTER, "artifact_id": "c", "path": "/mnt/elsewhere/rasters/era5.icechunk", "asset_paths": []},
+        {**RASTER, "artifact_id": "d", "path": "/app/data/rasters/chirps.icechunk", "asset_paths": []},
     ]
     (data / "artifacts" / "records.json").write_text(json.dumps(records, indent=2) + "\n")
 
-    plugins = tmp_path / "plugins"
-    (plugins / "datasets").mkdir(parents=True)
-    (plugins / "datasets" / "chelsa.yaml").write_text(
-        "- id: chelsa\n  name: CHELSA\n  variable: tas\n  period_type: monthly\n  sync:\n    kind: static\n"
-        "  source_url: https://example.org/source\n"
-        "  ingestion:\n    plugin: datasets.chelsa.ChelsaPlugin\n    params: {}\n"
-    )
-    (plugins / "datasets" / "chelsa.py").write_text(
-        "from open_geo_service.plugins.datasets.chirps3 import CHIRPS3DailyPlugin\n"
-        "import open_geo_service.plugins.features.dhis2\n"
-        "from datasets import load_dataset\n"
-        "import datasets_extra\n"
-        "\n"
-        "datasets = ['not an import']\n"
-    )
-    (plugins / "datasets" / "chirps_override.yaml").write_text(
-        "- id: chirps_override\n  name: CHIRPS override\n  variable: precip\n  period_type: daily\n"
-        "  sync:\n    kind: static\n"
-        "  source_url: https://example.org/source\n"
-        "  ingestion:\n    plugin: open_geo_service.plugins.datasets.chirps3.CHIRPS3DailyPlugin\n"
-    )
-    (plugins / "features").mkdir()
-    (plugins / "features" / "regions.yaml").write_text("- id: regions\n  name: Regions\n  id_property: id\n")
-    (plugins / "processes").mkdir()
-    (plugins / "processes" / "indices.py").write_text(
-        "from open_geo_service.plugins.datasets.chirps3 import CHIRPS3DailyPlugin\n"
-    )
-
     config = tmp_path / "geoservice.yaml"
-    config.write_text(f"data_dir: {data}\nplugins_dir: ./plugins\n")
+    config.write_text(f"data_dir: {data}\n")
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config))
     api_config._cache = None
     return tmp_path
 
 
-def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> None:
+def test_moves_every_dataset_into_the_catalog_and_rewrites_what_names_them(instance: Path) -> None:
     assert migrate_layout.main([]) == 0
 
-    data, plugins = instance / "data", instance / "plugins"
+    data = instance / "data"
     assert sorted(p.name for p in data.iterdir()) == ["artifacts", "catalog", "writer.lock"]
     assert sorted(p.relative_to(data / "catalog").as_posix() for p in (data / "catalog").glob("*/*/*")) == [
         "rasters/chirps/chirps.icechunk",
@@ -100,23 +67,9 @@ def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> 
     assert records[1]["path"] == f"catalog/vectors/districts/districts.{UUID}.parquet", (
         "an absolute path under the data dir becomes portable"
     )
-    assert records[2]["path"] == "/mnt/elsewhere/downloads/era5.icechunk", "a store outside the data dir is left alone"
+    assert records[2]["path"] == "/mnt/elsewhere/rasters/era5.icechunk", "a store outside the data dir is left alone"
     assert records[3]["path"] == chirps, "a store recorded under a container's mount is ours"
-
-    assert sorted(p.name for p in plugins.iterdir()) == ["processes", "rasters", "vectors"]
-    process = (plugins / "processes" / "indices.py").read_text()
-    assert process == "from open_geo_service.plugins.rasters.chirps3 import CHIRPS3DailyPlugin\n", (
-        "a module outside the template folders imports from them too"
-    )
-    assert "plugin: rasters.chelsa.ChelsaPlugin" in (plugins / "rasters" / "chelsa.yaml").read_text()
-    module = (plugins / "rasters" / "chelsa.py").read_text()
-    assert "from open_geo_service.plugins.rasters.chirps3 import CHIRPS3DailyPlugin" in module
-    assert "import open_geo_service.plugins.vectors.dhis2" in module
-    assert "from datasets import load_dataset" in module, "a bare datasets import is another package"
-    assert "import datasets_extra" in module, "a module that only starts with the word is left alone"
-    override = (plugins / "rasters" / "chirps_override.yaml").read_text()
-    assert "plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin" in override
-    assert "datasets = ['not an import']" in module, "only imports are rewritten"
+    assert layout.raster_store("chirps").is_dir(), "the service finds the store where it now is"
 
 
 def test_running_it_again_changes_nothing(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -129,7 +82,7 @@ def test_running_it_again_changes_nothing(instance: Path, capsys: pytest.Capture
     assert (instance / "data" / "artifacts" / "records.json").read_text() == records
 
     # A mistyped data_dir is reported as having nothing to migrate, and not created.
-    (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data-typo'}\nplugins_dir: ./plugins\n")
+    (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data-typo'}\n")
     api_config._cache = None
     assert migrate_layout.main([]) == 0
     assert not (instance / "data-typo").exists()
@@ -151,18 +104,17 @@ def test_a_dry_run_reports_and_changes_nothing(instance: Path, capsys: pytest.Ca
     assert migrate_layout.main(["--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert "would rename" in out and "would rewrite store paths" in out and "would rewrite plugin paths" in out
+    assert "would move rasters/chirps.icechunk" in out and "would rewrite store paths" in out
     assert sorted(str(p.relative_to(instance)) for p in instance.rglob("*")) == before
 
 
-def test_refuses_when_an_old_and_a_new_folder_both_exist(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    (instance / "data" / "rasters").mkdir()
+def test_refuses_when_a_dataset_is_already_in_its_new_place(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (instance / "data" / "catalog" / "rasters" / "chirps" / "chirps.icechunk").mkdir(parents=True)
 
     assert migrate_layout.main([]) == 1
 
     assert "move their contents by hand" in capsys.readouterr().err
-    assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
-    assert "plugin: datasets." in (instance / "plugins" / "datasets" / "chelsa.yaml").read_text()
+    assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
 def test_refuses_while_a_writer_runs(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -174,28 +126,15 @@ def test_refuses_while_a_writer_runs(instance: Path, capsys: pytest.CaptureFixtu
         writer.wait()
 
     assert f"server (pid {writer.pid}" in capsys.readouterr().err
-    assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
-
-
-def test_the_service_reads_the_migrated_instance(instance: Path) -> None:
-    """The point of the move: after it, the loaders find the plugins and the records resolve."""
-    from open_geo_service.data_registry.services import datasets as registry
-    from open_geo_service.features import templates as feature_templates
-
-    migrate_layout.main([])
-    registry.reset_template_caches()
-
-    assert layout.raster_store("chirps").is_dir()
-    assert "chelsa" in {t["id"] for t in registry.list_datasets()}
-    assert "regions" in {t["id"] for t in feature_templates.list_feature_templates()}
+    assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
 def test_a_data_dir_reached_through_a_symlink_is_migrated(instance: Path) -> None:
     link = instance / "link"
     link.symlink_to(instance / "data")
     index = instance / "data" / "artifacts" / "records.json"
-    index.write_text(json.dumps([{**RASTER, "artifact_id": "a", "path": str(link / "downloads" / "chirps.icechunk")}]))
-    (instance / "geoservice.yaml").write_text(f"data_dir: {link}\nplugins_dir: ./plugins\n")
+    index.write_text(json.dumps([{**RASTER, "artifact_id": "a", "path": str(link / "rasters" / "chirps.icechunk")}]))
+    (instance / "geoservice.yaml").write_text(f"data_dir: {link}\n")
     api_config._cache = None
 
     assert migrate_layout.main([]) == 0
@@ -206,7 +145,7 @@ def test_a_data_dir_reached_through_a_symlink_is_migrated(instance: Path) -> Non
 
 def test_an_external_store_that_still_exists_is_left_alone(instance: Path) -> None:
     """Same suffix as a store under the data dir, but it exists where it was recorded."""
-    external = instance / "archive" / "downloads" / "chirps.icechunk"
+    external = instance / "archive" / "rasters" / "chirps.icechunk"
     external.mkdir(parents=True)
     index = instance / "data" / "artifacts" / "records.json"
     index.write_text(json.dumps([{**RASTER, "artifact_id": "a", "path": str(external)}]))
@@ -217,7 +156,7 @@ def test_an_external_store_that_still_exists_is_left_alone(instance: Path) -> No
     assert record["path"] == str(external)
 
 
-# --- step 2: into catalog/ ------------------------------------------------------------------------
+# --- a data folder written through the real paths ----------------------------------------------
 
 
 def _back_to_the_old_layout(data: Path) -> None:
