@@ -47,8 +47,9 @@ def _local_path(candidate: str | None, mount: str) -> str:
     """A path on this instance to return to after signing in; the landing page for anything else."""
     split = urllib.parse.urlsplit(candidate or "")
     path = split.path
-    # Only a path under the mount, never another origin or a scheme-relative `//host`.
-    if split.scheme or split.netloc or not path.startswith(f"{mount}/") or path.startswith("//"):
+    # Only a path under the mount, never another origin or a scheme-relative `//host`; browsers
+    # read a backslash as a slash, so `/\host` is one too.
+    if split.scheme or split.netloc or not path.startswith(f"{mount}/") or path.startswith("//") or "\\" in path:
         return f"{mount}/"
     if path in (f"{mount}/sign-in", f"{mount}/sign-out"):
         return f"{mount}/"
@@ -56,8 +57,8 @@ def _local_path(candidate: str | None, mount: str) -> str:
 
 
 @router.get("/sign-in", response_class=HTMLResponse)
-def sign_in_page(request: Request) -> HTMLResponse:
-    """The form that takes a token; it returns to the page the visitor came from."""
+def sign_in_page(request: Request, next: str | None = None) -> HTMLResponse:
+    """The form that takes a token; it returns to *next*, or else the page the visitor came from."""
     _require_authentication()
     from open_geo_service.system.templates import SIGN_IN_NEEDS_HTTPS, render_sign_in_page
 
@@ -65,7 +66,7 @@ def sign_in_page(request: Request) -> HTMLResponse:
     referer = urllib.parse.urlsplit(request.headers.get("referer", ""))
     came_from = referer.path + (f"?{referer.query}" if referer.query else "")
     same_host = referer.netloc == request.headers.get("host")
-    next_path = _local_path(came_from if same_host else None, mount)
+    next_path = _local_path(next if next is not None else came_from if same_host else None, mount)
     if not _secure_page(request):
         return HTMLResponse(render_sign_in_page(mount, next_path=next_path, error=SIGN_IN_NEEDS_HTTPS, form=False))
     return HTMLResponse(render_sign_in_page(mount, next_path=next_path))

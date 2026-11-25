@@ -85,22 +85,47 @@ class _AuthenticationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     tokens: list[_TokenConfig] = []
+    gate_reads: bool = False
+
+
+def _settings() -> _AuthenticationConfig | None:
+    raw = api_config.get_config().get("authentication")
+    if raw is None:
+        return None
+    try:
+        return _AuthenticationConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(f"authentication in GEOSERVICE_CONFIG is invalid: {exc}") from exc
+
+
+def reads_gated() -> bool:
+    """Whether `authentication.gate_reads` asks for a credential on reads too (see `route_table.gated`)."""
+    settings = _settings()
+    return settings is not None and settings.gate_reads
 
 
 def configured_tokens() -> tuple[NamedToken, ...]:
     """The named tokens, read from config and the environment; empty when authentication is off.
 
-    Raises ValueError on an invalid block, an unset variable, a secret shorter than
-    MIN_SECRET_LENGTH, or a repeated id or secret, so startup refuses a configuration that would
-    leave a client unable to authenticate or two clients indistinguishable.
+    Raises as :func:`access_settings` does.
     """
-    raw = api_config.get_config().get("authentication")
-    if raw is None:
-        return ()
-    try:
-        settings = _AuthenticationConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise ValueError(f"authentication in GEOSERVICE_CONFIG is invalid: {exc}") from exc
+    return access_settings()[0]
+
+
+def access_settings() -> tuple[tuple[NamedToken, ...], bool]:
+    """The named tokens and whether reads are gated, from one read of the `authentication` block.
+
+    For the middleware, which needs both on every request. Raises ValueError on an invalid block,
+    an unset variable, a secret shorter than MIN_SECRET_LENGTH, or a repeated id or secret, so
+    startup refuses a configuration that would leave a client unable to authenticate or two
+    clients indistinguishable. Also raises when `gate_reads` is set without a token, which would
+    leave reads open while seeming private.
+    """
+    settings = _settings()
+    if settings is None:
+        return (), False
+    if settings.gate_reads and not settings.tokens:
+        raise ValueError("authentication.gate_reads needs at least one token in authentication.tokens")
     tokens: list[NamedToken] = []
     for index, item in enumerate(settings.tokens):
         where = f"authentication.tokens[{index}] ({item.id})"
@@ -114,7 +139,7 @@ def configured_tokens() -> tuple[NamedToken, ...]:
         if any(hmac.compare_digest(token.secret, secret) for token in tokens):
             raise ValueError(f"{where}: the secret in {item.token_env} is used by an earlier token")
         tokens.append(NamedToken(id=item.id, tier=Tier[item.tier.upper()], secret=secret))
-    return tuple(tokens)
+    return tuple(tokens), settings.gate_reads
 
 
 def owner_principal(owner: str | None) -> Principal | None:

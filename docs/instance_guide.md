@@ -330,6 +330,28 @@ plain HTTP from another machine the page says so instead of showing the form. Be
 terminates TLS or rewrites the `Host` header, set `GEOSERVICE_BASE_URL` to the public origin, so
 the pages' origin is recognised; without it, sign-in is refused as coming from another site.
 
+A private instance can gate reads too:
+
+```yaml
+authentication:
+  gate_reads: true
+  tokens: [...]
+```
+
+Then every read (the pages, STAC, Zarr, Icechunk, GeoParquet, PMTiles, thumbnails, `/datasets`,
+`/features`, `/processes`) needs a token of either tier, and a signed-out browser is sent to the
+sign-in page. What a client needs to find out how to sign in stays public: openEO capabilities at
+`GET /` with `Accept: application/json`, `/.well-known/openeo`, `/credentials/*`, the API
+reference, `/health` and `/me`. The STAC catalog and collections declare `basic` and `bearer`
+schemes with the STAC Authentication extension. A client may send `Basic` with the token id as
+the username and the secret as the password, which is what QGIS, GDAL (`GDAL_HTTP_USERPWD`) and
+STAC Browser can send; deploy STAC Browser with `authConfig: {type: "http", scheme: "basic"}`,
+since it does not offer a sign-in from the catalog's schemes. Its catalog page loads thumbnails
+as plain images, which carry no credential, so they stay blank until signed URLs arrive
+(CLIM-1482); a collection's own page shows its thumbnail. Every response is marked
+`Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
+another. Open Geo Service refuses to start with `gate_reads` and no token.
+
 The design and the later steps are in [Authentication and authorization](authentication.md).
 
 ### Read-only instances

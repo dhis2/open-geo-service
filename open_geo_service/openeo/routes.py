@@ -227,7 +227,8 @@ def list_processes(request: Request, response: Response) -> dict[str, Any] | HTM
     The openEO JSON by default, as clients expect. A browser gets the catalogue page the rail
     links to, on the same terms as a single process.
     """
-    from open_geo_service.system.templates import prefers_html, render_processes_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_processes_page
 
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
@@ -256,7 +257,8 @@ def get_process_spec(process_id: str, request: Request, response: Response) -> d
     p = processes_service.get_openeo_process(process_id)
     if p is None:
         raise HTTPException(status_code=404, detail=f"Process '{process_id}' not found")
-    from open_geo_service.system.templates import prefers_html, render_process_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_process_page
 
     # Two representations on one URL — see the dataset page's note on Vary.
     response.headers["Vary"] = "Accept"

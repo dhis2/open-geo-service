@@ -6,7 +6,9 @@ import asyncio
 import base64
 import re
 import time
+from datetime import UTC, datetime
 from http.cookiejar import DefaultCookiePolicy
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -16,10 +18,13 @@ from starlette.types import Message
 
 from open_geo_service import config as api_config
 from open_geo_service.auth import middleware, sessions
-from open_geo_service.auth.route_table import ROUTE_TABLE, route_tier
+from open_geo_service.auth.route_table import ROUTE_TABLE, UNGATED, route_tier
 from open_geo_service.auth.tokens import Tier, configured_tokens
+from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import get_openeo_job_service
+from open_geo_service.stac import services as stac_services
+from open_geo_service.stac.services import AUTHENTICATION_EXTENSION
 from open_geo_service.system.templates import actions_closed
 
 from .conftest import MountedClientFactory
@@ -58,8 +63,9 @@ def _concrete(path: str) -> str:
     return re.sub(r"\{[^}]+\}", "abc", path)
 
 
-def _configure(monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]]) -> None:
-    monkeypatch.setattr(api_config, "_cache", {**api_config.get_config(), "authentication": {"tokens": tokens}})
+def _configure(monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], *, gate_reads: bool = False) -> None:
+    authentication = {"tokens": tokens, "gate_reads": gate_reads}
+    monkeypatch.setattr(api_config, "_cache", {**api_config.get_config(), "authentication": authentication})
 
 
 @pytest.fixture
@@ -67,7 +73,12 @@ def auth_on(monkeypatch: pytest.MonkeyPatch) -> None:
     _turn_on(monkeypatch)
 
 
-def _turn_on(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def reads_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    _turn_on(monkeypatch, gate_reads=True)
+
+
+def _turn_on(monkeypatch: pytest.MonkeyPatch, *, gate_reads: bool = False) -> None:
     monkeypatch.setenv("GEOSERVICE_TEST_OPERATOR_TOKEN", OPERATOR_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_OTHER_TOKEN", OTHER_SECRET)
@@ -78,6 +89,7 @@ def _turn_on(monkeypatch: pytest.MonkeyPatch) -> None:
             {"id": "notebook", "token_env": "GEOSERVICE_TEST_CLIENT_TOKEN", "tier": "authenticated"},
             {"id": "other", "token_env": "GEOSERVICE_TEST_OTHER_TOKEN", "tier": "authenticated"},
         ],
+        gate_reads=gate_reads,
     )
 
 
@@ -113,6 +125,8 @@ def test_every_served_route_is_in_the_route_table() -> None:
     decided = {route: route_tier(route.split(" ")[0], _concrete(route.split(" ")[1])) for route in DECLARED}
     assert {route: tier for route, tier in decided.items() if tier != DECLARED[route]} == {}
     assert route_tier("GET", "/not-a-route") == Tier.OPERATOR
+    public = {route for route, tier in DECLARED.items() if tier is Tier.PUBLIC}
+    assert sorted(UNGATED - public) == [], "UNGATED lists only public routes"
 
 
 @pytest.mark.parametrize("route", sorted(route for route, tier in DECLARED.items() if tier > Tier.PUBLIC))
@@ -132,7 +146,10 @@ def test_gated_routes_need_a_token(auth_on: None, client: TestClient, route: str
     "path", ["/", "/.well-known/openeo", "/openapi.json", "/credentials/oidc", "/stac/catalog.json"]
 )
 def test_reads_and_discovery_stay_public(auth_on: None, client: TestClient, path: str) -> None:
-    assert client.get(path).status_code == 200
+    response = client.get(path)
+    assert response.status_code == 200
+    if path == "/stac/catalog.json":
+        assert "auth:schemes" not in response.json()
 
 
 def test_refuses_before_reading_the_body(auth_on: None) -> None:
@@ -372,6 +389,7 @@ def test_web_sign_in_opens_the_forms_its_tier_allows(
         "/sign-in", data={"token": CLIENT_SECRET, "next": "//elsewhere.example/"}, headers=SAME_ORIGIN
     )
     assert off_site.url.path == "/"
+    assert 'name="next" value="/"' in client.get("/sign-in?next=/%5Celsewhere.example/").text
 
     # An authenticated token signs in, but the pages' forms need an operator.
     client_cookie = _session(client, CLIENT_SECRET)
@@ -439,20 +457,88 @@ def test_without_tokens_there_is_no_sign_in(client: TestClient) -> None:
     assert "Sign in" not in page and "Sign out" not in page
 
 
+# --- gated reads --------------------------------------------------------------------------
+
+JSON = {"Accept": "application/json"}
+
+
+@pytest.mark.parametrize("route", sorted(route for route, tier in DECLARED.items() if tier is Tier.PUBLIC))
+def test_gated_reads_need_a_token(reads_gated: None, client: TestClient, route: str) -> None:
+    method, path = route.split(" ", 1)
+    anonymous = client.request(method, _concrete(path), headers=JSON, follow_redirects=False)
+    if route in UNGATED:
+        # Not refused by the middleware; `/credentials/basic` answers 401 itself without Basic.
+        assert "needs a token" not in anonymous.text
+        return
+    assert anonymous.status_code == 401 and anonymous.headers["WWW-Authenticate"] == "Bearer"
+    # Any token reads, as Basic with its id too, which is what STAC Browser and QGIS send.
+    for credential in (_bearer(CLIENT_SECRET), _basic("notebook", CLIENT_SECRET)):
+        assert client.request(method, _concrete(path), headers={**JSON, **credential}).status_code not in (401, 403)
+
+
+def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
+    reads_gated: None, browser: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = browser
+    # A browser is sent to sign in and back; openEO discovery at `/` stays public.
+    for page, back in (("/datasets?q=1", "%2Fdatasets%3Fq%3D1"), ("/", "%2F")):
+        redirected = client.get(page, headers=HTML, follow_redirects=False)
+        assert redirected.status_code == 303 and redirected.headers["location"] == f"/sign-in?next={back}"
+    assert client.get("/", headers=JSON).json()["api_version"]
+    assert 'name="next" value="/datasets?q=1"' in client.get("/sign-in?next=/datasets?q=1").text
+
+    # A session reads what the pages and the map viewer load.
+    cookie = _session(client, CLIENT_SECRET)
+    assert client.get("/datasets", headers={**cookie, **HTML}).status_code == 200
+    # A store's root too, which GDAL asks for with a trailing slash.
+    for store in ("/zarr/abc/zarr.json", "/zarr/abc/", "/icechunk/abc/"):
+        assert client.get(store, headers=cookie).status_code not in (401, 403)
+    assert client.get("/datasets", headers=cookie).headers["cache-control"] == "private"
+
+    # Read-only refuses writes by the table's tiers, so gated reads still answer a token.
+    monkeypatch.setitem(api_config._cache or {}, "read_only", True)
+    assert client.get("/datasets", headers={**JSON, **_bearer(CLIENT_SECRET)}).status_code == 200
+
+    # STAC declares both schemes and marks what is on this instance, not a source elsewhere.
+    raster: dict[str, Any] = {
+        "type": "Collection",
+        "id": "rain",
+        "stac_extensions": [],
+        "links": [
+            {"rel": "via", "href": "https://source.example/rain"},
+            {"rel": "license", "href": "//source.example/licence"},
+        ],
+        "assets": {"zarr": {"href": "https://testserver/zarr/rain"}},
+    }
+    synced = datetime(2026, 1, 1, tzinfo=UTC)
+    published = {"rain": SimpleNamespace(dataset_name="Rain", format=ArtifactFormat.ICECHUNK, created_at=synced)}
+    monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: published)
+    monkeypatch.setattr(stac_services, "_build_raster_collection", lambda *_: raster)
+    catalog = client.get("/stac/catalog.json", headers=_bearer(CLIENT_SECRET)).json()
+    assert set(catalog["auth:schemes"]) == {"basic", "bearer"}
+    assert AUTHENTICATION_EXTENSION in catalog["stac_extensions"]
+    assert all(link["auth:refs"] == ["basic", "bearer"] for link in catalog["links"])
+    collection = client.get("/stac/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
+    assert collection["assets"]["zarr"]["auth:refs"] == ["basic", "bearer"]
+    assert not any("auth:refs" in link for link in collection["links"][:2])
+    assert "auth:refs" not in raster["assets"]["zarr"]
+
+
 # --- configuration -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("tokens", "error"),
+    ("tokens", "gate_reads", "error"),
     [
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_UNSET", "tier": "operator"}], "GEOSERVICE_TEST_UNSET is not set"),
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_SHORT", "tier": "operator"}], "shorter than 32"),
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "admin"}], "invalid"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_UNSET", "tier": "operator"}], False, "UNSET is not set"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_SHORT", "tier": "operator"}], False, "shorter than 32"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "admin"}], False, "invalid"),
         (
             [
                 {"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "operator"},
                 {"id": "a", "token_env": "GEOSERVICE_TEST_CLIENT_TOKEN", "tier": "operator"},
             ],
+            False,
             "id is used by an earlier token",
         ),
         (
@@ -460,19 +546,22 @@ def test_without_tokens_there_is_no_sign_in(client: TestClient) -> None:
                 {"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "operator"},
                 {"id": "b", "token_env": "GEOSERVICE_TEST_SAME", "tier": "operator"},
             ],
+            False,
             "secret in GEOSERVICE_TEST_SAME is used by an earlier token",
         ),
+        # Gating with no token would leave reads open while seeming private.
+        ([], True, "gate_reads needs at least one token"),
     ],
 )
 def test_an_unusable_token_refuses_startup(
-    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], error: str
+    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], gate_reads: bool, error: str
 ) -> None:
     monkeypatch.setenv("GEOSERVICE_TEST_OPERATOR_TOKEN", OPERATOR_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_SHORT", "short")
     monkeypatch.setenv("GEOSERVICE_TEST_SAME", OPERATOR_SECRET)
     monkeypatch.delenv("GEOSERVICE_TEST_UNSET", raising=False)
-    _configure(monkeypatch, tokens)
+    _configure(monkeypatch, tokens, gate_reads=gate_reads)
 
     with pytest.raises(ValueError, match=error) as raised:
         configured_tokens()

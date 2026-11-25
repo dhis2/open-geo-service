@@ -55,7 +55,8 @@ def list_data_sources(request: Request, response: Response) -> list[dict[str, An
     """
     from open_geo_service.features import providers as feature_providers
     from open_geo_service.features.services import usable_feature_templates
-    from open_geo_service.system.templates import prefers_html, render_data_sources_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_data_sources_page
 
     # Two representations share this URL, so a cache keyed on the URL alone would serve one
     # client the other's. Set on both arms: the JSON arm is a value FastAPI serialises, so the
@@ -90,7 +91,8 @@ def get_data_source(dataset_id: str, request: Request, response: Response) -> di
     `?f=html` and `?f=json` choose explicitly.
     """
     # Note: have to import inside function to avoid circular import
-    from open_geo_service.system.templates import prefers_html, render_data_source_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_data_source_page
 
     from ..data_accessor.services.accessor import get_data_coverage
 

@@ -12,15 +12,24 @@ from http.cookies import SimpleCookie
 from fastapi import Request
 from starlette.applications import Starlette
 from starlette.datastructures import Headers, MutableHeaders
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from open_geo_service import config as api_config
 from open_geo_service import read_only
 from open_geo_service.auth import sessions
-from open_geo_service.auth.route_table import listed_tier
-from open_geo_service.auth.tokens import ANONYMOUS, OPEN, Principal, Tier, authenticate, configured_tokens
+from open_geo_service.auth.route_table import gated, listed_tier
+from open_geo_service.auth.tokens import (
+    ANONYMOUS,
+    OPEN,
+    Principal,
+    Tier,
+    access_settings,
+    authenticate,
+    configured_tokens,
+)
+from open_geo_service.shared.negotiation import prefers_html, wants_json
 from open_geo_service.shared.urls import BASE_URL_ENV, mount_prefix, strip_mount
 
 logger = logging.getLogger(__name__)
@@ -88,7 +97,7 @@ class AccessMiddleware:
             await _refuse(403, "read-only", "PermissionsInsufficient", message)(scope, receive, send)
             return
         principal = OPEN
-        tokens = configured_tokens()
+        tokens, gate_reads = access_settings()
         if tokens:
             headers = Headers(scope=scope)
             authorization = headers.get("authorization")
@@ -120,15 +129,23 @@ class AccessMiddleware:
                 await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
             needed = Tier.OPERATOR if required is None else required
+            if needed is Tier.PUBLIC and gate_reads and gated(method, path, page=_asks_for_page(scope, path)):
+                needed = Tier.AUTHENTICATED
             if principal.tier < needed:
                 tier = needed.name.lower()
-                if principal is ANONYMOUS:
+                if principal is ANONYMOUS and method in _SAFE_METHODS and _asks_for_page(scope, path):
+                    # A signed-out browser is sent to sign in and brought back, not shown JSON.
+                    await _to_sign_in(Request(scope), path)(scope, receive, send)
+                elif principal is ANONYMOUS:
                     message = f"{method} {path} needs a token with the {tier} tier."
                     await _refuse(401, "authentication", "AuthenticationRequired", message)(scope, receive, send)
                 else:
                     message = f"{method} {path} needs the {tier} tier, which {principal.id} does not have."
                     await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
+            if gate_reads:
+                # Each answer is for one caller now, so a shared cache in front must not keep it.
+                send = _private(send)
         scope.setdefault("state", {})["principal"] = principal
         reset = _viewer.set(principal)
         try:
@@ -185,6 +202,37 @@ def _clearing_cookie(send: Send, path: str) -> Send:
         await send(message)
 
     return wrapped
+
+
+def _private(send: Send) -> Send:
+    """`send`, marking the response `Cache-Control: private` unless it sets its own caching."""
+
+    async def wrapped(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            headers = MutableHeaders(scope=message)
+            if "cache-control" not in headers:
+                headers["cache-control"] = "private"
+        await send(message)
+
+    return wrapped
+
+
+def _asks_for_page(scope: Scope, path: str) -> bool:
+    """Whether a browser asks for a page rather than data, as the routes decide it.
+
+    `/` answers HTML unless JSON is asked for (see `read_index`); data routes answer HTML only
+    to a client that ranks it above JSON.
+    """
+    request = Request(scope)
+    if path == "/":
+        return not wants_json(request)
+    return prefers_html(request)
+
+
+def _to_sign_in(request: Request, path: str) -> RedirectResponse:
+    mount = mount_prefix(request)
+    back = mount + path + (f"?{request.url.query}" if request.url.query else "")
+    return RedirectResponse(f"{mount}/sign-in?{urllib.parse.urlencode({'next': back})}", status_code=303)
 
 
 def _served(scope: Scope) -> bool:
