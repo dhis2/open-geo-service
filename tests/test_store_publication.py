@@ -1,8 +1,8 @@
 """Readers always see a whole version of a raster store, across a failed or killed update (CLIM-1328).
 
-An overwrite is built on a temporary branch of the same Icechunk repository and `main` moves to it
-in one step; a pyramid rebuild is one commit. The tests update a real store through
-``create_artifact`` and read it the way a reader does, through `main`.
+An overwrite is built on a temporary branch of the same Icechunk repository and the write branch
+moves to it in one step; a pyramid rebuild is one commit. Publishing moves `main`. The tests update
+a real store through ``create_artifact`` and read it the way a reader does.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from open_geo_service.ingestions import services, sync_engine  # noqa: E402
 from open_geo_service.ingestions.schemas import PublicationStatus  # noqa: E402
 from open_geo_service.publications.services import managed_dataset_id_for  # noqa: E402
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period  # noqa: E402
+from open_geo_service.streaming.store import published_snapshot  # noqa: E402
 
 NY, NX = 101, 75
 DAYS = ["2026-01-01", "2026-01-02", "2026-01-03"]
@@ -122,10 +123,7 @@ def _branches(path: Path) -> set[str]:
 
 
 def _published(path: Path) -> str | None:
-    try:
-        return str(_repo(path).lookup_branch("published"))
-    except icechunk.RefNotFoundError:
-        return None
+    return published_snapshot(_repo(path))
 
 
 @pytest.mark.parametrize("pyramid", [False, True])
@@ -144,7 +142,7 @@ def test_an_overwrite_moves_readers_to_the_new_version_in_one_step(
     assert _read(store["path"]) == (3, 2.0)
     assert float(reader["tg"].mean()) == 1.0, "a reader keeps the version it opened"
     reader.close()
-    assert _branches(store["path"]) == {"main", "published"}
+    assert _branches(store["path"]) == {"main", "ingest"}
     # Nothing beside the store but the note that unreachable data is due for collection.
     assert sorted(p.name for p in store["path"].parent.iterdir()) == ["tg.icechunk", "tg.icechunk.gc-pending"]
 
@@ -152,7 +150,7 @@ def test_an_overwrite_moves_readers_to_the_new_version_in_one_step(
     services.publish_artifact_record(replaced.artifact_id, snapshot_id=before)
     assert _read(store["path"]) == (3, 1.0)
 
-    # The startup backfill measures the version readers are served, not `main`.
+    # The startup backfill measures the version readers are served, not the write branch.
     def unmeasured(records: list[services.ArtifactRecord]) -> None:
         records[0] = records[0].model_copy(update={"statistics": None})
 
@@ -161,7 +159,7 @@ def test_an_overwrite_moves_readers_to_the_new_version_in_one_step(
     measured = services.list_artifacts().items[0].statistics
     assert measured is not None and measured.max == 1.0
 
-    # The next sync publishes `main` again though nothing new is due, and the record follows.
+    # The next sync publishes the write branch again though nothing new is due, and the record follows.
     assert _sync(monkeypatch, replaced) == "up_to_date"
     assert _read(store["path"]) == (3, 2.0)
     assert services.list_artifacts().items[0].statistics == replaced.statistics
@@ -181,8 +179,11 @@ def test_a_sync_that_fails_part_way_is_not_a_version_to_roll_back_to(
     with pytest.raises(Exception, match="upstream fetch failed"):
         _ingest(store, overwrite=False)
 
-    partial = str(_repo(store["path"]).lookup_branch("main"))  # holds DAYS[1], kept for the retry
+    partial = str(_repo(store["path"]).lookup_branch("ingest"))  # holds DAYS[1], kept for the retry
     assert partial != _published(store["path"])
+    # A reader outside GeoService opens `main` with no branch named, and sees the published day only.
+    outside = xr.open_zarr(_repo(store["path"]).readonly_session("main").store, zarr_format=3)
+    assert outside.sizes["t"] == 1
     with pytest.raises(HTTPException) as refused:
         services.publish_artifact_record(record.artifact_id, snapshot_id=partial)
     assert refused.value.status_code == 404
@@ -228,24 +229,30 @@ def test_retention_zero_keeps_only_the_current_version(store: dict[str, Any], mo
     assert overwritten.size_bytes == services.stored_bytes(store["path"])
 
 
-def test_the_published_branch_decides_what_readers_see(store: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_decides_what_readers_see(store: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     _use_pyramids(monkeypatch)  # so a sync's normalization is a step of its own to fold in
     unpublished = _ingest(store, overwrite=False, end=DAYS[1])
-    assert _published(store["path"]) is None, "an unpublished raster has no published branch"
+    assert _published(store["path"]) is None, "an unpublished raster has nothing on main"
     assert unpublished.publication.status == PublicationStatus.UNPUBLISHED
+    # Written before the write branch existed, its data moves off `main` at startup.
+    _old_layout(store["path"], published=None)
+    assert services.reconcile_published_branches() == 1
+    assert _branches(store["path"]) == {"main", "ingest"}
+    assert _published(store["path"]) is None
+    assert _read(store["path"]) == (2, 1.0)
 
     published = _ingest(store, overwrite=False, end=DAYS[1], publish=True)
     assert published.publication.status == PublicationStatus.PUBLISHED
     first = _published(store["path"])
-    assert first == str(_repo(store["path"]).lookup_branch("main"))
+    assert first == str(_repo(store["path"]).lookup_branch("ingest"))
 
     synced = _ingest(store, overwrite=False)  # a sync of a published raster moves its branch
     assert synced.publication.status == PublicationStatus.PUBLISHED
-    assert _published(store["path"]) == str(_repo(store["path"]).lookup_branch("main")) != first
+    assert _published(store["path"]) == str(_repo(store["path"]).lookup_branch("ingest")) != first
     assert _read(store["path"]) == (3, 1.0)
     # One whole snapshot per sync, its pyramid levels extended in the same one, above the empty
     # first; the earlier sync's is kept.
-    history = list(_repo(store["path"]).ancestry(branch="main"))
+    history = list(_repo(store["path"]).ancestry(branch="ingest"))
     assert len(history) == 3
 
     # A rollback, which the record follows: it describes the version readers now see.
@@ -257,7 +264,7 @@ def test_the_published_branch_decides_what_readers_see(store: dict[str, Any], mo
             services.publish_artifact_record(synced.artifact_id, snapshot_id=refused)
         assert unknown.value.status_code == 404
 
-    # A sync that finds the record behind the store re-registers it and publishes `main` again;
+    # A sync that finds the record behind the store re-registers it and publishes it again;
     # if its record write fails, readers stay on the version the record describes.
     with monkeypatch.context() as patched:
         patched.setattr(services, "_upsert_artifact_record", _raise)
@@ -267,17 +274,41 @@ def test_the_published_branch_decides_what_readers_see(store: dict[str, Any], mo
 
     # A writer that registers a rewrite of a published store, as openEO does, publishes it too.
     services.register_artifact_record(rolled_back, publish=False, replace_store=True)
-    assert _published(store["path"]) == str(_repo(store["path"]).lookup_branch("main"))
+    assert _published(store["path"]) == str(_repo(store["path"]).lookup_branch("ingest"))
     assert _read(store["path"]) == (3, 1.0)
 
 
+def _old_layout(path: Path, published: str | None) -> None:
+    """Lay the store out as it was before `main` was the published version.
+
+    Writers committed to `main`, and readers opened `published`, which a store not yet published lacked.
+    """
+    repo = _repo(path)
+    if published is not None:
+        repo.create_branch("published", published)
+    repo.reset_branch("main", repo.lookup_branch("ingest"))
+    repo.delete_branch("ingest")
+
+
 def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> None:
-    # A store from before the branch: published record, no branch, and a tip not marked
-    # complete, which publishing marks, so a rollback may return to what readers are served.
-    # Its record is behind `main`, as a sync that failed part way left it.
+    # A store from before the write branch, published, with a sync that failed part way on top:
+    # the write branch takes what `main` held, and `main` what `published` held.
     record = _ingest(store, overwrite=False, end=DAYS[1], publish=True)
-    _repo(store["path"]).writable_session("main").commit("unmarked", allow_empty=True)
-    _repo(store["path"]).delete_branch("published")
+    published = _published(store["path"])
+    _repo(store["path"]).writable_session("ingest").commit("unmarked", allow_empty=True)
+    _old_layout(store["path"], published=published)
+    assert services.reconcile_published_branches() == 1
+    assert _branches(store["path"]) == {"main", "ingest"}
+    assert _published(store["path"]) == published
+    assert next(iter(_repo(store["path"]).ancestry(branch="ingest"))).message == "unmarked"
+    assert services.reconcile_published_branches() == 0
+
+    # A published record with nothing on `main`, and a write tip not marked complete, which
+    # publishing marks, so a rollback may return to what readers are served. Its record is behind
+    # the write branch, as a sync that failed part way left it.
+    repo = _repo(store["path"])
+    *_, initial = repo.ancestry(branch="main")
+    repo.reset_branch("main", initial.id)
 
     def behind(records: list[services.ArtifactRecord]) -> None:
         temporal = records[0].coverage.temporal.model_copy(update={"end": DAYS[0]})
@@ -287,7 +318,7 @@ def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> No
 
     services._mutate_records(behind)
     assert services.reconcile_published_branches() == 1
-    tip = next(iter(_repo(store["path"]).ancestry(branch="main")))
+    tip = next(iter(_repo(store["path"]).ancestry(branch="ingest")))
     assert _published(store["path"]) == str(tip.id) and tip.metadata.get("ogs_complete")
     record = services.list_artifacts().items[0]
     assert record.coverage.temporal.end == DAYS[1], "the record describes what readers are served"
@@ -335,16 +366,16 @@ def test_a_failed_overwrite_leaves_readers_on_the_version_they_had(
 
     assert _read(store["path"]) == (3, 1.0)
     assert _published(store["path"]) == published
-    assert _branches(store["path"]) == {"main", "published"}
+    assert _branches(store["path"]) == {"main", "ingest"}
     lock = services._acquire_store_lock(store["path"])
     assert lock.acquire(blocking=False), "the next ingest is not refused"
     lock.release()
 
 
-def test_a_failed_sync_that_rebuilt_the_store_resets_main(
+def test_a_failed_sync_that_rebuilt_the_store_resets_the_write_branch(
     store: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A sync whose store outgrew a flat layout rebuilds it as a pyramid on `main`; a failure after undoes both."""
+    """A sync whose store outgrew a flat layout rebuilds it as a pyramid; a failure after undoes both."""
     _ingest(store, overwrite=False, end=DAYS[1])
     _use_pyramids(monkeypatch)
     monkeypatch.setattr(services, "_upsert_artifact_record", _raise)
@@ -354,8 +385,8 @@ def test_a_failed_sync_that_rebuilt_the_store_resets_main(
 
     assert _read(store["path"]) == (2, 1.0)
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store["path"])))
-    assert "multiscales" not in zarr.open_group(repo.readonly_session("main").store, mode="r").attrs, "still flat"
-    assert _branches(store["path"]) == {"main"}
+    assert "multiscales" not in zarr.open_group(repo.readonly_session("ingest").store, mode="r").attrs, "still flat"
+    assert _branches(store["path"]) == {"main", "ingest"}
 
 
 def test_cleanup_removes_a_branch_left_undeleted_but_keeps_the_one_a_failed_rollback_names(
@@ -370,8 +401,8 @@ def test_cleanup_removes_a_branch_left_undeleted_but_keeps_the_one_a_failed_roll
     assert artifact.coverage.temporal.end == DAYS[-1]
     assert _read(store["path"]) == (3, 2.0)
 
-    # During a rollback it is not a failed rollback: the update's own error is raised, `main` is
-    # restored, and the branches wait for the next cleanup.
+    # During a rollback it is not a failed rollback: the update's own error is raised, the write
+    # branch is restored, and the branches wait for the next cleanup.
     store["plugin"] = _ValuePlugin(3.0)
     monkeypatch.setattr(services, "_upsert_artifact_record", lambda *args, **kwargs: _raise())
     with pytest.raises(OSError, match="write failed"):
@@ -379,9 +410,9 @@ def test_cleanup_removes_a_branch_left_undeleted_but_keeps_the_one_a_failed_roll
     assert _read(store["path"]) == (3, 2.0)
     monkeypatch.setattr(icechunk.Repository, "delete_branch", delete_branch)
     assert services.clean_up_interrupted_ingest(store["path"])
-    assert _branches(store["path"]) == {"main"}
+    assert _branches(store["path"]) == {"main", "ingest"}
 
-    # A rollback that cannot reset `main` leaves the version before it on a branch the operator
+    # A rollback that cannot reset the write branch leaves the version before it on a branch the operator
     # restores from, which no cleanup removes.
     reset = icechunk.Repository.reset_branch
     resets: list[str] = []
@@ -395,14 +426,14 @@ def test_cleanup_removes_a_branch_left_undeleted_but_keeps_the_one_a_failed_roll
     monkeypatch.setattr(icechunk.Repository, "reset_branch", reset_once)
     with pytest.raises(RuntimeError, match="rollback could not complete") as failed:
         _ingest(store, overwrite=True)
-    (kept,) = _branches(store["path"]) - {"main"}
+    (kept,) = _branches(store["path"]) - {"main", "ingest"}
     assert kept.startswith("ogs-restore-") and kept in str(failed.value)
-    assert _read(store["path"]) == (3, 3.0), "main stayed on the attempt"
+    assert _read(store["path"]) == (3, 3.0), "the write branch stayed on the attempt"
     monkeypatch.setattr(downloader, "DOWNLOAD_DIR", store["path"].parent)
     services.clean_up_interrupted_ingest(store["path"])
     services.clean_up_interrupted_ingests()
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store["path"])))
-    reset(repo, "main", repo.lookup_branch(kept))
+    reset(repo, "ingest", repo.lookup_branch(kept))
     assert _read(store["path"]) == (3, 2.0)
 
 
@@ -478,7 +509,7 @@ def test_a_killed_overwrite_leaves_the_store_readable(
     marker.write_text("2000-01-01T00:00:00+00:00")
     monkeypatch.setattr(downloader, "DOWNLOAD_DIR", store["path"].parent)
     assert services.clean_up_interrupted_ingests() == 1
-    assert _branches(store["path"]) == {"main"}
+    assert _branches(store["path"]) == {"main", "ingest"}
     assert marker.read_text() > "2026", "the pending collection starts after what the killed process wrote"
     moved = marker.read_text()
     services.clean_up_interrupted_ingests()

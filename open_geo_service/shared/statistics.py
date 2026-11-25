@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from open_geo_service.ingestions.schemas import ArtifactStatistics
+from open_geo_service.shared.branches import WRITE_BRANCH
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,12 @@ _PERCENTILE_STATS = {name: float(name[1:]) for name in ArtifactStatistics.model_
 _PERCENTILE_SAMPLE_AT = np.linspace(0.0, 100.0, 1001)
 
 
-def measure_statistics(store_path: str | Path, variable: str, *, branch: str = "main") -> ArtifactStatistics | None:
+def measure_statistics(
+    store_path: str | Path, variable: str, *, branch: str = WRITE_BRANCH
+) -> ArtifactStatistics | None:
     """The statistics of *variable* at *branch* of the Icechunk store at *store_path*, or None.
 
-    `main` by default: a writer measures what it just committed, before publishing it.
+    The write branch by default: a writer measures what it just committed, before publishing it.
 
     Missing and infinite cells are skipped; the store's fill value is already decoded to NaN on open. None
     when the variable is absent or has no finite value. **Never raises**: statistics feed the

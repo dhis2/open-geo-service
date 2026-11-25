@@ -147,7 +147,7 @@ def _head() -> str:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    return str(repo.lookup_branch("main"))
+    return str(repo.lookup_branch("ingest"))
 
 
 def _commits(job_id: str) -> list[str]:
@@ -155,7 +155,9 @@ def _commits(job_id: str) -> list[str]:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    mine = [s.id for s in repo.ancestry(branch="main") if s.message.startswith(f"Published from openEO job {job_id} ")]
+    mine = [
+        s.id for s in repo.ancestry(branch="ingest") if s.message.startswith(f"Published from openEO job {job_id} ")
+    ]
     return list(reversed(mine))
 
 
@@ -1002,7 +1004,7 @@ def test_the_writer_returns_the_committed_snapshot(tmp_path: Path) -> None:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    assert snapshot == repo.lookup_branch("main")
+    assert snapshot == repo.lookup_branch("ingest")
 
 
 # --- finding the commit after a restart ------------------------------------------------------

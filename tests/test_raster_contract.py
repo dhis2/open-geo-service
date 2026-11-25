@@ -412,7 +412,7 @@ def test_written_store_satisfies_the_contract(tmp_path: Path) -> None:
     write_to_icechunk_store(ds, store_path, t_dim="time", crs="EPSG:32633")
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    written = xr.open_zarr(repo.readonly_session("main").store, consolidated=False, zarr_format=3)
+    written = xr.open_zarr(repo.readonly_session("ingest").store, consolidated=False, zarr_format=3)
     try:
         assert published_contract_violations(written) == []
         assert written["v"].dims == ("t", "y", "x")
@@ -443,7 +443,7 @@ def test_ingest_refuses_to_append_to_a_pre_contract_store(tmp_path: Path) -> Non
         },
     )
     repo = open_or_create_repo(store_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     ascending.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("pre-contract store")
 
@@ -469,7 +469,7 @@ def test_ingest_appends_happily_to_a_conforming_store(tmp_path: Path) -> None:
         },
     )
     repo = open_or_create_repo(store_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     descending.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("conforming store")
 

@@ -364,7 +364,7 @@ A source can list periods before their data is written. dynamical.org's CHIRPS3 
 The orchestrator therefore commits every period as usual, and checks each for values that are all missing (NaN, or the variable's `_FillValue`). Whether an empty period E is kept depends on what follows it in the run:
 
 1. **A later period L has data.** E and every empty period up to L are empty for a reason of their own, such as water or cloud over the whole extent, and are kept.
-2. **No later period has data.** The source has not filled them yet. When the run ends, the branch the run writes to is reset to the snapshot before E, as a failed sync is rolled back. The periods before E are kept, and a later sync fetches the rest again. Readers of a published dataset open the `published` branch, which moves only when the sync finishes, so they never see E.
+2. **No later period has data.** The source has not filled them yet. When the run ends, the branch the run writes to is reset to the snapshot before E, as a failed sync is rolled back. The periods before E are kept, and a later sync fetches the rest again. Readers of a published dataset open `main`, which moves only when the sync finishes, so they never see E.
 
 In case 2 the sync still succeeds, with a warning in its message and the log naming the periods held back: for a source such as dynamical.org this happens on every sync that lands in its update window, and the dataset still advances to the last period with data, so it is not a failure. A source that never fills a listed period shows as a dataset whose end stops advancing, with the same warning on every sync.
 

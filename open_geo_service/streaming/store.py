@@ -18,6 +18,7 @@ from typing import Any
 
 from geozarr_toolkit import create_geozarr_attrs
 
+from open_geo_service.shared.branches import PUBLISHED_BRANCH, WRITE_BRANCH
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
 from open_geo_service.stac.media_types import is_multiscales_convention
@@ -27,26 +28,24 @@ logger = logging.getLogger(__name__)
 
 
 def open_or_create_repo(store_path: Path) -> Any:
-    """Open an existing Icechunk repository or create one at ``store_path``."""
+    """Open an existing Icechunk repository, or create one at ``store_path`` with its write branch."""
     import icechunk
 
     storage = icechunk.local_filesystem_storage(str(store_path))
     if store_path.exists():
         return icechunk.Repository.open(storage)
     store_path.parent.mkdir(parents=True, exist_ok=True)
-    return icechunk.Repository.create(storage)
-
-
-# The branch readers open. Writers commit to `main`; publishing moves this one (docs/managed_data_api_guide.md).
-PUBLISHED_BRANCH = "published"
+    repo = icechunk.Repository.create(storage)
+    repo.create_branch(WRITE_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
+    return repo
 
 
 # Snapshot metadata on a version a sync or job completed, which a rollback may publish. A sync
-# that fails part way leaves its periods on `main` for a retry without it.
+# that fails part way leaves its periods on the write branch for a retry without it.
 COMPLETE_VERSION = {"ogs_complete": True}
 
 
-def seal_version(store_path: Path, branch: str = "main") -> None:
+def seal_version(store_path: Path, branch: str = WRITE_BRANCH) -> None:
     """Mark the tip of *branch* as a complete version, in place: an empty amend that adds the mark."""
     repo = open_or_create_repo(store_path)
     tip = next(iter(repo.ancestry(branch=branch)))
@@ -54,56 +53,46 @@ def seal_version(store_path: Path, branch: str = "main") -> None:
 
 
 def read_snapshot(repo: Any) -> str:
-    """The snapshot readers see: the tip of `published`, or of `main` for a store not published yet."""
-    import icechunk
-
-    try:
-        return str(repo.lookup_branch(PUBLISHED_BRANCH))
-    except icechunk.RefNotFoundError:
-        return str(repo.lookup_branch("main"))
+    """The snapshot readers see: the tip of `main`, or of the write branch for a store not published yet."""
+    return published_snapshot(repo) or str(repo.lookup_branch(WRITE_BRANCH))
 
 
 def published_snapshot(repo: Any) -> str | None:
-    """The tip of `published`, or None when the store has not been published."""
-    import icechunk
-
-    try:
-        return str(repo.lookup_branch(PUBLISHED_BRANCH))
-    except icechunk.RefNotFoundError:
-        return None
+    """The tip of `main`, or None while it is still the repository's initial, empty snapshot."""
+    tip = next(iter(repo.ancestry(branch=PUBLISHED_BRANCH)))
+    return None if tip.parent_id is None else str(tip.id)
 
 
 def publish_snapshot(store_path: Path, snapshot_id: str | None = None) -> str | None:
-    """Move `published` to *snapshot_id*, or to the tip of `main`; return where it was, or None.
+    """Move `main` to *snapshot_id*, or to the tip of the write branch; return where it was, or None.
 
-    Creates the branch the first time. The tip of `main` is marked complete first, if it is not.
-    An older *snapshot_id* rolls the store back; it must be a complete version (see
-    :data:`COMPLETE_VERSION`) in the history of `main` that retention has kept. The move is
-    conditional on the branch being where it was read, so a move this process did not expect
-    fails instead of being overwritten.
+    The tip of the write branch is marked complete first, if it is not. An older *snapshot_id*
+    rolls the store back; it must be a complete version (see :data:`COMPLETE_VERSION`) in the
+    history of the write branch that retention has kept. The move is conditional on `main`
+    being where it was read, so a move this process did not expect fails instead of being
+    overwritten.
     """
     from open_geo_service import writer_lease
 
     writer_lease.ensure_held()
     repo = open_or_create_repo(store_path)
     if snapshot_id is None:
-        if not next(iter(repo.ancestry(branch="main"))).metadata.get("ogs_complete"):
+        if not next(iter(repo.ancestry(branch=WRITE_BRANCH))).metadata.get("ogs_complete"):
             # Readers are served it from now on, so it is a version a rollback may return to.
             seal_version(store_path)
-        target = str(repo.lookup_branch("main"))
+        target = str(repo.lookup_branch(WRITE_BRANCH))
     elif any(
         str(snapshot.id) == snapshot_id and snapshot.metadata.get("ogs_complete")
-        for snapshot in repo.ancestry(branch="main")
+        for snapshot in repo.ancestry(branch=WRITE_BRANCH)
     ):
         target = snapshot_id
     else:
         raise ValueError(f"Snapshot '{snapshot_id}' is not a complete, kept version of {store_path.name}")
-    current = published_snapshot(repo)
-    if current is None:
-        repo.create_branch(PUBLISHED_BRANCH, target)
-    elif current != target:
+    before = published_snapshot(repo)
+    current = str(repo.lookup_branch(PUBLISHED_BRANCH))
+    if current != target:
         repo.reset_branch(PUBLISHED_BRANCH, target, from_snapshot_id=current)
-    return current
+    return before
 
 
 def expire_replaced_snapshots(repo: Any) -> set[str]:
@@ -115,7 +104,7 @@ def expire_replaced_snapshots(repo: Any) -> set[str]:
     return set(repo.expire_snapshots(older_than=datetime.now(UTC) - api_config.get_snapshot_retention()))
 
 
-def committed_data_group(store_path: Path, *, branch: str = "main") -> str | None:
+def committed_data_group(store_path: Path, *, branch: str = WRITE_BRANCH) -> str | None:
     """Return the group holding the committed data variables: ``"0"``, or ``None`` for the root.
 
     A pyramided store keeps its data in level groups and leaves the root with only the time
@@ -160,7 +149,7 @@ def _open_committed(store_path: Path, branch: str) -> Any:
 
 
 def read_committed_period_ids_ordered(
-    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = "main"
+    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = WRITE_BRANCH
 ) -> list[str]:
     """Return committed period ids in their stored coordinate order.
 
@@ -209,13 +198,13 @@ def read_committed_period_ids_ordered(
 
 
 def read_committed_period_ids(
-    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = "main"
+    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = WRITE_BRANCH
 ) -> set[str]:
     """Return period ids already committed in the store, or an empty set."""
     return set(read_committed_period_ids_ordered(store_path, period_type, time_dim=time_dim, branch=branch))
 
 
-def is_store_empty(store_path: Path, *, branch: str = "main") -> bool:
+def is_store_empty(store_path: Path, *, branch: str = WRITE_BRANCH) -> bool:
     """Return whether an Icechunk repository has no arrays, groups, or attrs.
 
     This is a conservative safety check for first-write detection. If the store
@@ -262,7 +251,9 @@ def is_store_empty(store_path: Path, *, branch: str = "main") -> bool:
         return False
 
 
-def read_committed_spatial_coords(store_path: Path, *, x_dim: str = "x", y_dim: str = "y", branch: str = "main") -> Any:
+def read_committed_spatial_coords(
+    store_path: Path, *, x_dim: str = "x", y_dim: str = "y", branch: str = WRITE_BRANCH
+) -> Any:
     """The spatial coordinate arrays already committed to a store, or None.
 
     An append writes along the time axis only, leaving these as they are — so a period whose

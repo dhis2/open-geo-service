@@ -15,6 +15,7 @@ from topozarr.coarsen import create_pyramid
 from xarray.backends.zarr import FillValueCoder
 
 from open_geo_service import config as api_config
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
 from open_geo_service.shared.raster_contract import prepare_for_publication
@@ -340,7 +341,7 @@ def append_pyramid_levels(
     t_dim: str | None = None,
     x_dim: str = "x",
     y_dim: str = "y",
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
 ) -> int | None:
     """Extend every coarser level of a pyramid store on *branch* to the periods level 0 has gained.
@@ -523,7 +524,7 @@ def needs_pyramid(ds: xr.Dataset) -> bool:
 
 
 def ensure_time_coordinate_chunking(
-    store_path: Path, time_dim: str, *, branch: str = "main", amend: bool = False
+    store_path: Path, time_dim: str, *, branch: str = WRITE_BRANCH, amend: bool = False
 ) -> bool:
     """Re-chunk an existing Icechunk store's 1-D time coordinate to a bounded chunk size.
 
@@ -589,7 +590,7 @@ def write_to_icechunk_store(
     pyramid_method: str = "mean",
     commit_message: str = "Materialized dataset",
     before_commit: Callable[[], None] | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> str:
@@ -611,7 +612,6 @@ def write_to_icechunk_store(
     ``grid_mapping`` per variable, then ``proj.assign_crs`` again because
     ``rio.write_crs`` destroys xproj CRS detection.
     """
-    import icechunk
     import rioxarray as _rxr  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio accessor
 
     # Bring the cube up to the published-store contract, and resolve the CRS that describes it,
@@ -676,8 +676,9 @@ def write_to_icechunk_store(
     ds = ds.rio.write_crs(crs)
     ds = ds.proj.assign_crs(spatial_ref=crs)
 
-    storage = icechunk.local_filesystem_storage(str(store_path))
-    repo = icechunk.Repository.open_or_create(storage)
+    from open_geo_service.streaming.store import open_or_create_repo
+
+    repo = open_or_create_repo(store_path)
     session = repo.writable_session(branch)
 
     if _needs_pyramid(ds, x_dim, y_dim):

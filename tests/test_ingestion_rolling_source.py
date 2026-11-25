@@ -131,7 +131,7 @@ def test_forward_ingestion_preserves_retired_source_history(
 
     # A gap in the missing delta must still fail before any data is written.
     repo = services.open_or_create_repo(store_path)
-    snapshot = repo.lookup_branch("main")
+    snapshot = repo.lookup_branch("ingest")
     plugin.available = ["2026-01-06"]
     with pytest.raises(services.HTTPException, match="contiguous sequence beginning at 2026-01-05"):
         ingest("2026-01-06", "2026-01-06")
@@ -140,7 +140,7 @@ def test_forward_ingestion_preserves_retired_source_history(
     plugin.available = ["2026-01-03", "2026-01-04"]
     with pytest.raises(services.HTTPException, match="Source cannot materialize"):
         ingest("2025-12-31", "2026-01-04")
-    assert repo.lookup_branch("main") == snapshot
+    assert repo.lookup_branch("ingest") == snapshot
     assert services._load_records()[-1].artifact_id == artifact.artifact_id
     assert len(plugin.fetched) == 4
 

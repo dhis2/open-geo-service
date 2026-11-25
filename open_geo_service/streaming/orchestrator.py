@@ -28,6 +28,7 @@ import numpy as np
 import xarray as xr
 import zarr
 
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
 from open_geo_service.shared.raster_contract import (
     TIME_ALIASES,
@@ -131,7 +132,9 @@ def _grid_spec_from_dataset(ds: xr.Dataset, *, time_dim: str, x_dim: str, y_dim:
     )
 
 
-def _assert_appendable_axes(store_path: Path, ds: xr.Dataset, *, x_dim: str, y_dim: str, branch: str = "main") -> None:
+def _assert_appendable_axes(
+    store_path: Path, ds: xr.Dataset, *, x_dim: str, y_dim: str, branch: str = WRITE_BRANCH
+) -> None:
     """Refuse to append a period whose spatial axes disagree with the committed store.
 
     Normalisation reorders rows (y descending) and columns (longitudes rolled to −180…180). An
@@ -180,7 +183,7 @@ async def run_streaming_ingest(
     save_cursor: Callable[[dict[str, Any]], None] | None = None,
     periods: list[str] | None = None,
     committed_periods: list[str] | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     replace: bool = False,
 ) -> StreamingIngestResult:
     """Stream one dataset into a flat Zarr v3 store one period at a time, committing each to *branch*.
@@ -443,7 +446,7 @@ def run_streaming_ingest_sync(
     save_cursor: Callable[[dict[str, Any]], None] | None = None,
     periods: list[str] | None = None,
     committed_periods: list[str] | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     replace: bool = False,
 ) -> StreamingIngestResult:
     """Synchronous wrapper for threaded job execution.
@@ -488,7 +491,7 @@ def run_static_ingest_sync(
     bbox: list[float],
     store_path: Path,
     is_cancel_requested: Callable[[], bool] | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
 ) -> StreamingIngestResult:
     """Fetch a static dataset without a time axis once and write it as a ``(y, x)`` store (CLIM-1448).
 

@@ -69,7 +69,7 @@ def _create(ingestion: dict[str, Any], end: str = "2026-01-06") -> Any:
 
 def _committed_messages(store_path: Path) -> list[str]:
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    return [snapshot.message for snapshot in repo.ancestry(branch="main")]
+    return [snapshot.message for snapshot in repo.ancestry(branch="ingest")]
 
 
 def _conflict_on_the_third_period(monkeypatch: pytest.MonkeyPatch) -> list[str]:

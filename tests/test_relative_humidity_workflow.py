@@ -130,6 +130,6 @@ def test_relative_humidity_workflow_publishes_as_percent(managed_instance: Path)
     assert template["period_type"] == "daily"
     store_path = managed_instance / "rasters" / "era5land_relative_humidity_daily_estimated.icechunk"
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    stored = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+    stored = xr.open_zarr(repo.readonly_session("ingest").store, consolidated=False)
     assert stored["rh"].attrs["units"] == "%"
     assert np.allclose(stored["rh"].values, 53.82, atol=0.01)

@@ -53,7 +53,7 @@ class _TransactionRepo:
         self.calls: list[str] = []
 
     def lookup_branch(self, branch: str) -> str:
-        assert branch == "main"
+        assert branch == "ingest"
         return "before-ingest"
 
     def create_branch(self, branch: str, snapshot: str) -> None:
@@ -228,7 +228,8 @@ def test_get_dataset_zarr_store_file_reads_icechunk_metadata(tmp_path: Path, mon
     store_path = tmp_path / "chirps3.icechunk"
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.create(storage)
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = xr.Dataset(
         {"precip": (("t", "y", "x"), [[[1.0]]])},
         coords={"t": ["2026-01-01"], "x": [1.0], "y": [2.0]},
@@ -263,7 +264,8 @@ def test_zarr_store_root_serves_group_metadata(tmp_path: Path, monkeypatch: pyte
     """
     store_path = tmp_path / "root.icechunk"
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(store_path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = xr.Dataset(
         {"precip": (("t", "y", "x"), [[[1.0]]])},
         coords={"t": ["2026-01-01"], "x": [1.0], "y": [2.0]},
@@ -296,7 +298,8 @@ def test_get_dataset_zarr_store_file_rejects_invalid_icechunk_relative_path(
     store_path = tmp_path / "chirps3.icechunk"
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.create(storage)
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = xr.Dataset(
         {"precip": (("t", "y", "x"), [[[1.0]]])},
         coords={"t": ["2026-01-01"], "x": [1.0], "y": [2.0]},
@@ -324,7 +327,8 @@ def test_zarr_route_serves_the_published_artifact_when_a_newer_one_is_unpublishe
 ) -> None:
     store_path = tmp_path / "published.icechunk"
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(store_path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = xr.Dataset(
         {"precip": (("t", "y", "x"), [[[1.0]]])},
         coords={"t": ["2026-01-01"], "x": [1.0], "y": [2.0]},
@@ -517,7 +521,8 @@ def _published_icechunk_store(
     store_path: Path, monkeypatch: pytest.MonkeyPatch, values: list[float]
 ) -> icechunk.Repository:
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(store_path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     xr.Dataset({"precip": (("t", "x"), [values])}, coords={"t": ["2026-01-01"]}).to_zarr(
         session.store, mode="w", zarr_format=3
     )
@@ -551,7 +556,7 @@ def test_zarr_route_keeps_an_icechunk_store_open_and_follows_new_commits(
         return bytes(response.body)
 
     before = [chunk() for _ in range(3)]
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     xr.Dataset({"precip": (("t", "x"), [[2.0]])}, coords={"t": ["2026-01-01"]}).to_zarr(
         session.store, mode="w", zarr_format=3
     )
@@ -644,7 +649,7 @@ def test_zarr_route_answers_a_range_on_an_unwritten_icechunk_chunk_as_missing(
 ) -> None:
     """Icechunk sizes an unwritten chunk as 0; a range on it is a 404, which clients read as the fill value."""
     repo = _published_icechunk_store(tmp_path / "gaps.icechunk", monkeypatch, [1.0])
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     gaps = zarr.open_group(session.store, mode="a").create_array(
         "gaps", shape=(2,), chunks=(1,), dtype="f4", fill_value=float("nan")
     )
@@ -1360,7 +1365,7 @@ def test_create_artifact_uses_streaming_plugin_for_direct_ingest(
         *,
         zarr_path: str | None = None,
         icechunk_path: str | None = None,
-        branch: str = "main",
+        branch: str = "ingest",
     ) -> dict[str, object]:
         captured["dataset_id"] = dataset_arg["id"]
         captured["zarr_path"] = zarr_path
@@ -1404,7 +1409,7 @@ def test_create_artifact_uses_streaming_plugin_for_direct_ingest(
         "save_cursor": None,
         "periods": ["2026-01-01", "2026-01-02", "2026-01-03"],
         "committed_periods": [],
-        "branch": "main",
+        "branch": "ingest",
         "replace": False,
     }
     assert artifact.format == ArtifactFormat.ICECHUNK
@@ -1618,7 +1623,7 @@ def test_create_artifact_rolls_back_append_when_pyramid_rebuild_fails(
             publish=False,
         )
 
-    assert transaction_repo.reset == [("main", "before-ingest")]
+    assert transaction_repo.reset == [("ingest", "before-ingest")]
     assert transaction_repo.deleted == [transaction_repo.created[0][0]]
     # The attempt's commits are unreachable after the reset, and are collected once the
     # rollback branch no longer pins them.
@@ -1801,7 +1806,7 @@ def test_create_artifact_allows_streaming_coverage_clamped_to_source_availabilit
         *,
         zarr_path: str | None = None,
         icechunk_path: str | None = None,
-        branch: str = "main",
+        branch: str = "ingest",
     ) -> dict[str, object]:
         assert dataset_arg["id"] == "chirps3_precipitation_daily"
         assert zarr_path is None

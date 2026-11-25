@@ -772,7 +772,7 @@ def test_a_refresh_replaces_the_collection_even_when_the_extract_window_changed(
 
 def test_a_raster_still_keeps_one_record_per_request_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The feature identity rule is narrow: raster version history is untouched by it."""
-    # Unpublished: registering a published record moves its store's published branch, and these have no store.
+    # Unpublished: registering a published record moves its store's `main` branch, and these have no store.
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")

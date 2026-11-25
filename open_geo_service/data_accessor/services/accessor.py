@@ -12,6 +12,7 @@ from pyproj import Transformer
 
 from ...data_manager.services.downloader import get_icechunk_path, get_zarr_path
 from ...data_manager.services.utils import get_time_dim, get_x_y_dims
+from ...shared.branches import WRITE_BRANCH
 from ...shared.crs import dataset_crs
 from ...shared.netcdf import write_netcdf
 from ...shared.time import numpy_datetime_to_period_string
@@ -103,7 +104,7 @@ def get_data_coverage_for_paths(
     *,
     zarr_path: str | None = None,
     icechunk_path: str | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
 ) -> dict[str, Any]:
     """Return coverage metadata for the concrete files created for one artifact, at *branch* of an Icechunk store."""
     provided = sum(value is not None for value in (zarr_path, icechunk_path))
@@ -215,8 +216,8 @@ def _open_zarr_group(store: Any, group: str | None, *, chunks: Any) -> xr.Datase
 def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True, branch: str | None = None) -> xr.Dataset:
     """Open an Icechunk-backed dataset through a readonly session pinned to the version it opened.
 
-    Opens what readers see (``published``, or ``main`` before the first publish) unless a writer
-    names its *branch*.
+    Opens what readers see (``main``, or the write branch before the first publish) unless a
+    writer names its *branch*.
 
     Dask chunks follow the stored chunks in space and merge them along time up to
     ``READ_CHUNK_TARGET_BYTES``, so computations are sized for dask rather than for storage.

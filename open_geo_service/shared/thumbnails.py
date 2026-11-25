@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.classes import class_colors, classification_from_template
 from open_geo_service.shared.display import display_midpoint
 
@@ -375,8 +376,8 @@ def write_dataset_thumbnail(
 
         # Closed as soon as the pixels are in hand, so a sync run does not leave Icechunk and
         # Zarr backend resources open behind every dataset it touches.
-        # `main`: the writer renders what it just committed, before publishing it.
-        with closing(open_icechunk_dataset(store_path, branch="main")) as ds:
+        # The write branch: the writer renders what it just committed, before publishing it.
+        with closing(open_icechunk_dataset(store_path, branch=WRITE_BRANCH)) as ds:
             variable = str(dataset.get("variable") or "")
             if variable not in ds.data_vars:
                 variable = str(next(iter(ds.data_vars), ""))

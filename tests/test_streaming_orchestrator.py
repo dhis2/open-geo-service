@@ -101,7 +101,7 @@ class _FakeRepo:
         self.sessions: list[_FakeSession] = []
 
     def writable_session(self, branch: str) -> _FakeSession:
-        assert branch == "main"
+        assert branch == "ingest"
         session = _FakeSession(self.store)
         self.sessions.append(session)
         return session
@@ -577,7 +577,7 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
 
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.open(storage)
-    session = repo.readonly_session("main")
+    session = repo.readonly_session("ingest")
     ds = xr.open_zarr(session.store)
     try:
         assert ds["precip"].values[:, 0, 0].tolist() == [1.0, 2.0, 3.0]
@@ -640,7 +640,7 @@ def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, 
 
     def committed() -> tuple[list[str], list[float]]:
         repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-        with xr.open_zarr(repo.readonly_session("main").store) as ds:
+        with xr.open_zarr(repo.readonly_session("ingest").store) as ds:
             return [str(t)[:10] for t in ds["t"].values], ds["precip"].values[:, 0, 0].tolist()
 
     # A run that fails after committing the empty 2026-01-05 does not keep it either.
@@ -727,7 +727,9 @@ def test_sync_append_keeps_spatial_ref_a_coordinate(tmp_path: Path) -> None:
     ingest("2026-01-01", "2026-01-02")
     ingest("2026-01-03", "2026-01-03")
 
-    store = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path))).readonly_session("main").store
+    store = (
+        icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path))).readonly_session("ingest").store
+    )
     assert zarr.open_group(store, mode="r").attrs.get("coordinates") == "spatial_ref"
     ds = xr.open_zarr(store, zarr_format=3)
     try:
