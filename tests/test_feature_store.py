@@ -325,20 +325,6 @@ def test_a_replaced_file_stays_until_its_replacement_is_older_than_the_grace_per
     assert not first.exists()
 
 
-def test_a_file_current_until_a_refresh_stays_however_old_an_unregistered_file_after_it_is() -> None:
-    """A refresh killed between writing and registering leaves a file that was never current."""
-    current = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    orphan, _count, _geometry = store.write_feature_collection(
-        dataset_id="districts", features=_collection(), id_property="orgUnitCode"
-    )
-    _age(Path(str(current.path)), 1000)
-    _age(orphan, 500)
-
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    assert len(store.read_feature_collection(current)) == 2, "a reader holding the replaced record can still read it"
-
-
 def test_a_file_a_killed_refresh_left_does_not_shorten_the_grace_of_the_file_before_it() -> None:
     """A file no record ever named is removed by the next refresh, so it cannot stand in as the
     replacement of the current file and make that one look replaced long ago."""
@@ -353,6 +339,7 @@ def test_a_file_a_killed_refresh_left_does_not_shorten_the_grace_of_the_file_bef
         template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
     )
     assert not orphan.exists()
+    assert len(store.read_feature_collection(current)) == 2, "a reader holding the replaced record can still read it"
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     assert len(store.read_feature_collection(current)) == 2, "replaced moments ago, so still readable"
@@ -363,17 +350,22 @@ def test_the_files_to_keep_are_found_behind_a_symlinked_data_folder(
 ) -> None:
     """Records hold resolved paths; a listing of a symlinked folder does not."""
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
-    real = tmp_path / "real"
-    real.mkdir()
-    (tmp_path / "link").symlink_to(real)
-    old, new = real / "old.parquet", real / "new.parquet"
-    old.touch()
-    new.touch()
-    _age(old, 10)
+    (tmp_path / "link").symlink_to(tmp_path, target_is_directory=True)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "link")
+    first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    versions.prune_superseded((tmp_path / "link").glob("*.parquet"), current=new, replaced=[old])
+    assert len(store.read_feature_collection(first)) == 2, "the file just replaced stays"
 
-    assert old.exists()
+
+def test_a_collection_whose_id_extends_another_with_a_dot_keeps_its_files() -> None:
+    """An id stored before the id rule changed may hold a dot."""
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    other = layout.dataset_dir(layout.Kind.VECTOR, "districts") / f"districts.v2.{'0' * 32}.parquet"
+    other.touch()
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+
+    assert other.exists()
 
 
 def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(

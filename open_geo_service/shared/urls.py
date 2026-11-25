@@ -197,9 +197,7 @@ def require_segment_safe_id(value: str, what: str, where: str = "") -> str:
     """Return *value*, or raise `ValueError` naming it as *what* (in *where*) when it breaks the rule."""
     if not is_segment_safe_id(value):
         place = f" in {where}" if where else ""
-        raise ValueError(
-            f"invalid {what} {value!r}{place}; it becomes a URL path segment and a folder name, so it must {ID_RULE}"
-        )
+        raise ValueError(f"invalid {what} {value!r}{place}; it must {ID_RULE}")
     return value
 
 

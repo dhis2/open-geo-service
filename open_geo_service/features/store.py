@@ -10,6 +10,7 @@ exist, so the store directory is not an inbox.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -108,11 +109,14 @@ def new_collection_file(dataset_id: str) -> Path:
 def collection_files(dataset_id: str) -> list[Path]:
     """Return this collection's stored files, current and replaced alike.
 
-    `<id>.*.parquet` matches only this collection's files: an id has no dots, so the files of
-    `a` and `a_b` never match each other's pattern.
+    Matched exactly, `<id>.<uuid>.parquet`: a collection stored before the id rule changed may
+    have a dot in its id, so `a.v2`'s files also match `a.*.parquet`.
     """
     root = _collection_root(dataset_id)
-    return sorted(root.glob(f"{dataset_id}.*.parquet")) if root.is_dir() else []
+    if not root.is_dir():
+        return []
+    name = re.compile(rf"{re.escape(dataset_id)}\.[0-9a-f]{{32}}\.parquet")
+    return sorted(path for path in root.glob(f"{dataset_id}.*.parquet") if name.fullmatch(path.name))
 
 
 def prune_superseded_files(dataset_id: str, *, current: Path | None, replaced: Iterable[Path] = ()) -> None:
