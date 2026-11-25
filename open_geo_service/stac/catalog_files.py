@@ -99,10 +99,14 @@ def write_catalog_after_change() -> None:
 
 
 def catalog_documents() -> dict[str, portolan.Document]:
-    """Every document of the catalog, keyed by its path in `catalog/`."""
+    """Every document of the catalog, keyed by its path in `catalog/`, from one reading of the records."""
+    with ingestion_services.reading_published_records(stac_services._eligible_artifacts_by_dataset()) as published:
+        return _catalog_documents(published)
+
+
+def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portolan.Document]:
     request = _catalog_request()
     base = absolute_base(request)
-    published = stac_services._eligible_artifacts_by_dataset()
     built: dict[str, portolan.Document] = {}
     files: dict[str, str] = {}
     described: dict[str, ArtifactRecord] = {}
@@ -240,9 +244,27 @@ def _localized_json(
             if href is not None:
                 assets[name] = {**asset, "href": href}
         document["assets"] = assets
+        if isinstance(document.get("renders"), dict):
+            _drop_renders_of_missing_assets(document)
     if isinstance(document.get("providers"), list):
         document["providers"] = [_provider(provider, localize) for provider in document["providers"]]
     return document
+
+
+def _drop_renders_of_missing_assets(document: dict[str, Any]) -> None:
+    """Leave out a render whose assets were not written, such as one drawing the `zarr` asset."""
+    renders = {
+        name: render
+        for name, render in document["renders"].items()
+        if all(asset in document["assets"] for asset in render.get("assets", []))
+    }
+    if renders:
+        document["renders"] = renders
+        return
+    del document["renders"]
+    document["stac_extensions"] = [
+        ext for ext in document.get("stac_extensions", []) if ext != stac_services.RENDER_EXTENSION
+    ]
 
 
 def _provider(provider: dict[str, Any], localize: Callable[[str], str | None]) -> dict[str, Any]:
@@ -287,6 +309,23 @@ _MEDIA_TYPES = {
     ".pmtiles": tiles.PMTILES_MEDIA_TYPE,
     ".png": "image/png",
 }
+
+
+_IMMUTABLE_STORE_FOLDERS = frozenset({"chunks", "manifests", "snapshots", "transactions"})
+"""An Icechunk store's folders whose files never change once written; `repo` and the refs do."""
+
+
+def cache_control(file: Path) -> str:
+    """Immutable for an Icechunk store's write-once files; revalidated for everything else here.
+
+    The documents change with every records write and a store's `repo` file with every commit,
+    as `/icechunk` serves them (`ingestions.services.serve_icechunk_file`).
+    """
+    parts = file.parts
+    for index, part in enumerate(parts[:-1]):
+        if part.endswith(".icechunk") and parts[index + 1] in _IMMUTABLE_STORE_FOLDERS:
+            return "max-age=31536000, immutable"
+    return "no-cache"
 
 
 def served_file(path: str) -> tuple[Path, str]:

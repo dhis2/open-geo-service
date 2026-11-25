@@ -1005,7 +1005,7 @@ def _source_pages(dataset_id: str, template: dict[str, Any]) -> list[str]:
     (the built-in normals and anomalies) names the sources of the inputs it was made from,
     following an input that is itself derived back to where its data came from.
     """
-    published = ingestion_services.stac_eligible_artifacts_by_dataset()
+    published = _eligible_artifacts_by_dataset()
     pages: list[str] = []
     seen: set[str] = set()
 
@@ -1319,9 +1319,10 @@ def _written(artifact: ArtifactRecord) -> str:
 
     Not the store path, which a re-ingest reuses, and not the artifact id alone, which an
     overwrite or a store replacement keeps (`_upsert_artifact_record`) while the store changes.
-    Each write gives the record a new `created_at`.
+    Each write gives the record a new `created_at`; a publication or rollback moves the published
+    snapshot without one.
     """
-    return f"{artifact.artifact_id}@{artifact.created_at.isoformat()}"
+    return f"{artifact.artifact_id}@{artifact.created_at.isoformat()}@{artifact.publication.snapshot_id}"
 
 
 def _cache_by_artifact(cache: dict[str, _V], artifact_id: str, value: _V) -> None:

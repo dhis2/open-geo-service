@@ -21,4 +21,4 @@ router = APIRouter()
 def get_stac_file(path: str) -> FileResponse:
     """A document of the STAC catalog, or a data file of a published dataset, at its path in the catalog."""
     file, media_type = catalog_files.served_file(path)
-    return FileResponse(file, media_type=media_type)
+    return FileResponse(file, media_type=media_type, headers={"Cache-Control": catalog_files.cache_control(file)})

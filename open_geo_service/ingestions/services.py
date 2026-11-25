@@ -7,7 +7,9 @@ import json
 import logging
 import mimetypes
 import threading
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -304,11 +306,34 @@ def stac_eligible_artifacts_by_dataset() -> dict[str, ArtifactRecord]:
     widened: the Zarr and Icechunk routes and the raster branch of `load_collection` still
     open only datacubes, so they keep asking the raster question.
     """
+    snapshot = _published_records_read.get()
+    if snapshot is not None:
+        return snapshot
     return {
         dataset_id: artifact
         for dataset_id, artifact in _latest_published_artifacts_by_dataset().items()
         if artifact.format in CATALOGUED_FORMATS
     }
+
+
+_published_records_read: ContextVar[dict[str, ArtifactRecord] | None] = ContextVar("published_snapshot", default=None)
+
+
+@contextmanager
+def reading_published_records(
+    published: dict[str, ArtifactRecord] | None = None,
+) -> Generator[dict[str, ArtifactRecord]]:
+    """Read the published records once for everything in the block, as a catalog rewrite needs.
+
+    `stac_eligible_artifacts_by_dataset` answers from that reading until the block ends, so the
+    documents of one rewrite describe one state of the records. *published* is that reading,
+    when the caller has made it.
+    """
+    token = _published_records_read.set(published if published is not None else stac_eligible_artifacts_by_dataset())
+    try:
+        yield stac_eligible_artifacts_by_dataset()
+    finally:
+        _published_records_read.reset(token)
 
 
 OPENEO_COLLECTION_FORMATS = LOADABLE_RASTER_FORMATS | {ArtifactFormat.GEOPARQUET}
