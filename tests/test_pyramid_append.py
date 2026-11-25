@@ -301,6 +301,46 @@ def test_a_failed_record_write_rolls_back_the_appended_levels(
     assert set(lengths.values()) == {3}, lengths
 
 
+def test_every_level_keeps_its_time_coordinates_in_blocks_through_appends_and_refreshes(
+    pyramid_sync: dict[str, Any],
+) -> None:
+    """Every sync reads level 0's `t` and `fetched_at` in full to plan, so neither is one value per chunk.
+
+    The chunk is fixed at the build: a store built with three periods keeps blocks wider than
+    three after later appends, so a long daily series stays a few reads (CLIM-2015).
+    """
+    state = pyramid_sync
+    store = state["store"]
+
+    def assert_blocks(periods: int) -> None:
+        root = _root(store)
+        levels = sorted(root.group_keys())
+        assert len(levels) >= 3, "precondition: a pyramid with several levels"
+        for level in levels:
+            for name in ("t", "fetched_at"):
+                coord = root[level][name]
+                assert coord.shape == (periods,), f"{level}/{name}"
+                assert coord.chunks == (downloader._ROOT_TIME_COORD_MAX_CHUNK,), f"{level}/{name}"
+
+    _ingest(state, "2026-01-03")
+    assert_blocks(3)
+
+    state["plugin"].available += ["2026-01-04", "2026-01-05"]
+    _ingest(state, "2026-01-05")
+    assert_blocks(5)
+
+    state["now"] = datetime(2026, 5, 1, tzinfo=UTC)
+    state["plugin"].final = {"2026-01-02"}
+    _ingest(state, "2026-01-05", refresh_periods=["2026-01-02"])
+    assert_blocks(5)
+
+    assert state["rebuilds"] == 1, "the append and the refresh must not rebuild the pyramid"
+    initial = datetime(2026, 2, 1, tzinfo=UTC)
+    assert read_fetched_at(store) == [initial, state["now"], initial, initial, initial]
+    with open_icechunk_dataset(store) as stored:
+        assert [str(t)[:10] for t in stored["t"].values] == [f"2026-01-0{day}" for day in range(1, 6)]
+
+
 def test_every_level_of_an_ingested_pyramid_has_one_period_per_shard_and_a_fill_value(
     pyramid_sync: dict[str, Any],
 ) -> None:

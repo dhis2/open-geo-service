@@ -840,9 +840,21 @@ def write_to_icechunk_store(
         # levels from native below (see #293 and carbonplan/topozarr#26).
         native_resample = pyramid_method in _NATIVE_RESAMPLE_METHODS
         composable_method = "max" if native_resample else pyramid_method
+        time_coords: list[str] = []
+        if t_dim is not None:
+            # Every sync reads level 0's whole time axis (`t`, `fetched_at`) to plan, so the
+            # coordinates along it are chunked as the root's, not one value per chunk (CLIM-2015).
+            # A fixed chunk rather than the current length: an append keeps the chunk the array
+            # was built with. In memory (1-D, small), so no dask chunk spans two stored ones; the
+            # data variables stay lazy.
+            time_coords = [str(name) for name, coord in ds.coords.items() if coord.dims == (t_dim,)]
+            ds = ds.assign_coords({name: ds.variables[name].compute() for name in time_coords})
         pyramid = create_pyramid(
             ds, levels=levels, x_dim=x_dim, y_dim=y_dim, method=cast(CoarseningMethod, composable_method)
         )
+        for level_encoding in pyramid.encoding.values():
+            for name in time_coords:
+                level_encoding[name] = {"chunks": (_ROOT_TIME_COORD_MAX_CHUNK,)}
         # Pyramid.write() writes the root group attributes from ``pyramid.attrs``,
         # so merge the GeoZarr conventions (multiscales / proj / spatial) in here.
         pyramid.attrs.update(geozarr_attrs)
