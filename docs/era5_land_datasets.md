@@ -84,7 +84,7 @@ Monthly mean 2 m temperature, averaged from the Earth Data Hub daily means of th
 
 ## Precipitation datasets
 
-Precipitation values represent **total precipitation reaching the surface**, including rain and snow as liquid-equivalent water. Units are **mm/d**, a daily rate: the daily value is the day's total in mm, and the monthly value is the mean of the daily totals. Multiply a monthly value by the number of days in the month for the monthly total.
+Precipitation values represent **total precipitation reaching the surface**, including rain and snow as liquid-equivalent water. Units are **mm**, a total: the daily value is the day's total, and the monthly value the month's. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ### Daily (from hourly)
 
@@ -92,7 +92,7 @@ Precipitation values represent **total precipitation reaching the surface**, inc
 | --- | --- |
 | **Dataset ID** | `era5land_precipitation_daily` |
 | **Variable** | `tp` |
-| **Units** | mm/d |
+| **Units** | mm |
 | **Period** | Daily |
 | **Coverage** | Global, 1950–present |
 | **Resolution** | ~9 km |
@@ -111,14 +111,14 @@ Each hourly precipitation value is the total for the hour *ending* at its timest
 | --- | --- |
 | **Dataset ID** | `era5land_precipitation_monthly` |
 | **Variable** | `tp` |
-| **Units** | mm/d |
+| **Units** | mm |
 | **Period** | Monthly |
 | **Coverage** | Global, 1950–present |
 | **Resolution** | ~9 km |
 | **Source** | [Earth Data Hub ERA5-Land daily](https://earthdatahub.destine.eu/collections/era5/datasets/era5-land-daily) |
 | **Lag** | Available after each month is complete in the source |
 
-Mean daily precipitation for the calendar month, averaged from the Earth Data Hub daily totals. Only complete months are ingested.
+Total precipitation for the calendar month, summed from the Earth Data Hub daily totals. Only complete months are ingested.
 
 ---
 

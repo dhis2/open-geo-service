@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
@@ -162,8 +163,8 @@ def test_rows_are_filtered_by_collection_period_reducer_and_weights() -> None:
     values = lambda **kwargs: sorted(store.read_rows(record, **kwargs).column("value").to_pylist())  # noqa: E731
     assert values(start=date(2026, 2, 1)) == [2.0]
     assert values(end=date(2026, 1, 31)) == [1.0, 3.0, 4.0]
-    assert values(reducer="max") == [3.0]
-    assert values(weights="population") == [4.0]
+    assert values(equals={"reducer": "max"}) == [3.0]
+    assert values(equals={"weights": "population"}) == [4.0]
     assert values(collection_id="districts") == [1.0, 2.0, 3.0, 4.0]
     assert values(collection_id="other") == []
 
@@ -326,9 +327,9 @@ def test_checking_rows_returns_the_table_a_write_would_append_and_writes_nothing
         rows=[_row("D1", 12.5, coverage=1.0)],
         written_at=FIRST,
     )
-    assert table.schema == store.SCHEMA
+    assert table.schema == store.schema_of(None).arrow
     assert table.to_pylist()[0] | {"written_at": None} == {
-        **dict.fromkeys(store.SCHEMA.names),
+        **dict.fromkeys(store.schema_of(None).names),
         "collection_id": "districts",
         "dataset_id": "precip_districts",
         "feature_id": "D1",
@@ -399,6 +400,8 @@ def test_the_destination_renders_rows_and_delivers_them_through_the_writer() -> 
 
     rendered = plugin.render(_cube([1.5, math.nan]), plugin.validate_mapping(dict(_MAPPING)))
     assert rendered.record_count == 2 and rendered.periods == ("2026-01-01",)
+    metadata = pq.ParquetFile(io.BytesIO(rendered.content)).metadata
+    assert {metadata.row_group(0).column(i).compression for i in range(metadata.num_columns)} == {"ZSTD"}
 
     report = plugin.send(rendered.content, "tables")
     assert report.outcome == "success" and report.imported == 2
@@ -503,8 +506,7 @@ def test_destination_checks_name_a_held_dataset_id_and_a_missing_collection() ->
     assert [check.status for check in bad] == ["fail"]
 
 
-def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) -> None:
-    import pyarrow.parquet as pq
+def test_a_dataset_keeps_one_period_type_and_its_zstd_files_carry_it(stores: Path) -> None:
 
     _write([_row("D1", 1.0)], written_at=FIRST)  # monthly
     # Rows with another cadence are refused, by the writer and by a dry run alike.
@@ -523,6 +525,7 @@ def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) ->
 
     files = sorted((stores / "precip_districts").glob("*.parquet"))
     assert {pq.read_schema(path).metadata[store.PERIOD_TYPE_KEY] for path in files} == {b"monthly"}
+    assert {pq.ParquetFile(path).metadata.row_group(0).column(0).compression for path in files} == {"ZSTD"}
     assert ingestion_services.published_table_artifacts_by_dataset()["precip_districts"].period_type == "monthly"
 
 
@@ -722,7 +725,9 @@ def test_an_empty_csv_still_names_every_column(client: TestClient) -> None:
     _write([_row("D1", 1.0)])
     response = client.get("/tables/precip_districts/rows", params={"format": "csv", "start": "2030-01-01"})
     header = response.text.splitlines()[0].split(",")
-    assert header[4:7] == ["period", "period_start", "period_end"] and len(header) == len(store.SCHEMA.names) + 2
+    assert (
+        header[4:7] == ["period", "period_start", "period_end"] and len(header) == len(store.schema_of(None).names) + 2
+    )
 
 
 def test_a_filter_that_matches_nothing_returns_no_rows(client: TestClient) -> None:
@@ -745,3 +750,44 @@ def test_a_filter_that_matches_nothing_returns_no_rows(client: TestClient) -> No
 )
 def test_a_period_ends_on_its_last_day(period_type: str | None, start: date, end: date | None) -> None:
     assert store.end_of_period(start, period_type) == end
+
+
+@pytest.mark.parametrize(
+    ("column", "message"),
+    [
+        (
+            {"name": "day", "type": "string", "represents": "period_start"},
+            "'day' represents period_start, so it must be a date",
+        ),
+        ({"name": "day", "type": "date", "represents": "day"}, "'day' represents unknown 'day'"),
+        (
+            {"name": "feature_id", "type": "string"},
+            "representing feature_id needs one representing collection_id",
+        ),
+        ({"name": "written_at", "type": "timestamp"}, "declares 'written_at'"),
+        ({"name": "lead", "type": "duration"}, "column 'lead' has type 'duration'"),
+        ({"name": "ratio", "type": "double", "unit": 1}, "column 'ratio' has unit 1, which is not text; quote it"),
+        ({"name": "ratio", "type": "double", "required": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
+        ({"name": "ratio", "type": "double", "nullable": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
+        (
+            {"name": "day", "type": "date", "represents": "period_start"},
+            "'day' represents period_start, so it must be required and not nullable",
+        ),
+        (
+            {"name": "period", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
+            r"declares \['period'\], which readers add beside the period column",
+        ),
+        (
+            {"name": "day", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
+            r"\['day'\] identify a row, so they must be in the key",
+        ),
+        ({"name": "day", "type": "date", "key": ["station", "station"]}, "names a key column more than once"),
+    ],
+)
+def test_a_schema_that_cannot_hold_its_rules_is_refused_naming_its_file(column: dict[str, Any], message: str) -> None:
+    from open_geo_service.tables.schemas import parse_schema
+
+    key = column.pop("key", ["station"])
+    declared = {"id": "stations", "columns": [{"name": "station", "type": "string"}, column], "key": key}
+    with pytest.raises(ValueError, match=f"table schema 'stations' in stations.yaml.*{message}"):
+        parse_schema(declared, source="stations.yaml")

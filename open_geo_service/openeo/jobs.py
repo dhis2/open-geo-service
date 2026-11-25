@@ -11,14 +11,14 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-import portalocker
 from fastapi import HTTPException
 
 from open_geo_service import __version__
 from open_geo_service import config as api_config
+from open_geo_service.auth.tokens import Principal, Tier, owner_principal
 from open_geo_service.exports.retention import result_lease
 from open_geo_service.exports.tabular import (
     _NON_VALUE_FIELDS as _NON_VALUE_FIELDS,
@@ -52,10 +52,13 @@ from open_geo_service.openeo.schemas import (
     ManagedPublication,
     OpenEOJobCreate,
     OpenEOJobListResponse,
+    OpenEOJobLogs,
     OpenEOJobRecord,
     OpenEOJobResults,
     OpenEOJobStatus,
     OpenEOJobUpdate,
+    OpenEOLogEntry,
+    OpenEOLogLevel,
 )
 from open_geo_service.shared.cancellation import (
     ExecutionCancelled,
@@ -66,13 +69,14 @@ from open_geo_service.shared.cancellation import (
 from open_geo_service.shared.cf import is_temperature_like
 from open_geo_service.shared.compute import get_job_slots, max_concurrent_jobs
 from open_geo_service.shared.display import display_midpoint, display_range, range_spec
-from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
+from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.netcdf import write_netcdf
-from open_geo_service.shared.persistence import execution_lease
+from open_geo_service.shared.persistence import atomic_json, execution_lease, index_lock
 from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
 from open_geo_service.shared.time import utc_now
+from open_geo_service.shared.urls import require_segment_safe_id
 from open_geo_service.shared.vectors import (
     FEATURE_ID_COORD,
     dimension_holds_shapes,
@@ -81,6 +85,7 @@ from open_geo_service.shared.vectors import (
     vector_dim,
 )
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
+from open_geo_service.streaming.store import COMPLETE_VERSION
 
 _T = TypeVar("_T")
 
@@ -103,47 +108,33 @@ def _jobs_index() -> Path:
     """Return the openEO jobs index path, derived from ``_JOBS_DIR`` at call time.
 
     Derived at call time rather than import time so a test that monkeypatches ``_JOBS_DIR``
-    isolates the whole store. The previous module-level constant froze ``jobs.json`` at import;
-    ``_ensure_store`` then mkdir'd the patched ``tmp_path`` while ``write_text`` still targeted
-    the real XDG path, whose parent does not exist on a fresh runner (CLIM-849 CI failure).
+    isolates the whole store.
     """
     return _JOBS_DIR / "jobs.json"
 
 
-def _ensure_store() -> None:
-    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    if not _jobs_index().exists():
-        _jobs_index().write_text("[]\n", encoding="utf-8")
-
-
 def _load_raw_records() -> list[dict[str, object]]:
-    _ensure_store()
-    with open(_jobs_index(), encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_SH)
-        try:
+    """The stored records; none before the first write.
+
+    No lock: the index is replaced whole, and taking the lock would create files a read-only
+    server may not write.
+    """
+    try:
+        with open(_jobs_index(), encoding="utf-8") as fh:
             payload = json.load(fh)
-        finally:
-            portalocker.unlock(fh)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("openeo jobs.json must contain a list")
     return payload
 
 
 def _mutate_store(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
-    _ensure_store()
-    with open(_jobs_index(), "r+", encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_EX)
-        try:
-            payload = json.load(fh)
-            records: list[dict[str, object]] = payload if isinstance(payload, list) else []
-            result = mutation(records)
-            fh.seek(0)
-            json.dump(records, fh, indent=2, default=str)
-            fh.write("\n")
-            fh.truncate()
-            return result
-        finally:
-            portalocker.unlock(fh)
+    with index_lock(_jobs_index()):
+        records = _load_raw_records()
+        result = mutation(records)
+        atomic_json(_jobs_index(), records)
+        return result
 
 
 def store_list_jobs() -> list[OpenEOJobRecord]:
@@ -213,6 +204,7 @@ def _serialize(record: OpenEOJobRecord) -> dict[str, object]:
     data: dict[str, object] = record.model_dump(mode="json", exclude_none=False)
     data["error_message"] = record.error_message
     data["cancel_requested"] = record.cancel_requested
+    data["owner"] = record.owner
     data["trigger_id"] = record.trigger_id
     data["source_event_id"] = record.source_event_id
     data["attempt"] = record.attempt
@@ -320,10 +312,18 @@ def _with_attempts(message: str, record: OpenEOJobRecord) -> str:
     return f"{message} (attempt {record.attempt} of {record.max_attempts})"
 
 
-def _append_log(record: OpenEOJobRecord, line: str) -> str:
-    """Add one timestamped line to the job's visible attempt history."""
-    entry = f"{utc_now().isoformat()} {line}"
+_LOG_SEVERITY: dict[str, int] = {"debug": 0, "info": 1, "warning": 2, "error": 3}
+
+
+def _append_log(record: OpenEOJobRecord, line: str, level: OpenEOLogLevel = "info") -> str:
+    """Add one timestamped line, with its level, to the job's visible attempt history."""
+    entry = f"{utc_now().isoformat()} {level.upper()} {line}"
     return f"{record.logs}\n{entry}" if record.logs else entry
+
+
+def _attempt(record: OpenEOJobRecord) -> str:
+    """Name the attempt in a history line, when the job may have more than one."""
+    return f"attempt {record.attempt} of {record.max_attempts} " if record.max_attempts > 1 else ""
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -461,9 +461,7 @@ class OpenEOJobService:
                     "error_message": _with_attempts("Interrupted by server restart", r),
                     "updated": utc_now(),
                     "publishing": False,
-                    "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} interrupted by a server restart")
-                    if r.max_attempts > 1
-                    else r.logs,
+                    "logs": _append_log(r, f"{_attempt(r)}interrupted by a server restart", "error"),
                 }
             ),
         )
@@ -571,14 +569,18 @@ class OpenEOJobService:
     # HTTP-layer helpers
     # ------------------------------------------------------------------
 
-    def list_jobs(self) -> OpenEOJobListResponse:
-        records = sorted(store_list_jobs(), key=lambda r: r.created, reverse=True)
+    def list_jobs(self, visible_to: Principal) -> OpenEOJobListResponse:
+        records = sorted(
+            (record for record in store_list_jobs() if visible_to.may_access(record.owner)),
+            key=lambda r: r.created,
+            reverse=True,
+        )
         return OpenEOJobListResponse(
             jobs=records,
             links=[{"rel": "self", "href": "/jobs", "type": "application/json"}],
         )
 
-    def create_job(self, body: OpenEOJobCreate) -> OpenEOJobRecord:
+    def create_job(self, body: OpenEOJobCreate, owner: str | None = None) -> OpenEOJobRecord:
         if not isinstance(body.process.get("process_graph"), dict):
             raise HTTPException(
                 status_code=422,
@@ -594,11 +596,13 @@ class OpenEOJobService:
             status=OpenEOJobStatus.CREATED,
             created=now,
             updated=now,
+            owner=owner,
             plan=body.plan,
             budget=body.budget,
             links=[
                 {"rel": "self", "href": f"/jobs/{job_id}", "type": "application/json"},
                 {"rel": "results", "href": f"/jobs/{job_id}/results", "type": "application/json"},
+                {"rel": "logs", "href": f"/jobs/{job_id}/logs", "type": "application/json"},
             ],
         )
         return store_create_job(record)
@@ -640,6 +644,7 @@ class OpenEOJobService:
             links=[
                 {"rel": "self", "href": f"/jobs/{job_id}", "type": "application/json"},
                 {"rel": "results", "href": f"/jobs/{job_id}/results", "type": "application/json"},
+                {"rel": "logs", "href": f"/jobs/{job_id}/logs", "type": "application/json"},
             ],
             trigger_id=trigger_id,
             source_event_id=source_event_id,
@@ -680,9 +685,13 @@ class OpenEOJobService:
             self._enqueue(job_id)
         return claimed
 
-    def get_job_or_404(self, job_id: str) -> OpenEOJobRecord:
+    def get_job_or_404(self, job_id: str, visible_to: Principal | None = None) -> OpenEOJobRecord:
+        """The job, or 404 when it does not exist or belongs to a principal other than `visible_to`.
+
+        Another principal's job is answered as missing, so job ids cannot be probed.
+        """
         record = store_get_job(job_id)
-        if record is None:
+        if record is None or (visible_to is not None and not visible_to.may_access(record.owner)):
             raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
         return record
 
@@ -832,6 +841,27 @@ class OpenEOJobService:
             assets=assets,
             links=[{"rel": "self", "href": f"/jobs/{job_id}/results", "type": "application/json"}],
         )
+
+    def get_logs(self, job_id: str, *, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
+        """Return the job's attempt history as openEO log entries, at `level` or more severe.
+
+        Each stored line is one entry at its stored level, numbered by position so a client can
+        pass the last id it saw as `offset`. A failed attempt is an `error` entry carrying its
+        error, which is what the openEO Web Editor shows for a failed job.
+        """
+        record = self.get_job_or_404(job_id)
+        entries: list[OpenEOLogEntry] = []
+        for index, line in enumerate((record.logs or "").splitlines()):
+            stamp, level_name, message = line.split(" ", 2)
+            entry_level = cast(OpenEOLogLevel, level_name.lower())
+            entries.append(
+                OpenEOLogEntry(id=str(index), level=entry_level, message=message, time=datetime.fromisoformat(stamp))
+            )
+        if offset is not None:
+            ids = [entry.id for entry in entries]
+            entries = entries[ids.index(offset) + 1 :] if offset in ids else entries
+        threshold = _LOG_SEVERITY[level]
+        return OpenEOJobLogs(level=level, logs=[entry for entry in entries if _LOG_SEVERITY[entry.level] >= threshold])
 
     # ------------------------------------------------------------------
     # Internal execution
@@ -1023,10 +1053,11 @@ class OpenEOJobService:
                     lambda: _cancel_requested(job_id),
                     enter_publication=lambda: self._enter_publication(job_id),
                 ):
-                    result = run_process_graph(record.process)
+                    owner = owner_principal(record.owner)
+                    result = run_process_graph(record.process, visible_to=owner)
                     raise_if_cancelled(force=True)
                     saving = True
-                    output_path = self._persist_result(job_id, result)
+                    output_path = self._persist_result(job_id, result, owner)
             finished = store_update_job(job_id, lambda r: self._finish(r, output_path))
         except ExecutionCancelled:
             logger.info("openEO job %s was cancelled while running; nothing was published", job_id)
@@ -1186,7 +1217,7 @@ class OpenEOJobService:
                             "status": OpenEOJobStatus.CANCELED,
                             "updated": utc_now(),
                             "logs": _append_log(
-                                r, f"attempt {r.attempt} of {r.max_attempts} failed: {error}; cancelled"
+                                r, f"attempt {r.attempt} of {r.max_attempts} failed: {error}; cancelled", "error"
                             ),
                         }
                     )
@@ -1202,6 +1233,7 @@ class OpenEOJobService:
                             r,
                             f"attempt {r.attempt} of {r.max_attempts} failed: {error}; "
                             f"retrying at {retry_at.isoformat()}",
+                            "error",
                         ),
                     }
                 )
@@ -1210,16 +1242,15 @@ class OpenEOJobService:
             return delay if updated.status == OpenEOJobStatus.QUEUED else None
 
         def _fail(r: OpenEOJobRecord) -> OpenEOJobRecord:
-            outcome = "failed with a permanent error, not retried" if permanent else "failed"
+            retryable = r.attempt < r.max_attempts
+            outcome = "failed with a permanent error, not retried" if permanent and retryable else "failed"
             return r.model_copy(
                 update={
                     "status": OpenEOJobStatus.ERROR,
                     "error_message": _with_attempts(error, r),
                     "updated": utc_now(),
                     "publishing": _commit_pending(r),
-                    "logs": _append_log(r, f"attempt {r.attempt} of {r.max_attempts} {outcome}: {error}")
-                    if r.max_attempts > 1
-                    else r.logs,
+                    "logs": _append_log(r, f"{_attempt(r)}{outcome}: {error}", "error"),
                 }
             )
 
@@ -1247,9 +1278,7 @@ class OpenEOJobService:
                 "usage": usage,
                 "publishing": False,
                 # The attempt history ends with the outcome that counts, in the same write.
-                "logs": _append_log(record, f"attempt {record.attempt} of {record.max_attempts} finished")
-                if record.max_attempts > 1
-                else record.logs,
+                "logs": _append_log(record, f"{_attempt(record)}finished"),
             }
         )
 
@@ -1281,7 +1310,7 @@ class OpenEOJobService:
         except Exception:
             logger.exception("Finished-job listener failed for openEO job %s", record.id)
 
-    def _persist_result(self, job_id: str, result: Any) -> str | None:
+    def _persist_result(self, job_id: str, result: Any, owner: Principal | None = None) -> str | None:
         import xarray as xr
 
         from open_geo_service.openeo.execution import SaveResultEnvelope
@@ -1298,6 +1327,15 @@ class OpenEOJobService:
             options = result.options
             provenance = result.provenance
             result = result.data
+        # Writing to a managed dataset updates the public catalogue, which needs the operator tier.
+        # The route table cannot see this option inside the job body, so it is checked here.
+        # Key presence, not truthiness: an empty or non-string id must reach validation, not fall through.
+        managed = "dataset_id" in options
+        if managed and owner is not None and owner.tier < Tier.OPERATOR:
+            raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs an operator token")
+        # Every other path writes a job-local file, so an id there would be dropped without a word.
+        if managed and ("export" in options or fmt != "ZARR" or not isinstance(result, (xr.Dataset, xr.DataArray))):
+            raise ValueError("'dataset_id' writes a managed raster dataset: it needs a raster in Zarr, no 'export'")
 
         # Resolve a lazy dask_geopandas GeoDataFrame before any tabular path,
         # including named exports, so a lazy frame never reaches a renderer.
@@ -1320,7 +1358,7 @@ class OpenEOJobService:
 
         if isinstance(result, xr.Dataset):
             # Zarr format with dataset_id → write directly to managed Icechunk/Zarr store
-            if fmt == "ZARR" and options.get("dataset_id"):
+            if fmt == "ZARR" and managed:
                 _write_managed_zarr(result, options, job_id=job_id, provenance=provenance)
                 # Managed datasets are not served as job-local files; advertise the
                 # managed dataset via a marker that _result_assets expands into
@@ -1652,10 +1690,7 @@ def _write_managed_zarr(
     dataset_id = options["dataset_id"]
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"'dataset_id' option must be a non-empty string, got {type(dataset_id).__name__}")
-    if Path(dataset_id).name != dataset_id:
-        raise ValueError(
-            f"Invalid dataset_id '{dataset_id}': must be a plain name with no path separators or traversal segments"
-        )
+    require_segment_safe_id(dataset_id, "'dataset_id' option")
 
     from open_geo_service.data_registry.services import datasets as _reg
     from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
@@ -1803,6 +1838,8 @@ def _write_managed_zarr(
                 # The point of no return: a cancelled job stops here, before the commit, so
                 # the store keeps its previous state and nothing is published.
                 before_commit=enter_publication,
+                # One commit holds the whole result, so it is a version a rollback may publish.
+                metadata=COMPLETE_VERSION,
             )
         except ExecutionCancelled:
             if created_template is not None:
@@ -1827,6 +1864,8 @@ def _write_managed_zarr(
                 update["provenance"] = record.provenance.model_copy(update={"output_snapshot_id": snapshot_id})
             record = record.model_copy(update=update)
             ingestion_services.register_artifact_record(record, publish=_publish_raw)
+        # Each publication is a full rewrite, so versions past the retention setting go as a sync's do.
+        ingestion_services.expire_and_collect(store_path)
     finally:
         store_lock.release()
 
@@ -2548,7 +2587,7 @@ def _write_geodataframe(gdf: Any, results_dir: Any, fmt: str) -> str | None:
 
     if ext == ".parquet":
         path = str(results_dir / "result.parquet")
-        gdf.to_parquet(path)
+        gdf.to_parquet(path, compression=PARQUET_COMPRESSION)
         return path
 
     if ext == ".csv":

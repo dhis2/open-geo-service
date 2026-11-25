@@ -25,7 +25,7 @@ from open_geo_service.openeo.jobs import (
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
 from open_geo_service.shared.time import utc_now
 
-from .conftest import named_exports
+from .conftest import TEST_DATA_ROOT, named_exports
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def definition(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "period_type": "monthly",
         "series": [{"select": {}, "data_element": "BXgDHhPdFVU"}],
     }
-    monkeypatch.setattr(config, "_cache", {})
+    monkeypatch.setattr(config, "_cache", {"data_dir": str(TEST_DATA_ROOT)})
     named_exports(monkeypatch, definition)
     return definition
 
@@ -207,7 +207,7 @@ def test_sync_and_batch_external_export(
     definition.clear()
     definition.update(id="rainfall", plugin="example")
     envelope = SaveResultEnvelope(_frame(), "EXAMPLE", {"export": "rainfall"})
-    monkeypatch.setattr("open_geo_service.openeo.execution.run_process_graph", lambda *args: envelope)
+    monkeypatch.setattr("open_geo_service.openeo.execution.run_process_graph", lambda *args, **_: envelope)
     formats = client.get("/file_formats").json()["output"]
     assert "export" in formats["EXAMPLE"]["parameters"]
     response = client.post("/result", json={"process_graph": {}})
@@ -244,7 +244,7 @@ def test_sync_named_dhis2_in_read_only_mode(
 ):
     config.get_config()["read_only"] = True
     envelope = SaveResultEnvelope(_frame(), "DHIS2JSON", {"export": "rainfall"})
-    monkeypatch.setattr("open_geo_service.openeo.execution.run_process_graph", lambda *args: envelope)
+    monkeypatch.setattr("open_geo_service.openeo.execution.run_process_graph", lambda *args, **_: envelope)
     response = client.post("/result", json={"process_graph": {}})
     assert response.status_code == 200
     assert response.json()["dataValues"][0]["value"] == "0"

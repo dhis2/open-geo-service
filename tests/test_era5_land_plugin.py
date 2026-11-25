@@ -233,16 +233,18 @@ def test_edh_monthly_temperature_is_the_mean_of_daily_means(monkeypatch: pytest.
     assert january.t2m.attrs["units"] == "degC"
 
 
-def test_edh_monthly_precipitation_is_a_mean_daily_rate(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = _edh_store("tp", "2020-01-31", np.full(31, 0.002))  # 2 mm every day
+def test_edh_monthly_precipitation_is_the_months_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _edh_store("tp", "2020-02-29", np.full(60, 0.002))  # 2 mm every day
     monkeypatch.setattr(era5_land_edh, "_open_edh_zarr", lambda _url: store)
-    plugin = ERA5LandEDHMonthlyFromDailyPlugin(
-        variable="tp", temporal_aggregation="mean", unit_transform="metres_to_mm"
-    )
+    plugin = ERA5LandEDHMonthlyFromDailyPlugin(variable="tp", temporal_aggregation="sum", unit_transform="metres_to_mm")
 
-    month = plugin.fetch_period("2020-01", _EDH_BBOX)
+    january = plugin.fetch_period("2020-01", _EDH_BBOX)
+    february = plugin.fetch_period("2020-02", _EDH_BBOX)
 
-    assert float(month.tp.mean()) == pytest.approx(2.0)
+    # On the values: bottleneck's mean is wrong on the summed array's transposed strides.
+    assert np.allclose(january.tp.values, 62.0)
+    assert np.allclose(february.tp.values, 58.0)  # a leap-year February
+    assert january.tp.attrs["units"] == "mm"
 
 
 def test_edh_longitude_is_remapped_so_a_bbox_across_greenwich_runs_west_to_east(

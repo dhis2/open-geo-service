@@ -170,6 +170,10 @@ def test_the_capabilities_json_still_carries_the_configured_origin(https_client:
 
     assert any(link["href"].startswith(_CONFIGURED) for link in links)
     assert not any("testserver" in link["href"] for link in links)
+    # Version discovery is the backend's own, and titled: the Web Editor lists links by title.
+    history = next(link for link in links if link["rel"] == "version-history")
+    assert history["href"] == f"{_CONFIGURED}/.well-known/openeo"
+    assert history["title"]
 
 
 def test_the_stac_self_link_uses_the_configured_scheme(https_client: TestClient) -> None:
@@ -297,6 +301,7 @@ def test_the_landing_page_links_under_the_mount_prefix(mounted_client: TestClien
     assert 'href="/geoservice/map"' in body
     assert 'href="/map"' not in body
     assert _CONFIGURED not in body
+    assert mounted_client.get("/datasets/", follow_redirects=False).headers["location"] == "/geoservice/datasets"
 
 
 def test_the_viewer_fetches_under_the_mount_prefix(mounted_client: TestClient) -> None:
@@ -364,6 +369,11 @@ def test_the_app_reads_the_root_path_itself(monkeypatch: pytest.MonkeyPatch) -> 
     assert 'action="/geoservice/manage/ingest"' in client.get(_SOURCE_PAGE).text
     self_href = next(link["href"] for link in client.get("/stac/catalog.json").json()["links"] if link["rel"] == "self")
     assert self_href == "http://testserver/geoservice/stac/catalog.json"
+    # A proxy that strips the prefix before forwarding, as the Nepal demo's does (CLIM-1975).
+    assert client.get("/datasets/", follow_redirects=False).headers["location"] == "/geoservice/datasets"
+    # A workflow id may hold a space; the redirect keeps it escaped.
+    escaped = client.get("/process_graphs/my%20workflow/", follow_redirects=False)
+    assert escaped.headers["location"] == "/geoservice/process_graphs/my%20workflow"
 
 
 @pytest.mark.parametrize("root_path", ["/geoservice", "/geoservice/"])

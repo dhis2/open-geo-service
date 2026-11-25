@@ -63,6 +63,16 @@ retain older periods already stored by Open Geo Service. Requests wholly within 
 coverage do not query the source. Extending backwards or repairing an existing gap
 requires the source to reproduce the complete union, including committed history.
 
+**`periods()` lists what the source says is available.** Read it from metadata (a
+catalogue, a file listing, an archive's time axis) rather than opening the data to check
+its values. A source can list periods shortly before their data is written: the framework
+does not store empty periods at the end of a run, and fetches them again on a later sync,
+while an empty period followed by one with data (water or cloud over the whole extent) is
+written as it is. See [Empty periods at the end of a run are not
+stored](architecture.md#empty-periods-at-the-end-of-a-run-are-not-stored). A period that is
+only partly written is stored as it is, so if a source fills a period in pieces, clamp
+`periods()` to the last complete one.
+
 **`fetch_period`** — fetches exactly one period and returns it as an `xarray.Dataset`
 normalized to `(t, y, x)`. Write it as a regular (blocking) method and the framework runs
 it in a worker thread, so ordinary blocking I/O is fine; the framework appends the result
@@ -181,7 +191,7 @@ from the dimension's metadata, so there's nothing extra to configure.
 | `short_name` | No       | Short label used in compact displays                                           |
 | `variable`   | Yes      | Name of the data variable in the Zarr store (e.g. `precip`, `t2m`, `rainfall`) |
 | `source`     | No       | Name of the upstream data source                                               |
-| `source_url` | No       | URL to the upstream dataset documentation or landing page                      |
+| `source_url` | Yes, with an `ingestion` plugin | The upstream dataset's landing page. Published as the STAC collection's `via` link, which Portolan requires of a collection this instance hosts but did not produce. A derived template (one with `produced_by`) may leave it out: its collection links its inputs' sources |
 | `license`    | No       | The data's licence: an SPDX identifier (`CC-BY-4.0`), or `name` and `url` where none exists (`Licence to Use Copernicus Products`). Published on the STAC collection; without it the collection is published as `other`. Take it from the licence the source names, not from how its page describes the data |
 | `description` | No      | What the dataset holds, in a sentence or two. Published in `GET /data-sources`, `/datasets/{id}` and the STAC collection, so write it for whoever uses the data |
 | `produced_by` | No      | The workflow that produces a non-ingestable template, or its recipe. See [Derived datasets](#derived-datasets) |
@@ -448,7 +458,7 @@ The response reports the window that was actually ingested, under `dataset.exten
 
 Layers whose grid exceeds 1024×1024 cells (about 1.05 megapixels, counted as `nx × ny` rather than per axis) are stored as a multiscale pyramid so the map stays fast when zoomed out. Coarser levels sit beside the full-resolution level 0, which analytics keeps reading, so **analysis results do not change** and the persistent cost is roughly +33% storage.
 
-Building one is not free, though. Level 0 is rewritten rather than kept as-is — the pyramid writer re-chunks it to its own target chunk size — the rebuild goes to a sibling store and is swapped in, so it needs transient disk for a second copy, and it takes longer than a flat write (measured at roughly 2.4× on a 2 GB store, in exchange for around 6× less peak memory).
+Building one is not free, though. Level 0 is rewritten rather than kept as-is — the pyramid writer re-chunks it to its own target chunk size — the rebuild is a new commit in the same store, so it needs disk for a second copy until the old version is collected: at once if its data is more than an hour old, else once it is, and it takes longer than a flat write (measured at roughly 2.4× on a 2 GB store, in exchange for around 6× less peak memory).
 
 Levels are aggregated from the full-resolution data, and `ingestion.resampling` controls how:
 
@@ -488,7 +498,7 @@ keeps its own attributes:
 
 | Field           | Required | Description                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `units`         | No       | Physical units, as a **CF/udunits** string (e.g. `mm`, `mm/d`, `degC`, `kg m-2 s-1`). Validated at registration — a non-udunits value (e.g. `people`) is logged as a warning. Use `""` for a dimensionless quantity (e.g. a standardized index). For unit-aware processes (e.g. SPI) the unit must be _dimensionally_ correct — a precipitation **rate** is `mm/d`, not bare `mm`. |
+| `units`         | No       | Physical units, as a **CF/udunits** string (e.g. `mm`, `mm/d`, `degC`, `kg m-2 s-1`). Validated at registration — a non-udunits value (e.g. `people`) is logged as a warning. Use `""` for a dimensionless quantity (e.g. a standardized index). The unit must be _dimensionally_ correct for unit-aware processes: precipitation totals are `mm`, which processes such as SPI take after [`amount2rate`](climate_indices.md#precipitation-totals-and-rates) turns them into a rate (`mm/d`). |
 | `standard_name` | No       | CF [standard name](https://cfconventions.org/standard-names.html) (e.g. `air_temperature`, `lwe_thickness_of_precipitation_amount`). Set it to `null` when the variable has none, so one a source or process left is removed: CF has no standard name for many derived quantities, and xclim, for one, labels a count of hot days `number_of_days_with_air_temperature_above_threshold` whatever it was counted from. |
 | `cell_methods`  | No       | CF cell methods describing the temporal aggregation (e.g. `time: mean`, `time: sum`).                                                                                                                                                                                                                                                                                              |
 

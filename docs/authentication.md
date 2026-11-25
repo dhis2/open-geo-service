@@ -1,10 +1,9 @@
 # Authentication and authorization
 
-This note records how Open Geo Service will authenticate callers and decide what they may do. It is a design,
-not a description of current behaviour: **Open Geo Service has no authentication today.** Every route is open
-to anyone who can reach the instance, including ingestion, pipelines and delivery to DHIS2. Until
-the first step below ships, deploy an instance privately or behind reverse-proxy authentication,
-or run it read-only (see [Read-only instances](instance_guide.md#read-only-instances)).
+This note records how Open Geo Service authenticates callers and decides what they may do. The first three steps
+of the [order of delivery](#order-of-delivery) are in place: named tokens, tiers and the route
+table, web interface sign-in, and optional gating of reads, configured as described in
+[Authentication](instance_guide.md#authentication). The rest is design.
 
 ## The principle
 
@@ -49,13 +48,17 @@ Every method and path belongs to exactly one tier, listed in one table in the co
 
 Built-in and plugin workflows stay visible to everyone. A workflow stored through the API belongs
 to its owner and is listed only to its owner and to operators. A stored workflow cannot take the id
-of a built-in or plugin workflow unless an operator stores it. Today such a workflow replaces the
-built-in for every caller, including the pipelines that run it.
+of a built-in or plugin workflow unless an operator stores it. Such a workflow then replaces the
+built-in for operators and for the pipelines that run it; other callers still reach the built-in.
 
-The table fails closed. A route it does not list, such as a new plugin route or form endpoint,
-gets the operator tier, and a test over every route the application serves fails until it is
-listed. The test covers routes left out of the OpenAPI document, such as the pipeline form's
-lookups.
+A batch job whose `save_result` names a `dataset_id` writes into a managed dataset and publishes it,
+so it needs an operator token like ingestion does. The route table cannot see an option inside the
+job body, so the managed write checks the job owner's tier.
+
+The table fails closed. A route the application serves that the table does not list, such as a
+new plugin route or form endpoint, gets the operator tier, and a test over every route the
+application serves fails until it is listed. The test covers routes left out of the OpenAPI
+document, such as the pipeline form's lookups. A path no route serves is answered `404`.
 
 Read-only mode is a separate check over the same table. It refuses every route above public,
 except `POST /result`, which it lets through because computing a result changes nothing. It never
@@ -63,11 +66,27 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment can gate them with an explicit setting, and
-the STAC catalog then advertises the scheme through the STAC Authentication extension so STAC
-Browser can offer a sign-in. Advertising a scheme does not make every reader send the credential.
-Until signed links exist (see [Private data](#private-data)), gating reads can leave the map
-viewer, QGIS and the Zarr, PMTiles and GeoParquet assets linked from STAC unable to load.
+Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+every public route then needs the authenticated tier, except the few a client needs to find out
+how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
+sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
+lists the catalogue, is gated. The table's tiers do not change, so read-only mode, which reads
+them, still serves reads to a token. Responses are marked `Cache-Control: private`, added in front
+of any caching a route sets itself, so a browser still keeps what the route allows and a caching
+proxy in front does not serve one caller's answer to another.
+
+Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
+sign in and brought back, rather than shown the JSON refusal a client gets.
+
+The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
+Authentication extension (v1.2.0), and mark the links and assets on this instance with
+`auth:refs`. Basic carries the token id and secret, which QGIS, GDAL and STAC Browser can send;
+the middleware already accepts it on every route. STAC Browser offers a sign-in from its own
+`authConfig`, not from the catalog's schemes, and supports only basic among HTTP schemes, so it is
+deployed with `authConfig` set to http basic. The web interface and its map viewer read with
+the session cookie, since their requests are same-origin. Advertising a scheme does not make
+every reader send the credential: until signed links exist (see [Private data](#private-data)), a
+reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet assets.
 
 ## Where it is enforced
 
@@ -118,10 +137,22 @@ Named tokens are permanent. They remain the credential for machine clients after
 
 ## The web interface
 
-The pages post plain HTML forms, which cannot send a bearer header, so the web interface gets a
-sign-in page. It sets a session cookie marked `HttpOnly`, `Secure` and `SameSite=Lax` that holds a
-signed session id, never the secret. Every write made with the cookie carries a CSRF token.
-Signed out, the pages stay readable and their action panels say what signing in would allow.
+The pages post plain HTML forms, which cannot send a bearer header, so the web interface has a
+sign-in page. It takes a token once and sets a session cookie marked `HttpOnly`, `Secure` and
+`SameSite=Lax` that holds a random session id, never the secret. Sessions are kept in memory, so a
+restart signs everyone out; a session also ends after 8 hours, at sign-out, or when its token is
+removed or given a new secret. An expired or unknown cookie counts as no credential and is
+cleared, rather than refused, so it cannot lock the browser out of the pages.
+
+Sign-in is offered only over HTTPS or on `localhost`, where the token does not travel in clear.
+A write made with the cookie must come from the instance's own pages: its `Origin`, scheme, host
+and port, must be the one the request addressed or `GEOSERVICE_BASE_URL`'s, or, without `Origin`,
+`Sec-Fetch-Site` must say `same-origin`. The middleware checks this before reading the body, which a CSRF token in the
+form would need. `GET /credentials/basic` answers only a `Basic` credential, so a signed-in page
+cannot read the secret back.
+
+Signed out, or signed in below the operator tier, the pages stay readable and their action panels
+say they need an operator's sign-in.
 
 The cookie serves only the Open Geo Service interface on its own origin. A client on another origin, such as a
 browser app or the openEO Web Editor, sends a bearer token. Cross-site cookies, which would need
@@ -174,10 +205,17 @@ When it is built:
 
 ## Ownership and audit
 
-Jobs, stored process graphs, pipeline runs, delivery records and dataset updates record the
-principal that created them, how it authenticated, and, where there is one, the acting person.
-Listing and changing them is limited to the owner unless the caller has the operator tier.
-`GET /me` reports the caller.
+Batch jobs and stored process graphs record the principal that created them. Listing, reading
+and changing them is limited to the owner unless the caller has the operator tier, and so is
+running a stored process graph by id; another principal's records are answered `404`, as if they
+did not exist. A job's result files follow the same rule: they are the owner's, not anyone's
+with the link. Pipeline runs and derived datasets, which no client starts, can run every stored
+process graph. Records from before owners were recorded, or stored while authentication was
+off, have none, and only operators reach them. `GET /me` reports the caller.
+
+Pipeline runs, delivery records and dataset updates are reached only with the operator tier, so
+ownership does not limit them. They will record the principal, how it authenticated and, where
+there is one, the acting person, for audit.
 
 The scheduler and the pipeline runner act as service principals, so an unattended delivery is as
 attributable as one started by hand. The credentials Open Geo Service uses for upstream sources and DHIS2
@@ -202,10 +240,12 @@ apply per IP address to anonymous callers and per principal once identity exists
 Each step ships on its own and is useful alone; no later step redoes an earlier one.
 
 1. Principals and tiers, the route table, the middleware, named tokens, the openEO basic exchange,
-   and principals on records.
-2. Web interface sign-in with a session cookie and CSRF.
+   and owners on jobs and stored process graphs.
+2. Web interface sign-in with a session cookie and an origin check on its writes.
 3. Optional gating of reads, advertised in STAC.
-4. OIDC and per-person ownership.
+4. OIDC and per-person ownership. Signing in through the provider and validating its tokens
+   use an established library, such as Authlib, rather than code of our own; the session
+   handling from step 2 is reconsidered then, to keep one mechanism.
 5. Role mapping and quotas.
 6. Per-dataset access with signed links.
 7. DHIS2 routes, for the operations the first DHIS2 app names.

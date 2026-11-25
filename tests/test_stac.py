@@ -117,19 +117,27 @@ def test_a_raster_collection_answers_head(client: TestClient, monkeypatch: pytes
 
 
 def test_stac_catalog_lists_child_collections(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        stac_services,
-        "_eligible_artifacts_by_dataset",
-        lambda: {"chirps3_precipitation_daily": _artifact(artifact_id="a1")},
-    )
+    artifacts = {
+        "chirps3_precipitation_daily": _artifact(artifact_id="a1"),
+        "era5_temperature_daily": _artifact(
+            dataset_id="era5_temperature_daily", artifact_id="a2", created_at=datetime(2026, 2, 3, 4, 5, tzinfo=UTC)
+        ),
+    }
+    monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: artifacts)
 
     response = client.get("/stac/catalog.json")
 
     assert response.status_code == 200
     payload = response.json()
     child_links = [link for link in payload["links"] if link["rel"] == "child"]
-    assert len(child_links) == 1
+    assert len(child_links) == 2
     assert child_links[0]["href"].endswith("/stac/chirps3_precipitation_daily/collection.json")
+    # The latest of its collections' `updated`: a catalog whose collections are all mirrors is
+    # itself a mirror, and Portolan requires a mirror's sync time on it (PORTO-CORE-057).
+    assert payload["updated"] == "2026-02-03T04:05:00Z"
+
+    monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", dict)
+    assert "updated" not in client.get("/stac/catalog.json").json(), "nothing synced, nothing to date"
 
 
 def test_catalog_links_leave_out_unset_fields(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,7 +159,7 @@ def test_stac_landing_links_to_collections(client: TestClient) -> None:
     payload = response.json()
     assert any(link["href"].endswith("/stac/catalog.json") for link in payload["links"] if link["rel"] == "root")
     # The Portolan profile's versioned URI, its only conformance signal.
-    assert payload["stac_extensions"] == ["https://schemas.portolan-sdi.org/portolan/v0.2.0/schema.json"]
+    assert payload["stac_extensions"] == ["https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"]
 
 
 def test_catalog_self_link_reflects_request_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,6 +456,7 @@ def test_collection_uses_root_href_for_icechunk_store(
         lambda _: {
             "period_type": "daily",
             "source": "CHIRPS v3",
+            "source_url": "https://example.org/source",
             "ingestion": {},
             "display": {"colormap": "blues", "nodata": -9999.0},
         },
@@ -518,6 +527,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
         "variable": "precip",
         "period_type": "daily",
         "sync": {"kind": "temporal"},
+        "source_url": "https://example.org/source",
         "ingestion": {"plugin": "tests.test_stac.DryDaysPlugin"},
         # As ERA5-Land precipitation does, to draw dry cells transparent.
         "display": {"colormap": "blues", "nodata": 0.0},
@@ -540,6 +550,10 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
 
     collection = client.get(f"/stac/{dataset_id}/collection.json").json()
 
+    # Every asset says what it is for, as Portolan asks (PORTO-CORE-088).
+    assets = collection["assets"]
+    assert {"zarr", "icechunk"} <= set(assets)
+    assert all(asset.get("title") and asset.get("description") for asset in assets.values()), assets
     bands = collection["assets"]["zarr"]["bands"]
     assert [band["name"] for band in bands] == list(collection["cube:variables"])
     # The store's own fill value, not the display's 0.0, which would mark every dry cell missing.
@@ -1382,8 +1396,10 @@ def test_providers_are_published(client: TestClient, monkeypatch: pytest.MonkeyP
         },
     )
     payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
-    *declared, host = payload["providers"]
+    *declared, processor, host = payload["providers"]
     assert declared == [{"name": "WorldPop", "url": "https://hub.worldpop.org/", "roles": ["licensor"]}]
+    # This instance processed the data (it clipped the source to its extent) but did not produce it.
+    assert processor["roles"] == ["processor"]
     # This instance, last and alone in the role, as a static catalog's checker expects.
     assert host["roles"] == ["host"] and host["url"] == "http://testserver/"
 
@@ -1403,7 +1419,7 @@ def test_malformed_providers_are_dropped_rather_than_published(
     )
     payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
     # A provider declared without roles made the data, so it is published as the producer.
-    assert payload["providers"][:-1] == [{"name": "Real", "roles": ["producer"]}]
+    assert payload["providers"][:-2] == [{"name": "Real", "roles": ["producer"]}]
 
 
 def test_a_template_host_is_not_relabelled_as_producer(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1418,7 +1434,7 @@ def test_a_template_host_is_not_relabelled_as_producer(client: TestClient, monke
         },
     )
     payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
-    assert payload["providers"][:-1] == [{"name": "Maker", "roles": ["producer"]}, {"name": "Mirror"}]
+    assert payload["providers"][:-2] == [{"name": "Maker", "roles": ["producer"]}, {"name": "Mirror"}]
     assert [p.get("roles") for p in payload["providers"]].count(["host"]) == 1
 
 
@@ -1532,3 +1548,39 @@ def test_both_cube_paths_agree_on_reference_system() -> None:
     expected = stac_services.reference_system_for("EPSG:32633")
     assert dims["x"]["reference_system"] == expected
     assert dims["y"]["reference_system"] == expected
+
+
+def test_a_workflow_output_links_the_sources_of_its_inputs(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Built-in normals and anomalies declare no `source_url`, so `via` comes from their inputs.
+
+    The instance processed the data and hosts it but did not produce it, which makes the
+    collection a Portolan mirror: it must link where the data originated. An anomaly reads the
+    observed series and a normal that is itself derived, and both lead to one source page.
+    """
+    source_page = "https://www.chc.ucsb.edu/data/chirps3"
+    templates: dict[str, dict] = {
+        "precip_monthly": {"period_type": "monthly", "source_url": source_page},
+        "precip_normal": {"period_type": "monthly", "source": "Derived (climate_normal workflow)"},
+        "precip_anomaly": {"period_type": "monthly", "source": "Derived (climate_anomaly workflow)"},
+    }
+    inputs = {"precip_normal": ["precip_monthly"], "precip_anomaly": ["precip_monthly", "precip_normal"]}
+    artifacts = {
+        dataset_id: _artifact(artifact_id=f"a-{dataset_id}", dataset_id=dataset_id, managed_dataset_id=dataset_id)
+        for dataset_id in templates
+    }
+    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=list(artifacts.values())))
+    monkeypatch.setattr(ingestion_services, "stac_eligible_artifacts_by_dataset", lambda: artifacts)
+    monkeypatch.setattr(
+        ingestion_services,
+        "recorded_inputs",
+        lambda record: [{"collection_id": input_id} for input_id in inputs.get(record.dataset_id, [])],
+    )
+    monkeypatch.setattr(stac_services.registry_datasets, "get_dataset", lambda dataset_id: templates.get(dataset_id))
+    monkeypatch.setattr(stac_services, "_build_collection_with_xstac", lambda **_: _minimal_xstac_payload())
+    monkeypatch.setattr(stac_services, "_zarr_asset_metadata", lambda _: {})
+    monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {"consolidated": True})
+
+    payload = client.get("/stac/precip_anomaly/collection.json").json()
+
+    assert [link["href"] for link in payload["links"] if link["rel"] == "via"] == [source_page]
+    assert [provider["roles"] for provider in payload["providers"]][-2:] == [["processor"], ["host"]]

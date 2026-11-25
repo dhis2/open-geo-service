@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
-from fastapi import APIRouter, Body, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from open_geo_service.auth.middleware import principal_of
 from open_geo_service.openeo import collections as collections_service
 from open_geo_service.openeo import processes as processes_service
 from open_geo_service.openeo import workflows as workflow_store
@@ -14,9 +15,11 @@ from open_geo_service.openeo.jobs import get_openeo_job_service
 from open_geo_service.openeo.schemas import (
     OpenEOJobCreate,
     OpenEOJobListResponse,
+    OpenEOJobLogs,
     OpenEOJobRecord,
     OpenEOJobResults,
     OpenEOJobUpdate,
+    OpenEOLogLevel,
     WorkflowListResponse,
     WorkflowRecord,
 )
@@ -164,10 +167,29 @@ def service_types() -> dict[str, Any]:
     return {}
 
 
+@capabilities_router.get("/credentials/basic")
+def credentials_basic(request: Request) -> dict[str, str]:
+    """OpenEO HTTP Basic exchange: the token id and secret, checked by the access middleware, return the secret.
+
+    No second token is minted and no session kept; the client then sends `Bearer basic//<secret>`.
+    Only a `Basic` credential gets the secret back, so a principal resolved some other way (a
+    future session cookie) cannot read it.
+    """
+    token = principal_of(request).token
+    scheme = request.headers.get("authorization", "").partition(" ")[0]
+    if token is None or scheme.lower() != "basic":
+        raise HTTPException(
+            status_code=401,
+            detail="Send the token id as the username and the token secret as the password.",
+            headers={"WWW-Authenticate": 'Basic realm="openEO"'},
+        )
+    return {"access_token": token.secret}
+
+
 @capabilities_router.get("/me")
-def me() -> dict[str, Any]:
-    """Return basic account info for this open/anonymous backend."""
-    return {"user_id": "anonymous", "links": []}
+def me(request: Request) -> dict[str, Any]:
+    """Return the principal this request runs as: `anonymous` without a credential."""
+    return {"user_id": principal_of(request).id, "links": []}
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +227,8 @@ def list_processes(request: Request, response: Response) -> dict[str, Any] | HTM
     The openEO JSON by default, as clients expect. A browser gets the catalogue page the rail
     links to, on the same terms as a single process.
     """
-    from open_geo_service.system.templates import prefers_html, render_processes_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_processes_page
 
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
@@ -234,12 +257,13 @@ def get_process_spec(process_id: str, request: Request, response: Response) -> d
     p = processes_service.get_openeo_process(process_id)
     if p is None:
         raise HTTPException(status_code=404, detail=f"Process '{process_id}' not found")
-    from open_geo_service.system.templates import prefers_html, render_process_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_process_page
 
     # Two representations on one URL — see the dataset page's note on Vary.
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
-        page = HTMLResponse(render_process_page(p, mount_prefix(request)))
+        page = HTMLResponse(render_process_page(p, mount_prefix(request), viewer=principal_of(request)))
         page.headers["Vary"] = "Accept"
         return page
     return p
@@ -250,56 +274,71 @@ def get_process_spec(process_id: str, request: Request, response: Response) -> d
 # ---------------------------------------------------------------------------
 
 
+def _owned_job_id(job_id: str, request: Request) -> str:
+    """The job id, once the caller owns the job or is an operator; 404 otherwise."""
+    get_openeo_job_service().get_job_or_404(job_id, visible_to=principal_of(request))
+    return job_id
+
+
+OwnedJobId = Annotated[str, Depends(_owned_job_id)]
+
+
 @jobs_router.get("", response_model=OpenEOJobListResponse)
-def list_jobs() -> OpenEOJobListResponse:
-    """Return all openEO jobs."""
-    return get_openeo_job_service().list_jobs()
+def list_jobs(request: Request) -> OpenEOJobListResponse:
+    """Return the caller's openEO jobs, or every job for an operator."""
+    return get_openeo_job_service().list_jobs(visible_to=principal_of(request))
 
 
 @jobs_router.post("", status_code=201)
-def create_job(body: OpenEOJobCreate, response: Response) -> OpenEOJobRecord:
-    """Create a new openEO job."""
-    record = get_openeo_job_service().create_job(body)
+def create_job(body: OpenEOJobCreate, request: Request, response: Response) -> OpenEOJobRecord:
+    """Create a new openEO job, owned by the caller."""
+    record = get_openeo_job_service().create_job(body, owner=principal_of(request).owner_id)
     response.headers["Location"] = f"/jobs/{record.id}"
     response.headers["OpenEO-Identifier"] = record.id
     return record
 
 
 @jobs_router.get("/{job_id}", response_model=OpenEOJobRecord)
-def get_job(job_id: str) -> OpenEOJobRecord:
+def get_job(job_id: str, request: Request) -> OpenEOJobRecord:
     """Return one openEO job."""
-    return get_openeo_job_service().get_job_or_404(job_id)
+    return get_openeo_job_service().get_job_or_404(job_id, visible_to=principal_of(request))
 
 
 @jobs_router.patch("/{job_id}", status_code=204)
-def update_job(job_id: str, body: OpenEOJobUpdate) -> Response:
+def update_job(job_id: OwnedJobId, body: OpenEOJobUpdate) -> Response:
     """Update job metadata (title, description, process, etc.)."""
     get_openeo_job_service().update_job(job_id, body)
     return Response(status_code=204)
 
 
 @jobs_router.delete("/{job_id}", status_code=204)
-def delete_job(job_id: str) -> Response:
+def delete_job(job_id: OwnedJobId) -> Response:
     """Delete a job and its results."""
     get_openeo_job_service().delete_job(job_id)
     return Response(status_code=204)
 
 
 @jobs_router.post("/{job_id}/results", status_code=202)
-def start_job(job_id: str) -> Response:
+def start_job(job_id: OwnedJobId) -> Response:
     """Queue a job for processing."""
     get_openeo_job_service().start_job(job_id)
     return Response(status_code=202)
 
 
 @jobs_router.get("/{job_id}/results", response_model=OpenEOJobResults)
-def get_results(job_id: str) -> OpenEOJobResults:
+def get_results(job_id: OwnedJobId) -> OpenEOJobResults:
     """Return result links for a finished job."""
     return get_openeo_job_service().get_results(job_id)
 
 
+@jobs_router.get("/{job_id}/logs", response_model=OpenEOJobLogs)
+def get_logs(job_id: OwnedJobId, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
+    """Return a job's log entries at `level` or more severe, after the entry `offset`."""
+    return get_openeo_job_service().get_logs(job_id, level=level, offset=offset)
+
+
 @jobs_router.delete("/{job_id}/results", status_code=204)
-def cancel_job(job_id: str) -> Response:
+def cancel_job(job_id: OwnedJobId) -> Response:
     """Cancel a running or queued job."""
     get_openeo_job_service().cancel_job(job_id)
     return Response(status_code=204)
@@ -327,7 +366,7 @@ def _require_finished_job(job_id: str) -> None:
 
 
 @jobs_router.get("/{job_id}/results/result.geojson")
-def download_geojson_result(job_id: str) -> FileResponse:
+def download_geojson_result(job_id: OwnedJobId) -> FileResponse:
     """Serve the GeoJSON result file for a finished batch job."""
     from open_geo_service.openeo.jobs import _JOBS_DIR
 
@@ -339,7 +378,7 @@ def download_geojson_result(job_id: str) -> FileResponse:
 
 
 @jobs_router.get("/{job_id}/results/result.zarr/{zarr_path:path}")
-def download_zarr_chunk(job_id: str, zarr_path: str) -> FileResponse:
+def download_zarr_chunk(job_id: OwnedJobId, zarr_path: str) -> FileResponse:
     """Serve one file from within the Zarr result store (chunk or metadata)."""
     from open_geo_service.openeo.jobs import _JOBS_DIR
 
@@ -383,7 +422,7 @@ def _json_tabular_payload_response(frame: Any, options: dict[str, Any]) -> JSONR
 
 
 @jobs_router.get("/{job_id}/results/{filename}")
-def download_result_file(job_id: str, filename: str) -> FileResponse:
+def download_result_file(job_id: OwnedJobId, filename: str) -> FileResponse:
     """Serve a result file (NetCDF, GeoTIFF, PNG, CSV, GeoParquet) for a finished batch job."""
     from open_geo_service.openeo.jobs import _JOBS_DIR
 
@@ -456,7 +495,7 @@ def execute_synchronous(
         raise HTTPException(status_code=422, detail="Body must contain a 'process' object or 'process_graph' directly")
     if not isinstance(process, dict):
         raise HTTPException(status_code=422, detail="Body must contain a 'process' object")
-    result = run_process_graph(process, request)
+    result = run_process_graph(process, request, visible_to=principal_of(request))
 
     import tempfile
 
@@ -606,35 +645,38 @@ def _coord_summary(coord: Any) -> Any:
 
 
 @udp_router.get("", response_model=WorkflowListResponse)
-def list_workflows() -> WorkflowListResponse:
-    """Return all stored workflows (user-defined processes)."""
-    return workflow_store.list_workflows()
+def list_workflows(request: Request) -> WorkflowListResponse:
+    """Return built-in and plugin workflows, and the stored workflows the caller may see."""
+    return workflow_store.list_workflows(visible_to=principal_of(request))
 
 
 @udp_router.get("/{process_graph_id}", response_model=WorkflowRecord)
-def get_workflow(process_graph_id: str) -> WorkflowRecord:
+def get_workflow(process_graph_id: str, request: Request) -> WorkflowRecord:
     """Return one workflow (user-defined process)."""
-    record = workflow_store.get_workflow(process_graph_id)
+    record = workflow_store.get_workflow(process_graph_id, visible_to=principal_of(request))
     if record is None:
         raise HTTPException(status_code=404, detail=f"Process graph '{process_graph_id}' not found")
     return record
 
 
 @udp_router.put("/{process_graph_id}", status_code=200)
-def put_workflow(process_graph_id: str, body: dict[str, Any] = Body(...)) -> WorkflowRecord:
-    """Store or replace a workflow (user-defined process)."""
+def put_workflow(process_graph_id: str, request: Request, body: dict[str, Any] = Body(...)) -> WorkflowRecord:
+    """Store or replace a workflow (user-defined process), owned by the caller."""
     if process_graph_id in _reserved_process_ids():
         raise HTTPException(
             status_code=400,
             detail=f"Process graph id '{process_graph_id}' conflicts with a predefined process",
         )
-    return workflow_store.put_workflow(process_graph_id, body)
+    try:
+        return workflow_store.put_workflow(process_graph_id, body, by=principal_of(request))
+    except workflow_store.WorkflowAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @udp_router.delete("/{process_graph_id}", status_code=204)
-def delete_workflow(process_graph_id: str) -> Response:
-    """Delete a workflow (user-defined process)."""
-    found = workflow_store.delete_workflow(process_graph_id)
+def delete_workflow(process_graph_id: str, request: Request) -> Response:
+    """Delete a workflow (user-defined process) the caller owns, or any as an operator."""
+    found = workflow_store.delete_workflow(process_graph_id, by=principal_of(request))
     if not found:
         raise HTTPException(status_code=404, detail=f"Process graph '{process_graph_id}' not found")
     return Response(status_code=204)

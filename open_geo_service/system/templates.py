@@ -13,10 +13,11 @@ from textwrap import dedent
 from typing import Any, cast
 
 import jinja2
-from fastapi import Request
 from markupsafe import Markup, escape
 
 from open_geo_service import config as api_config
+from open_geo_service.auth.middleware import current_viewer
+from open_geo_service.auth.tokens import Principal, Tier, configured_tokens
 from open_geo_service.data_registry.recipes import producing_workflow
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.extents.services import get_extent
@@ -106,58 +107,6 @@ def get_template(name: str) -> jinja2.Template:
     return _cache[name]
 
 
-def _media_type_q(accept: str, media_type: str) -> float:
-    """Return the effective q-value for media_type in an Accept header, or -1.0 if absent.
-
-    Handles RFC 7231 wildcards: exact matches beat type/* beats */*. An API client
-    sending Accept: */* (e.g. the requests library default) therefore matches any
-    media type at q=1.0, and JSON wins over HTML when both match equally.
-    """
-    media_type_family = media_type.split("/", 1)[0]
-    exact_q = -1.0
-    family_q = -1.0
-    wildcard_q = -1.0
-    for item in accept.split(","):
-        parts = item.strip().split(";")
-        token = parts[0].strip()
-        q = 1.0
-        for param in parts[1:]:
-            param = param.strip()
-            if param.startswith("q="):
-                try:
-                    q = float(param[2:])
-                except ValueError:
-                    pass
-        if token == media_type:
-            exact_q = max(exact_q, q)
-        elif token == f"{media_type_family}/*":
-            family_q = max(family_q, q)
-        elif token == "*/*":
-            wildcard_q = max(wildcard_q, q)
-    if exact_q >= 0:
-        return exact_q
-    if family_q >= 0:
-        return family_q
-    return wildcard_q
-
-
-def wants_json(request: Request) -> bool:
-    """Return True if the client prefers a JSON response over HTML.
-
-    JSON is preferred when application/json is present with a q-value greater
-    than or equal to text/html. HTML wins only when text/html has a strictly
-    higher q-value, matching RFC 7231 content negotiation semantics.
-    """
-    if request.query_params.get("f") == "json":
-        return True
-    accept = request.headers.get("accept", "")
-    if not accept:
-        return False
-    json_q = _media_type_q(accept, "application/json")
-    html_q = _media_type_q(accept, "text/html")
-    return json_q >= 0 and (html_q < 0 or json_q >= html_q)
-
-
 @functools.lru_cache(maxsize=4)
 def _read_asset(name: str) -> str:
     resource = importlib.resources.files("open_geo_service") / "templates" / name
@@ -208,6 +157,79 @@ def page_nav(mount: str, current: str) -> Markup:
         for key, label, path in _NAV_ITEMS
     )
     return Markup('<nav class="rail" aria-label="Sections"><ul>{}</ul></nav>').format(items)
+
+
+def account(mount: str) -> Markup:
+    """The header's sign-in link, or who is signed in and a sign-out button; empty with authentication off."""
+    if not configured_tokens():
+        return Markup("")
+    viewer = current_viewer()
+    if viewer.token is None:
+        return Markup('<div class="account"><a href="{}/sign-in">Sign in</a></div>').format(mount)
+    return Markup(
+        '<form class="account" method="post" action="{}/sign-out">'
+        '<span>{}</span><button type="submit">Sign out</button></form>'
+    ).format(mount, viewer.token.id)
+
+
+def sign_in_note(mount: str, action: str) -> Markup:
+    """Why a page's forms are hidden: a prompt to sign in, or that the signed-in token is not an operator's.
+
+    `action` completes "to ...", for example "ingest data here".
+    """
+    link = Markup('<a href="{}/sign-in">Sign in</a>').format(mount)
+    viewer = current_viewer()
+    if viewer.token is None:
+        return Markup("{} with an operator token to {}.").format(link, action)
+    return Markup("You are signed in as {}, which is not an operator token. {} with one to {}.").format(
+        viewer.token.id, link, action
+    )
+
+
+# Jinja types its globals as its own defaults, so a function of ours needs the cast.
+cast(dict[str, Any], _env.globals)["account"] = account
+cast(dict[str, Any], _env.globals)["sign_in_note"] = sign_in_note
+
+
+def actions_closed() -> str | None:
+    """Why the viewer cannot use a page's forms: "read-only", "sign-in", or None when it can.
+
+    Every form the pages post goes to an operator route (see `auth/route_table.py`), so the
+    operator tier is what a page checks.
+    """
+    if api_config.is_read_only():
+        return "read-only"
+    if configured_tokens() and current_viewer().tier < Tier.OPERATOR:
+        return "sign-in"
+    return None
+
+
+def _actions() -> dict[str, bool]:
+    """The page context that shows or hides forms.
+
+    `read_only` hides them; `sign_in` says they need an operator's sign-in, for a visitor signed
+    out or signed in with a lower tier.
+    """
+    closed = actions_closed()
+    return {"read_only": closed is not None, "sign_in": closed == "sign-in"}
+
+
+SIGN_IN_NEEDS_HTTPS = "Sign-in needs HTTPS, so the token is not sent in clear. Open this instance over https://."
+
+
+def render_sign_in_page(mount: str, *, next_path: str, error: str | None = None, form: bool = True) -> str:
+    """Render the form that exchanges a token for a session; without *form*, only *error*."""
+    return get_template("sign_in_page.html").render(
+        mount=mount,
+        name=api_config.get_name(),
+        logo=LOGO,
+        styles=_read_asset("geoservice_ui.css"),
+        nav=page_nav(mount, ""),
+        next_path=next_path,
+        error=error,
+        form=form,
+        needs_https=SIGN_IN_NEEDS_HTTPS,
+    )
 
 
 # The pages under the Pipelines entry; the first is where it opens.
@@ -419,18 +441,15 @@ def _dataset_page_context(
     display = _mapping(template.get("display"))
     sync = _mapping(template.get("sync"))
     sync_kind = str(sync.get("kind") or "")
-    providers = ", ".join(
-        str(provider["name"])
-        for provider in template.get("providers") or []
-        if isinstance(provider, dict) and provider.get("name")
-    )
+    # From the record, which also holds the providers a computed table takes from its sources.
+    providers = ", ".join(provider.name for provider in record.providers)
     version = sync.get("version")
     version_label = (
         f"{version.get('authority')}:{version.get('value')}"
         if isinstance(version, dict) and version.get("value")
         else (str(version) if version else "")
     )
-    range_label = "" if vector else _range_label(display)
+    range_label = "" if vector or summary["kind"] == "table" else _range_label(display)
     classes = _class_legend(template)
 
     if template and vector:
@@ -525,7 +544,88 @@ def _dataset_page_context(
         # Only where the data source page offers a fetch: a provider this instance has.
         "refresh_href": f"/data-sources/{template['id']}" if vector and template and refreshable else None,
         "refresh_blocked": refresh_blocked,
+        "table": _table_view(record.dataset_id) if summary["kind"] == "table" else None,
     }
+
+
+TABLE_PREVIEW_ROWS = 10
+"""Latest values a table dataset's page shows; the rows API serves all of them."""
+
+
+def _table_view(dataset_id: str) -> dict[str, Any] | None:
+    """Each feature's latest value, by feature name, for a table dataset's page.
+
+    None for a table with no rows. The preview is None for a table without columns representing the
+    feature, the period and a value: it has no latest value per feature. A table with several value
+    columns shows its first.
+    """
+    from open_geo_service.tables import store
+
+    record = store.latest_record(dataset_id)
+    if record is None:
+        return None
+    row_count = store.summarize(record).row_count
+    if row_count == 0:
+        return None
+    declared = store.schema_of(record)
+    feature, period = declared.represented_by("feature_id"), declared.represented_by("period_start")
+    latest = store.latest_values(record, TABLE_PREVIEW_ROWS)
+    if latest is None or feature is None or period is None or not declared.values or latest.row_count == 0:
+        return {"row_count": row_count, "preview": None}
+    value, name, coverage = (
+        declared.values[0],
+        declared.represented_by("feature_name"),
+        declared.represented_by("coverage"),
+    )
+    # What tells a feature's values for one period apart: the key columns other than its feature and period.
+    located = {
+        declared.represented_by(meaning)
+        for meaning in ("dataset_id", "collection_id", "collection_version", "feature_id", "period_start")
+    }
+    series_columns = [column for column in declared.key if column not in located]
+    preview = latest.rows.to_pylist()
+    series = {_series_label(row, series_columns) for row in preview}
+    # Every feature's, not only the rows shown: the heading names a period all features share.
+    periods = latest.periods
+    return {
+        "row_count": row_count,
+        "preview": [
+            {
+                "feature": (row[name] if name else None) or row[feature],
+                "feature_id": row[feature],
+                "period": store.period_label(row[period], record.period_type),
+                "series": _series_label(row, series_columns),
+                "value": "" if row[value] is None else f"{row[value]:.6g}",
+                "coverage": "" if not coverage or row[coverage] is None else f"{row[coverage]:.0%}",
+            }
+            for row in preview
+        ],
+        "more": max(latest.row_count - TABLE_PREVIEW_ROWS, 0),
+        # A column only where it tells the rows apart, or says something: one period or one
+        # series for every row goes in the heading, and a pipeline's rows have no coverage.
+        "has_period": len(periods) > 1,
+        "common_period": store.period_label(periods[0], record.period_type) if len(periods) == 1 else "",
+        "has_series": len(series) > 1,
+        "common_series": next(iter(series)) if len(series) == 1 else "",
+        "has_coverage": bool(coverage) and any(row[coverage] is not None for row in preview),
+        "unit": store.unit_of(record, value) or "",
+    }
+
+
+def _series_label(row: dict[str, Any], columns: list[str]) -> str:
+    """The values of *columns* in *row* that are set: text as it is, anything else after its column's name."""
+    parts: list[str] = []
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, datetime):
+            parts.append(f"{column} {value:%Y-%m-%d %H:%M}")
+        else:
+            parts.append(f"{column} {value}")
+    return ", ".join(parts)
 
 
 def _feature_refresh_blocked(collection_id: str, template: dict[str, Any] | None) -> str:
@@ -565,7 +665,13 @@ def render_dataset_page(
     refreshable = False
     refresh_blocked = ""
     try:
-        if record.item_type == "feature":
+        if record.item_type == "table":
+            from open_geo_service.tables import store
+            from open_geo_service.tables.sources import table_sources
+
+            latest = store.latest_record(record.dataset_id)
+            template = table_sources(latest).template() if latest is not None else None
+        elif record.item_type == "feature":
             from open_geo_service.features.templates import get_feature_template
 
             source_id = record.source_dataset_id or record.dataset_id
@@ -587,7 +693,7 @@ def render_dataset_page(
     stored_schedule: dict[str, Any] | None = None
     scheduler_status: dict[str, Any] = {}
     scheduler_reload_error: str | None = None
-    if record.item_type != "feature":
+    if record.item_type not in ("feature", "table"):
         try:
             from open_geo_service.scheduler.service import get_scheduler_service
 
@@ -624,7 +730,7 @@ def render_dataset_page(
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "datasets"),
         job_script=_read_asset("geoservice_jobs.js"),
-        read_only=api_config.is_read_only(),
+        **_actions(),
         **_dataset_page_context(record, template, refreshable, refresh_blocked),
     )
 
@@ -655,7 +761,7 @@ def render_schedules_page(status: Any, mount: str, *, change_warning: str | None
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "automation"),
         automation_tabs=automation_tabs(mount, "schedules"),
-        read_only=api_config.is_read_only(),
+        **_actions(),
         status=status,
         schedules=rows,
         change_warning=change_warning,
@@ -672,6 +778,7 @@ def render_schedule_delete_page(dataset_id: str, mount: str) -> str:
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "automation"),
         dataset_id=dataset_id,
+        **_actions(),
     )
 
 
@@ -683,23 +790,6 @@ _PERIOD_FORMAT_HINTS = {
     "monthly": "YYYY-MM",
     "yearly": "YYYY",
 }
-
-
-def prefers_html(request: Request) -> bool:
-    """Whether a client asked for HTML over JSON, for an endpoint that is JSON by default.
-
-    Stricter than `wants_json` on purpose. `/` has always defaulted to HTML; a data endpoint
-    has always answered JSON, and scripts calling it may send no Accept header or `*/*`.
-    Those keep getting JSON, and only a client that ranks `text/html` above JSON — a browser —
-    gets the page. `?f=html` and `?f=json` override either way.
-    """
-    requested = request.query_params.get("f")
-    if requested in {"html", "json"}:
-        return requested == "html"
-    accept = request.headers.get("accept", "")
-    if not accept:
-        return False
-    return _media_type_q(accept, "text/html") > _media_type_q(accept, "application/json")
 
 
 def _period_value(value: str, period: str) -> str:
@@ -873,7 +963,7 @@ def _data_source_page_context(
 
 def render_data_source_page(template: dict[str, Any], mount: str) -> str:
     """Render the page for one data source, with the form that ingests it."""
-    read_only = api_config.is_read_only()
+    actions = _actions()
     return get_template("data_source_page.html").render(
         version=app_version,
         mount=mount,
@@ -882,10 +972,11 @@ def render_data_source_page(template: dict[str, Any], mount: str) -> str:
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "data-sources"),
         job_script=_read_asset("geoservice_jobs.js"),
+        sign_in=actions["sign_in"],
         **_data_source_page_context(
             template,
             _load_datasets(),
-            read_only=read_only,
+            read_only=actions["read_only"],
             has_extent=_load_extent() is not None,
             today=date.today(),
         ),
@@ -947,6 +1038,7 @@ def _feature_source_page_context(template: dict[str, Any], datasets: list[Any], 
 
 def render_feature_source_page(template: dict[str, Any], mount: str) -> str:
     """Render the page for one feature collection data source, with the form that fetches it."""
+    actions = _actions()
     return get_template("feature_source_page.html").render(
         version=app_version,
         mount=mount,
@@ -955,7 +1047,8 @@ def render_feature_source_page(template: dict[str, Any], mount: str) -> str:
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "data-sources"),
         job_script=_read_asset("geoservice_jobs.js"),
-        **_feature_source_page_context(template, _load_datasets(), read_only=api_config.is_read_only()),
+        sign_in=actions["sign_in"],
+        **_feature_source_page_context(template, _load_datasets(), read_only=actions["read_only"]),
     )
 
 
@@ -1078,11 +1171,11 @@ def render_data_sources_page(mount: str) -> str:
     )
 
 
-def _load_workflows() -> list[Any]:
+def _load_workflows(viewer: Principal | None) -> list[Any]:
     try:
         from open_geo_service.openeo.workflows import list_workflows
 
-        return sorted(list_workflows().processes, key=lambda workflow: workflow.id)
+        return sorted(list_workflows(visible_to=viewer).processes, key=lambda workflow: workflow.id)
     except Exception:
         _log.exception("Unexpected error loading workflows")
         return []
@@ -1495,7 +1588,7 @@ def _process_page_context(process: dict[str, Any], origin_label: str, workflows:
     }
 
 
-def render_process_page(process: dict[str, Any], mount: str) -> str:
+def render_process_page(process: dict[str, Any], mount: str, viewer: Principal | None = None) -> str:
     """Render the page for one process: what it does, its parameters and where it is used."""
     origins = {view["id"]: view["origin_label"] for view in _load_processes()}
     return get_template("process_page.html").render(
@@ -1505,7 +1598,7 @@ def render_process_page(process: dict[str, Any], mount: str) -> str:
         logo=LOGO,
         styles=_read_asset("geoservice_ui.css"),
         nav=page_nav(mount, "processes"),
-        **_process_page_context(process, origins.get(process["id"], ""), _load_workflows()),
+        **_process_page_context(process, origins.get(process["id"], ""), _load_workflows(viewer)),
     )
 
 
@@ -1515,7 +1608,7 @@ _API_GROUP_NOTES = {
     "Ingestions": "Ingest from a data source into this instance, and follow the job it starts.",
     "Sync": "Bring an ingested dataset up to date, or ask what a sync would do.",
     "Features": "Feature collections as GeoParquet, and refreshing one from its data source.",
-    "Tables": "Current values per feature and period, as JSON or CSV.",
+    "Tables": "Table datasets: their rows as JSON or CSV, and their Parquet files.",
     "Zarr": "The datasets themselves, as Zarr over HTTP for any Zarr-aware client.",
     "Icechunk": "The same stores for the Icechunk SDK, with version history.",
     "STAC": "Catalogue metadata for discovery, one collection per published dataset.",
@@ -1874,12 +1967,12 @@ def _landing_catalogue(
     }
 
 
-def render_workflows_page(mount: str) -> str:
+def render_workflows_page(mount: str, viewer: Principal | None = None) -> str:
     """Render the list of workflows, with the datasets each one produces.
 
     HTML only: the machine-readable list stays at `GET /process_graphs`.
     """
-    catalogue = _landing_catalogue(_load_templates(), _load_workflows())
+    catalogue = _landing_catalogue(_load_templates(), _load_workflows(viewer))
     return get_template("workflows_page.html").render(
         version=app_version,
         mount=mount,
@@ -1973,7 +2066,7 @@ def _load_datasets() -> list[Any]:
         return []
 
 
-def render_landing(version: str, mount: str) -> str:
+def render_landing(version: str, mount: str, viewer: Principal | None = None) -> str:
     """Render the root overview: what this instance holds, and how much of it.
 
     The lists it used to carry are pages of their own now, so this counts them and links to
@@ -1982,7 +2075,7 @@ def render_landing(version: str, mount: str) -> str:
     """
     extent = _load_extent()
     templates = _load_templates()
-    catalogue = _landing_catalogue(templates, _load_workflows(), _load_feature_templates())
+    catalogue = _landing_catalogue(templates, _load_workflows(viewer), _load_feature_templates())
     return get_template("landing_page.html").render(
         version=version,
         mount=mount,
@@ -1998,6 +2091,7 @@ def render_landing(version: str, mount: str) -> str:
         workflows=catalogue["workflows"],
         # Shown on the overview, so a visitor knows why no page offers ingest or sync.
         read_only=api_config.is_read_only(),
+        sign_in=actions_closed() == "sign-in",
     )
 
 
@@ -2017,7 +2111,6 @@ def render_pipelines_page(
     revision: int | None = None,
     selection: dict[str, Any] | None = None,
     labels: dict[str, dict[str, str]] | None = None,
-    read_only: bool = False,
 ) -> str:
     """Render the pipeline listing, the creation tab, or the same tab prefilled for editing.
 
@@ -2118,7 +2211,7 @@ def render_pipelines_page(
         draft=draft,
         editing=editing,
         revision=revision,
-        read_only=read_only,
+        **_actions(),
     )
 
 
@@ -2238,7 +2331,7 @@ def render_pipeline_page(record: Any, runs: list[dict[str, Any]], mount: str) ->
         skipped_discarded_through=record.events.skipped_discarded_through,
         range_start=range_start,
         range_end=range_end,
-        read_only=api_config.is_read_only(),
+        **_actions(),
     )
 
 

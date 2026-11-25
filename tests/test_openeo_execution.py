@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,7 +224,7 @@ def test_load_collection_overlapping_temporal_extent_returns_data(monkeypatch: p
 def test_augment_with_workflows_returns_base_when_no_udps(monkeypatch: pytest.MonkeyPatch) -> None:
     import open_geo_service.openeo.workflows as workflow_module
 
-    monkeypatch.setattr(workflow_module, "list_workflows", lambda: MagicMock(processes=[]))
+    monkeypatch.setattr(workflow_module, "list_workflows", lambda **_: MagicMock(processes=[]))
     base = object()
     result = _augment_with_workflows(base)
     assert result is base
@@ -237,7 +238,7 @@ def test_augment_with_workflows_registers_udp(monkeypatch: pytest.MonkeyPatch) -
     udp.process_graph = {
         "result": {"process_id": "save_result", "arguments": {"data": 42, "format": "Zarr"}, "result": True}
     }
-    monkeypatch.setattr(workflow_module, "list_workflows", lambda: MagicMock(processes=[udp]))
+    monkeypatch.setattr(workflow_module, "list_workflows", lambda **_: MagicMock(processes=[udp]))
 
     from openeo_pg_parser_networkx.process_registry import Process, ProcessRegistry
 
@@ -387,12 +388,12 @@ def test_openeo_job_service_create_execute_and_get_results(
 ) -> None:
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process: {"ignored": True},
+        lambda process, **_: {"ignored": True},
     )
     monkeypatch.setattr(
         job_service,
         "_persist_result",
-        lambda job_id, result: f"/tmp/{job_id}/result.geojson",
+        lambda job_id, result, *_: f"/tmp/{job_id}/result.geojson",
     )
 
     record = job_service.create_job(
@@ -561,17 +562,32 @@ def test_create_job_title_is_none_when_no_load_collection(client: TestClient) ->
     assert response.json()["title"] is None
 
 
-def test_create_job_does_not_advertise_missing_logs_endpoint(client: TestClient) -> None:
-    response = client.post(
-        "/jobs",
-        json={
-            "process": {"process_graph": {"result": {"process_id": "constant", "arguments": {"x": 1}, "result": True}}}
-        },
-    )
+def test_a_failed_job_links_to_logs_that_carry_its_error(client: TestClient) -> None:
+    graph = {"load": {"process_id": "load_collection", "arguments": {"id": "no_such_dataset"}, "result": True}}
+    created = client.post("/jobs", json={"process": {"process_graph": graph}})
+    job_id = created.json()["id"]
 
-    assert response.status_code == 201
-    links = response.json()["links"]
-    assert all(link["rel"] != "logs" for link in links)
+    def run_until_failed() -> None:
+        assert client.post(f"/jobs/{job_id}/results").status_code == 202
+        deadline = time.monotonic() + 30
+        while client.get(f"/jobs/{job_id}").json()["status"] != "error":
+            assert time.monotonic() < deadline, "job did not fail within 30 s"
+            time.sleep(0.05)
+
+    run_until_failed()
+
+    assert "/jobs/{job_id}/logs" in {endpoint["path"] for endpoint in client.get("/").json()["endpoints"]}
+    logs_href = next(link["href"] for link in created.json()["links"] if link["rel"] == "logs")
+    entries = client.get(logs_href, params={"level": "error"}).json()["logs"]
+
+    assert [entry["level"] for entry in entries] == ["error"]
+    assert entries[0]["message"].startswith("failed: HTTPException: 404: Collection 'no_such_dataset'")
+    assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
+    # A client polling from the first failure still sees the second one after a re-run.
+    run_until_failed()
+    after_rerun = client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
+    assert [entry["level"] for entry in after_rerun] == ["error"]
+    assert after_rerun[0]["id"] != entries[0]["id"]
 
 
 def test_put_udp_rejects_predefined_process_id(client: TestClient) -> None:
@@ -629,7 +645,7 @@ def test_run_process_graph_keeps_runtime_failures_as_500(monkeypatch: pytest.Mon
 def test_result_route_rejects_synchronous_zarr_datacube(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process, request=None: xr.Dataset(
+        lambda process, request=None, **_: xr.Dataset(
             {"temperature": xr.DataArray(np.ones((2, 2), dtype=np.float32), dims=["y", "x"])}
         ),
     )
@@ -664,7 +680,7 @@ def test_result_route_rejects_formats_a_raster_cube_cannot_produce(
     """
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process, request=None: SaveResultEnvelope(
+        lambda process, request=None, **_: SaveResultEnvelope(
             xr.Dataset({"temperature": xr.DataArray(np.ones((2, 2), dtype=np.float32), dims=["y", "x"])}),
             fmt,
         ),
@@ -692,7 +708,7 @@ def test_result_route_still_serves_raster_formats(
     )
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process, request=None: SaveResultEnvelope(ds, fmt),
+        lambda process, request=None, **_: SaveResultEnvelope(ds, fmt),
     )
 
     response = client.post(
@@ -1857,11 +1873,34 @@ def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
     assert output_path.endswith(".zarr")
 
 
-@pytest.mark.parametrize("bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path"])
-def test_persist_result_rejects_dataset_id_with_path_separators(job_service: OpenEOJobService, bad_id: str) -> None:
+# Path separators, ids that name one file but not one URL segment (shared.urls),
+# and supplied ids that are empty or not text.
+@pytest.mark.parametrize(
+    "bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "", None, 0]
+)
+def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
+    job_service: OpenEOJobService, bad_id: object
+) -> None:
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": bad_id})
-    with pytest.raises(ValueError, match="Invalid dataset_id"):
+    with pytest.raises(ValueError, match="dataset_id"):
         job_service._persist_result("job-traversal", envelope)
+
+
+# Every path but a Zarr raster writes a job-local file, which would drop the id without a word.
+@pytest.mark.parametrize(
+    ("data", "fmt", "options"),
+    [
+        pytest.param(_small_dataset(), "GTiff", {}, id="not_zarr"),
+        pytest.param(_small_dataset(), "Zarr", {"export": "table"}, id="with_export"),
+        pytest.param(pd.DataFrame({"v": [1]}), "Zarr", {}, id="not_raster"),
+    ],
+)
+def test_persist_result_refuses_dataset_id_it_cannot_write(
+    job_service: OpenEOJobService, data: object, fmt: str, options: dict[str, Any]
+) -> None:
+    envelope = SaveResultEnvelope(data, fmt, {"dataset_id": "rain", **options})
+    with pytest.raises(ValueError, match="managed raster dataset"):
+        job_service._persist_result("job-dropped-id", envelope)
 
 
 def test_persist_result_rejects_unknown_dataset_id(
@@ -1886,7 +1925,7 @@ def test_persist_result_auto_registers_missing_template(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
@@ -1937,7 +1976,7 @@ def test_persist_result_reloads_template_after_concurrent_create(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
@@ -2293,7 +2332,7 @@ def test_result_route_serves_netcdf_after_reduce_dimension(client: TestClient, m
     """The reported symptom: a graph ending in reduce_dimension, exported as NETCDF, 500d."""
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process, request=None: SaveResultEnvelope(_reduced_dataset(), "NETCDF"),
+        lambda process, request=None, **_: SaveResultEnvelope(_reduced_dataset(), "NETCDF"),
     )
 
     response = client.post(
@@ -2320,7 +2359,7 @@ def test_batch_job_with_unwritable_format_errors_without_a_result_asset(
     )
     monkeypatch.setattr(
         "open_geo_service.openeo.execution.run_process_graph",
-        lambda process: SaveResultEnvelope(ds, "GEOJSON"),
+        lambda process, **_: SaveResultEnvelope(ds, "GEOJSON"),
     )
 
     record = job_service.create_job(

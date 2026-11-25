@@ -272,8 +272,11 @@ SDK usage:
 import icechunk, xarray as xr
 
 repo = icechunk.Repository.open(icechunk.http_storage("https://host/icechunk/era5land_precipitation_daily"))
-ds = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3, consolidated=False)
+ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, consolidated=False)
 ```
+
+Open the `published` branch: writers commit to `main`, and a dataset's readers see a version only
+once it is published (see [the managed data API guide](managed_data_api_guide.md), under versions and rollback).
 
 Both endpoints are advertised as assets in the STAC collection so clients can choose the appropriate one. Use `/zarr` for web maps and standard xarray workflows; use `/icechunk` when you need versioning or SDK-level access.
 
@@ -282,3 +285,5 @@ Both endpoints are advertised as assets in the STAC collection so clients can ch
 ## Fill values and NaN handling
 
 When writing float data to Zarr, missing data is stored as IEEE `NaN`. The map viewer uses the zarr `fill_value` attribute (which defaults to `NaN` for float arrays) to render missing pixels as transparent.
+
+xarray does not read a Zarr v3 array's `fill_value`; it reads the CF `_FillValue` attribute. Every data array declares it, at every pyramid level, and the STAC collection publishes it as the band's `nodata`. An integer array whose source declares no fill value is stored with a `fill_value` of 0 but declares no `_FillValue`, since 0 can be a class.

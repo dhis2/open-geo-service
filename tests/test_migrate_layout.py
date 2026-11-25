@@ -12,6 +12,8 @@ import pytest
 from open_geo_service import config as api_config
 from open_geo_service import migrate_layout
 
+from .test_writer_lease import start_other_writer
+
 
 @pytest.fixture
 def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -34,6 +36,7 @@ def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (plugins / "datasets").mkdir(parents=True)
     (plugins / "datasets" / "chelsa.yaml").write_text(
         "- id: chelsa\n  name: CHELSA\n  variable: tas\n  period_type: monthly\n  sync:\n    kind: static\n"
+        "  source_url: https://example.org/source\n"
         "  ingestion:\n    plugin: datasets.chelsa.ChelsaPlugin\n    params: {}\n"
     )
     (plugins / "datasets" / "chelsa.py").write_text(
@@ -47,6 +50,7 @@ def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (plugins / "datasets" / "chirps_override.yaml").write_text(
         "- id: chirps_override\n  name: CHIRPS override\n  variable: precip\n  period_type: daily\n"
         "  sync:\n    kind: static\n"
+        "  source_url: https://example.org/source\n"
         "  ingestion:\n    plugin: open_geo_service.plugins.datasets.chirps3.CHIRPS3DailyPlugin\n"
     )
     (plugins / "features").mkdir()
@@ -67,7 +71,7 @@ def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> 
     assert migrate_layout.main([]) == 0
 
     data, plugins = instance / "data", instance / "plugins"
-    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "rasters", "vectors"]
+    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "rasters", "vectors", "writer.lock"]
     assert (data / "rasters" / "chirps.icechunk").is_dir()
     assert (data / "rasters" / "chirps.icechunk.lock").exists(), "a store's sibling files move with it"
     assert (data / "vectors" / "districts.abc.parquet").exists()
@@ -104,6 +108,12 @@ def test_running_it_again_changes_nothing(instance: Path, capsys: pytest.Capture
     assert "Nothing to migrate" in capsys.readouterr().out
     assert (instance / "data" / "artifacts" / "records.json").read_text() == records
 
+    # A mistyped data_dir is reported as having nothing to migrate, and not created.
+    (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data-typo'}\nplugins_dir: ./plugins\n")
+    api_config._cache = None
+    assert migrate_layout.main([]) == 0
+    assert not (instance / "data-typo").exists()
+
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
 def test_rewriting_the_records_keeps_their_mode(instance: Path) -> None:
@@ -133,6 +143,18 @@ def test_refuses_when_an_old_and_a_new_folder_both_exist(instance: Path, capsys:
     assert "move their contents by hand" in capsys.readouterr().err
     assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
     assert "plugin: datasets." in (instance / "plugins" / "datasets" / "chelsa.yaml").read_text()
+
+
+def test_refuses_while_a_writer_runs(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    writer = start_other_writer()
+    try:
+        assert migrate_layout.main([]) == 1
+    finally:
+        writer.kill()
+        writer.wait()
+
+    assert f"server (pid {writer.pid}" in capsys.readouterr().err
+    assert (instance / "data" / "downloads" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
 def test_the_service_reads_the_migrated_instance(instance: Path) -> None:

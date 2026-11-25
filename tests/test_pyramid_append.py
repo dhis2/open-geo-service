@@ -31,6 +31,7 @@ class _GridPlugin(BaseDatasetPlugin):
     def __init__(self, *, categorical: bool = False) -> None:
         self.available = [f"2026-01-0{day}" for day in (1, 2, 3)]
         self.categorical = categorical
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         return [period for period in self.available if start <= period <= end]
@@ -42,6 +43,8 @@ class _GridPlugin(BaseDatasetPlugin):
         else:
             values = rng.normal(5.0, 3.0, size=(NY, NX)).astype("float32")
             values[rng.random((NY, NX)) < 0.1] = np.nan
+        if period_id in self.empty:
+            values[:] = np.nan
         data = xr.DataArray(
             values,
             dims=("y", "x"),
@@ -137,7 +140,6 @@ def test_sync_appends_to_every_level_and_matches_a_rebuild(
 
     assert state["rebuilds"] == 1, "the sync must not rebuild the pyramid"
     assert artifact.coverage.temporal.end == "2026-01-05"
-    assert not synced.with_name(f"{synced.name}.rebuild").exists()
     with open_icechunk_dataset(synced) as stored:
         assert stored.sizes["t"] == 5
     _assert_same_store(synced, _rebuild(state, tmp_path, "2026-01-05"))
@@ -218,6 +220,25 @@ def test_a_sync_with_nothing_new_leaves_the_store_alone(pyramid_sync: dict[str, 
     assert repo.lookup_branch("main") == before
 
 
+def test_a_sync_holds_back_empty_newest_periods_and_appends_them_once_filled(pyramid_sync: dict[str, Any]) -> None:
+    """The source lists 2026-01-05 before writing it: the sync succeeds without it (CLIM-1878)."""
+    state = pyramid_sync
+    _ingest(state, "2026-01-03")
+    state["plugin"].available += ["2026-01-04", "2026-01-05"]
+    state["plugin"].empty = {"2026-01-05"}
+
+    def lengths() -> set[int]:
+        root = _root(state["store"])
+        return {(root[path] if path else root)["t"].shape[0] for path in ["", *root.group_keys()]}
+
+    assert _ingest(state, "2026-01-05").coverage.temporal.end == "2026-01-04"
+    assert lengths() == {4}
+
+    state["plugin"].empty = set()
+    assert _ingest(state, "2026-01-05").coverage.temporal.end == "2026-01-05"
+    assert lengths() == {5}
+
+
 def test_a_failed_record_write_rolls_back_the_appended_levels(
     pyramid_sync: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,21 +258,29 @@ def test_a_failed_record_write_rolls_back_the_appended_levels(
     assert set(lengths.values()) == {3}, lengths
 
 
-def test_an_ingested_pyramid_keeps_one_period_per_time_shard(pyramid_sync: dict[str, Any]) -> None:
+def test_every_level_of_an_ingested_pyramid_has_one_period_per_shard_and_a_fill_value(
+    pyramid_sync: dict[str, Any],
+) -> None:
     """Every level of a pyramid built through the ingest path holds one period per shard.
 
     A sync appends one period at a time, and appending into a shard several periods wide rewrites
     that shard on every append (CLIM-879). topozarr widens time shards when the source's time
     chunks allow it, and the ingest path reads the streaming store with time merged per dask chunk,
     so this fails if either one changes (CLIM-1765).
+
+    Each level also declares its fill value where xarray reads it, which is where the STAC band's
+    `nodata` comes from (CLIM-1974).
     """
     state = pyramid_sync
     _ingest(state, "2026-01-03")
     root = _root(state["store"])
     levels = sorted(root.group_keys())
     assert len(levels) >= 3, "precondition: a pyramid with several levels"
+    session = icechunk.Repository.open(icechunk.local_filesystem_storage(str(state["store"]))).readonly_session("main")
     for level in levels:
         tg = root[level]["tg"]
         assert tg.shape[0] == 3, level
         assert (tg.shards or tg.chunks)[0] == 1, level
         assert tg.chunks[0] == 1, level
+        fill = xr.open_zarr(session.store, group=level, consolidated=False)["tg"].encoding.get("_FillValue")
+        assert fill is not None and np.isnan(fill), level

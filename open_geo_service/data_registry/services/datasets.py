@@ -15,7 +15,7 @@ from open_geo_service import config as api_config
 from open_geo_service.data_registry import recipes
 from open_geo_service.ingestions.schemas import parse_declared_artifact_version
 from open_geo_service.shared.time import SUPPORTED_PERIOD_TYPES
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -417,11 +417,7 @@ def _validate_dataset_template(dataset: object, *, source: str) -> None:
     # before routing, so escaping it does not help and no single-segment route matches.
     # Rejected at registration, where a template author sees it, rather than discovered later
     # as a catalogue full of 404s.
-    if not is_segment_safe_id(dataset_id):
-        raise ValueError(
-            f"Dataset template id '{dataset_id}' in {source} cannot be used in a URL; it must "
-            "start with a letter or digit and carry only letters, digits, '.', '_' or '-'"
-        )
+    require_segment_safe_id(dataset_id, "dataset template id", where=source)
     # A categorical template declares `classes`; a malformed declaration would publish wrong
     # class metadata, so it is refused here. A continuous template has none and is not checked.
     if dataset.get("classes") is not None:
@@ -537,6 +533,18 @@ def _validate_dataset_template(dataset: object, *, source: str) -> None:
             raise ValueError(
                 f"Dataset template '{dataset_id}' in {source} declares both produced_by and "
                 "ingestion.plugin; a dataset is either ingested or produced by a workflow"
+            )
+
+    # A template that fetches data names the page it comes from: its STAC collection is a mirror,
+    # which Portolan requires to link the original source (`via`). Refused rather than warned
+    # about, unlike a missing licence, because the collection could not conform without it. A
+    # derived template (a normal, an anomaly) fetches nothing and links its inputs' sources.
+    if is_ingestable(dataset):
+        source_url = dataset.get("source_url")
+        if not isinstance(source_url, str) or not source_url.strip():
+            raise ValueError(
+                f"Dataset template '{dataset_id}' in {source} must define 'source_url', the page of the "
+                "source its data is fetched from"
             )
 
     # Surface non-CF/udunits units so unit-aware processes (xclim indices) don't fail

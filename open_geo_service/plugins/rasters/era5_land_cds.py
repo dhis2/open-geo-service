@@ -200,9 +200,9 @@ class ERA5LandCDSDailyFromHourlyPlugin(ERA5LandCDSHourlyPlugin):
                 remove_partial_periods=False,
             ),
         )
-        if self._fetch_accumulated():
-            # A day's sum of hourly amounts is an amount per day; a mean, min or max stays per hour.
-            return amount_as_rate(daily, self.variable, "d" if self.temporal_aggregation == "sum" else "h")
+        if self._fetch_accumulated() and self.temporal_aggregation != "sum":
+            # Hourly amounts: their sum is the day's total, while a mean, min or max is a rate per hour.
+            return amount_as_rate(daily, self.variable, "h")
         return daily
 
 

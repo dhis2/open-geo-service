@@ -91,6 +91,9 @@ class _FakeSession:
     def commit(self, message: str) -> None:
         self.messages.append(message)
 
+    def amend(self, message: str) -> None:
+        self.messages.append(message)
+
 
 class _FakeRepo:
     def __init__(self, store: str) -> None:
@@ -127,9 +130,11 @@ def test_orchestrator_uses_store_state_as_resume_truth(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     result = run_streaming_ingest_sync(
         plugin=_FakePlugin(),
@@ -200,9 +205,11 @@ def test_orchestrator_closes_each_fetched_dataset(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     real_close = xr.Dataset.close
     plugin_closes = {"n": 0}
@@ -237,9 +244,11 @@ def test_orchestrator_infers_grid_when_plugin_has_no_probe(monkeypatch: pytest.M
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     result = run_streaming_ingest_sync(
         plugin=_NoProbePlugin(),
@@ -294,9 +303,11 @@ def test_orchestrator_uses_plugin_crs_attr_as_inference_fallback(
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     run_streaming_ingest_sync(
         plugin=_ProjectedNoProbePlugin(),
@@ -337,9 +348,11 @@ def test_orchestrator_stamps_cf_attrs_from_template(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     run_streaming_ingest_sync(
         plugin=_PlaceholderAttrsPlugin(),
@@ -385,9 +398,11 @@ def test_orchestrator_stamps_the_template_on_its_variable_only(monkeypatch: pyte
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     run_streaming_ingest_sync(
         plugin=_WithQualityPlugin(),
@@ -427,9 +442,9 @@ def test_orchestrator_refuses_destructive_first_write_when_existing_store_is_not
 
     monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
     monkeypatch.setattr(
-        streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t": set()
+        streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t", **_: set()
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: False)
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: False)
 
     with pytest.raises(RuntimeError, match="committed periods could not be read"):
         run_streaming_ingest_sync(
@@ -459,9 +474,11 @@ def test_orchestrator_normalizes_invalid_plugin_batching_and_concurrency(
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": _read_committed_periods_from_zarr(path, period_type, time_dim=time_dim),
+        lambda path, period_type, time_dim="t", **_: _read_committed_periods_from_zarr(
+            path, period_type, time_dim=time_dim
+        ),
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     result = run_streaming_ingest_sync(
         plugin=_InvalidPlugin(),
@@ -495,9 +512,9 @@ def test_orchestrator_does_not_skip_uncommitted_gaps_before_cursor(
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
-        lambda path, period_type, time_dim="t": {"2026-01-02"},
+        lambda path, period_type, time_dim="t", **_: {"2026-01-02"},
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: False)
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: False)
 
     result = run_streaming_ingest_sync(
         plugin=_FakePlugin(),
@@ -526,9 +543,9 @@ def test_orchestrator_rejects_spatial_shape_changes_across_appends(
 
     monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
     monkeypatch.setattr(
-        streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t": set()
+        streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t", **_: set()
     )
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     with pytest.raises(RuntimeError, match="has spatial shape"):
         run_streaming_ingest_sync(
@@ -579,6 +596,66 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
     )
 
     assert rerun.periods_written == 0
+
+
+class _UnpublishedTailPlugin(_FakePlugin):
+    """2026-01-02 and 03 are a real gap; the newest two days are listed empty until ``published``."""
+
+    def __init__(self, dtype: str, missing: float) -> None:
+        self.dtype = dtype
+        self.missing = missing
+        self.published = False
+        self.fails_on: str | None = None
+
+    async def periods(self, start: str, end: str) -> list[str]:
+        return [f"2026-01-0{day}" for day in range(1, 7)]
+
+    async def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
+        if period_id == self.fails_on:
+            raise OSError(f"connection lost fetching {period_id}")
+        ds = await super().fetch_period(period_id, bbox, **params)
+        ds["precip"] = ds["precip"].astype(self.dtype)
+        ds["precip"].encoding["_FillValue"] = self.missing
+        if period_id in ("2026-01-02", "2026-01-03") or (period_id >= "2026-01-05" and not self.published):
+            ds["precip"][:] = self.missing
+        return ds
+
+
+@pytest.mark.parametrize(("dtype", "missing"), [("float32", np.nan), ("uint8", 255)])
+def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, dtype: str, missing: float) -> None:
+    """Empty periods at the end are fetched again by the next sync; a gap before data is written (CLIM-1878)."""
+    store_path = tmp_path / "streaming-store.icechunk"
+    plugin = _UnpublishedTailPlugin(dtype, missing)
+
+    def sync() -> list[str]:
+        return run_streaming_ingest_sync(
+            plugin=plugin,
+            params={},
+            bbox=[0.0, 0.0, 1.0, 1.0],
+            start="2026-01-01",
+            end="2026-01-06",
+            store_path=store_path,
+            period_type="daily",
+        ).held_back
+
+    def committed() -> tuple[list[str], list[float]]:
+        repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+        with xr.open_zarr(repo.readonly_session("main").store) as ds:
+            return [str(t)[:10] for t in ds["t"].values], ds["precip"].values[:, 0, 0].tolist()
+
+    # A run that fails after committing the empty 2026-01-05 does not keep it either.
+    plugin.fails_on = "2026-01-06"
+    with pytest.raises(OSError, match="connection lost"):
+        sync()
+    assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
+
+    plugin.fails_on = None
+    assert sync() == ["2026-01-05", "2026-01-06"]
+    assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
+
+    plugin.published = True
+    assert sync() == []
+    np.testing.assert_array_equal(committed()[1], [1, missing, missing, 4, 5, 6])
 
 
 def test_orchestrator_resume_supports_custom_time_dimension(tmp_path: Path) -> None:

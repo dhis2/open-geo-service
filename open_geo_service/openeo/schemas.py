@@ -105,6 +105,8 @@ class OpenEOJobRecord(BaseModel):
     # Persisted internal state (underscore prefix excluded from openEO output)
     error_message: str | None = Field(default=None, exclude=True)
     cancel_requested: bool = Field(default=False, exclude=True)
+    # The principal that created the job through the API (docs/authentication.md).
+    owner: str | None = Field(default=None, exclude=True)
     # Set on jobs a pipeline run or a derived dataset refresh creates: who owns the job, and the
     # event it answers, from which its id is derived.
     trigger_id: str | None = Field(default=None, exclude=True)
@@ -148,6 +150,26 @@ class OpenEOJobListResponse(BaseModel):
     """Envelope for GET /jobs."""
 
     jobs: list[OpenEOJobRecord]
+    links: list[dict[str, Any]] = Field(default_factory=list)
+
+
+OpenEOLogLevel = Literal["error", "warning", "info", "debug"]
+
+
+class OpenEOLogEntry(BaseModel):
+    """One entry in GET /jobs/{id}/logs."""
+
+    id: str
+    level: OpenEOLogLevel
+    message: str
+    time: datetime | None = None
+
+
+class OpenEOJobLogs(BaseModel):
+    """Envelope for GET /jobs/{id}/logs."""
+
+    level: OpenEOLogLevel
+    logs: list[OpenEOLogEntry]
     links: list[dict[str, Any]] = Field(default_factory=list)
 
 

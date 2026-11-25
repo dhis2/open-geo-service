@@ -53,7 +53,7 @@ def _worldpop_cache_dir() -> Path:
     """Directory for cached WorldPop GeoTIFF downloads.
 
     Lives under the instance ``data_dir`` (``<data_dir>/cache/worldpop``) so the cache
-    shares the instance's lifecycle, mirroring how downloads/jobs are resolved. Falls
+    shares the instance's lifecycle, like the rest of the instance's data. Falls
     back to an XDG cache path when no config/``data_dir`` is set (e.g. CI).
     """
     data_dir = api_config.get_data_dir()

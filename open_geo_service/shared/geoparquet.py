@@ -30,6 +30,14 @@ The type IANA registered for Parquet in 2024, and the one Portolan requires. pys
 reader, so the catalogue and the job-result path cannot drift.
 """
 
+PARQUET_COMPRESSION = "zstd"
+"""The compression of every Parquet file OGS publishes: feature collections, table datasets,
+table exports and job results.
+
+Portolan recommends zstd, and it gives smaller files than Parquet's default, Snappy, at about
+the same write time. Every current Parquet reader reads it.
+"""
+
 
 def read_geo_metadata(path: Path | str) -> dict[str, Any] | None:
     """Return a GeoParquet file's `geo` metadata document, or None when it has none.

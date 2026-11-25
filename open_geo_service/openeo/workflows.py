@@ -9,10 +9,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
-import portalocker
-
 from open_geo_service import config as api_config
+from open_geo_service.auth.tokens import Principal, Tier
 from open_geo_service.openeo.schemas import WorkflowListResponse, WorkflowRecord
+from open_geo_service.shared.persistence import atomic_json, index_lock
 
 _T = TypeVar("_T")
 
@@ -27,24 +27,33 @@ WORKFLOW_DIR = _resolve_workflow_dir()
 WORKFLOW_INDEX_PATH = WORKFLOW_DIR / "process_graphs.json"
 
 
-def _ensure_store() -> None:
-    WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
-    if not WORKFLOW_INDEX_PATH.exists():
-        WORKFLOW_INDEX_PATH.write_text("[]\n", encoding="utf-8")
+class WorkflowAccessError(Exception):
+    """A principal tried to store a workflow under an id it may not take."""
 
 
-def list_workflows() -> WorkflowListResponse:
+def _stored_owner(raw: dict[str, object]) -> str | None:
+    owner = raw.get("owner")
+    return owner if isinstance(owner, str) else None
+
+
+def _visible_records(visible_to: Principal | None) -> list[dict[str, object]]:
+    """Stored workflows `visible_to` may see; all of them when None, as execution needs."""
+    return [raw for raw in _load_records() if visible_to is None or visible_to.may_access(_stored_owner(raw))]
+
+
+def list_workflows(visible_to: Principal | None = None) -> WorkflowListResponse:
     """Return all workflows: built-ins, plugin, and runtime-registered.
 
     Plugin workflows override built-ins with the same id; runtime-registered
-    workflows override both.
+    workflows override both. Given `visible_to`, a stored workflow is listed only to its owner
+    and to operators; built-in and plugin workflows are listed to everyone.
     """
     merged: dict[str, dict[str, object]] = {}
     for raw in (
         *_load_builtin_workflows(),
         *_load_entry_point_workflows(),
         *_load_plugin_workflows(),
-        *_load_records(),
+        *_visible_records(visible_to),
     ):
         wid = raw.get("id")
         if not isinstance(wid, str) or not wid:
@@ -63,12 +72,13 @@ def list_workflows() -> WorkflowListResponse:
     )
 
 
-def get_workflow(process_graph_id: str) -> WorkflowRecord | None:
+def get_workflow(process_graph_id: str, visible_to: Principal | None = None) -> WorkflowRecord | None:
     """Return one workflow by id, or None if not found.
 
-    Checks runtime-registered first, then plugin, then built-in.
+    Checks runtime-registered first, then plugin, then built-in. Given `visible_to`, a stored
+    workflow it may not see is passed over, as `list_workflows` passes it over.
     """
-    for raw in _load_records():
+    for raw in _visible_records(visible_to):
         if raw.get("id") == process_graph_id:
             return WorkflowRecord.model_validate(raw)
     for raw in _load_plugin_workflows():
@@ -83,24 +93,36 @@ def get_workflow(process_graph_id: str) -> WorkflowRecord | None:
     return None
 
 
-def put_workflow(process_graph_id: str, body: dict[str, object]) -> WorkflowRecord:
-    """Store (create or replace) a workflow."""
+def put_workflow(process_graph_id: str, body: dict[str, object], by: Principal) -> WorkflowRecord:
+    """Store (create or replace) a workflow owned by `by`; a replaced workflow keeps its owner.
+
+    Raises WorkflowAccessError when `by` would replace another principal's workflow, or, unless
+    it is an operator, take the id of a built-in or plugin workflow, which every caller and
+    pipeline would then run instead.
+    """
     record = WorkflowRecord.model_validate({**body, "id": process_graph_id})
+    if by.tier is not Tier.OPERATOR and any(
+        raw.get("id") == process_graph_id
+        for raw in (*_load_builtin_workflows(), *_load_entry_point_workflows(), *_load_plugin_workflows())
+    ):
+        raise WorkflowAccessError(f"Process graph id '{process_graph_id}' is a built-in or plugin workflow")
 
     def _mutation(records: list[dict[str, object]]) -> WorkflowRecord:
         payload = record.model_dump(mode="json")
         for index, existing in enumerate(records):
             if existing.get("id") == process_graph_id:
-                records[index] = payload
+                if not by.may_access(_stored_owner(existing)):
+                    raise WorkflowAccessError(f"Process graph id '{process_graph_id}' is taken")
+                records[index] = {**payload, "owner": _stored_owner(existing)}
                 return record
-        records.append(payload)
+        records.append({**payload, "owner": by.owner_id})
         return record
 
     return _mutate_records(_mutation)
 
 
-def delete_workflow(process_graph_id: str) -> bool:
-    """Delete a workflow from the runtime index; returns True if it existed.
+def delete_workflow(process_graph_id: str, by: Principal) -> bool:
+    """Delete a workflow `by` may see from the runtime index; returns True if it existed.
 
     Note: plugin-backed workflows (loaded from plugins_dir/workflows/) cannot be
     deleted via the API — they are re-loaded from disk on each request.  To remove
@@ -109,7 +131,7 @@ def delete_workflow(process_graph_id: str) -> bool:
 
     def _mutation(records: list[dict[str, object]]) -> bool:
         for index, existing in enumerate(records):
-            if existing.get("id") == process_graph_id:
+            if existing.get("id") == process_graph_id and by.may_access(_stored_owner(existing)):
                 records.pop(index)
                 return True
         return False
@@ -118,17 +140,16 @@ def delete_workflow(process_graph_id: str) -> bool:
 
 
 def _load_records() -> list[dict[str, object]]:
-    _ensure_store()
-    return _read_records_from_disk()
+    """The stored records; none before the first write.
 
-
-def _read_records_from_disk() -> list[dict[str, object]]:
-    with open(WORKFLOW_INDEX_PATH, encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_SH)
-        try:
+    No lock: the index is replaced whole, and taking the lock would create files a read-only
+    server may not write.
+    """
+    try:
+        with open(WORKFLOW_INDEX_PATH, encoding="utf-8") as handle:
             payload = json.load(handle)
-        finally:
-            portalocker.unlock(handle)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("process_graphs.json must contain a list")
     return payload
@@ -201,20 +222,11 @@ def _load_entry_point_workflows() -> list[dict[str, object]]:
 
 
 def _mutate_records(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
-    _ensure_store()
-    with open(WORKFLOW_INDEX_PATH, "r+", encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_EX)
-        try:
-            payload = json.load(handle)
-            records: list[dict[str, object]] = payload if isinstance(payload, list) else []
-            result = mutation(records)
-            handle.seek(0)
-            json.dump(records, handle, indent=2)
-            handle.write("\n")
-            handle.truncate()
-            return result
-        finally:
-            portalocker.unlock(handle)
+    with index_lock(WORKFLOW_INDEX_PATH):
+        records = _load_records()
+        result = mutation(records)
+        atomic_json(WORKFLOW_INDEX_PATH, records)
+        return result
 
 
 # --- freezing a graph against the registry ---------------------------------------------------

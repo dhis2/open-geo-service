@@ -35,7 +35,7 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_temperature_daily_min
   name: 2m temperature daily minimum (ERA5-Land)
@@ -74,7 +74,7 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_temperature_daily_max
   name: 2m temperature daily maximum (ERA5-Land)
@@ -113,7 +113,7 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_dewpoint_daily
   name: 2m dewpoint temperature (ERA5-Land)
@@ -152,17 +152,17 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_precipitation_daily
-  name: Precipitation rate (ERA5-Land)
+  name: Precipitation (ERA5-Land)
   short_name: Precipitation
   description: >-
-    Daily total precipitation at 9 km worldwide, represented as a daily rate, aggregated from the
-    hourly, de-accumulated CDS geo-chunked ARCO archive. Days run in UTC. The latest day is
-    added one day after it appears in the source, because the final hour of an accumulated total
-    is only published with the following day.
-  standard_name: lwe_precipitation_rate
+    Daily total precipitation at 9 km worldwide, summed from the hourly, de-accumulated CDS
+    geo-chunked ARCO archive. Days run in UTC. The latest day is added one day after it appears in
+    the source, because the final hour of an accumulated total is only published with the
+    following day.
+  standard_name: lwe_thickness_of_precipitation_amount
   variable: tp
   period_type: daily
   sync:
@@ -180,10 +180,10 @@
       variable: tp
       temporal_aggregation: sum
       unit_transform: metres_to_mm
-  # The hourly ARCO precipitation variable is already de-accumulated; the daily sum is
-  # represented as a mean daily rate because each stored period is exactly one day.
-  units: mm/d
-  cell_methods: "time: mean"
+  # The hourly ARCO precipitation variable is already de-accumulated, so the day's total is the
+  # sum of its hours.
+  units: mm
+  cell_methods: "time: sum"
   resolution: 9 km x 9 km
   source: ERA5-Land Reanalysis
   source_url: https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land?tab=analysis_ready_data
@@ -195,7 +195,7 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: 0.0
 
 - id: era5land_relative_humidity_daily
@@ -235,7 +235,6 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: Purples
-    range: [0.0, 100.0]
 
 - id: era5land_relative_humidity_daily_min
   name: 2m relative humidity daily minimum (ERA5-Land)
@@ -274,7 +273,6 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: Purples
-    range: [0.0, 100.0]
 
 - id: era5land_relative_humidity_daily_max
   name: 2m relative humidity daily maximum (ERA5-Land)
@@ -313,4 +311,3 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: Purples
-    range: [0.0, 100.0]

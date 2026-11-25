@@ -93,13 +93,13 @@ def test_plugin_process_summary_in_catalog(
 
     processes_dir = tmp_path / "processes"
     processes_dir.mkdir()
-    (processes_dir / "cdd.py").write_text(
+    (processes_dir / "dry_spell_max_length.py").write_text(
         """
 import xarray as xr
 from open_geo_service.process import process
 
 @process(summary="Consecutive dry days")
-def cdd(pr: xr.DataArray, thresh: str = "1mm/day") -> xr.DataArray:
+def dry_spell_max_length(pr: xr.DataArray, thresh: str = "1 mm") -> xr.DataArray:
     return pr
 """,
         encoding="utf-8",
@@ -111,8 +111,8 @@ def cdd(pr: xr.DataArray, thresh: str = "1mm/day") -> xr.DataArray:
 
     response = client.get("/processes")
     procs = {p["id"]: p for p in response.json()["processes"]}
-    assert "cdd" in procs
-    assert procs["cdd"]["summary"] == "Consecutive dry days"
+    # The plugin overrides xclim's process of the same id.
+    assert procs["dry_spell_max_length"]["summary"] == "Consecutive dry days"
 
 
 def test_string_annotations_are_resolved_to_schemas() -> None:

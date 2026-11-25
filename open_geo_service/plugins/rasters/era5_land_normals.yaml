@@ -31,14 +31,14 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_precipitation_daily_normal_1991_2020
-  name: Total precipitation daily normal (ERA5-Land, 1991–2020)
+  name: Precipitation daily normal (ERA5-Land, 1991–2020)
   short_name: Precipitation daily normal
   description: >-
-    Average ERA5-Land rainfall for each day of the year over 1991-2020, smoothed over a 31-day
-    window. The baseline an anomaly is measured against.
+    Average ERA5-Land daily rainfall total for each day of the year over 1991-2020, smoothed over
+    a 31-day window. The baseline an anomaly is measured against.
   variable: tp
   period_type: climatology
   sync:
@@ -66,14 +66,14 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
 
 # ---------------------------------------------------------------------------
 # Monthly climate-normal output templates for the `climate_normal` openEO workflow
 # (month-of-year means computed from an already-ingested managed GeoZarr store). These
 # have NO ingestion plugin — the data is produced by the workflow and published via
 # save_result, which requires a registered static template for the output id. Run the
-# workflow on an ERA5-Land dataset with `frequency: month`. The reference period is
+# workflow on an ERA5-Land monthly dataset with `frequency: month`. The reference period is
 # baked into the id (e.g. _1991_2020); add a copy with a new period when one is adopted.
 # (Day-of-year ERA5-Land normals come from the EDH-direct era5land_*_daily_normal_*
 # templates above, so only the monthly variants are produced from the store here.)
@@ -100,21 +100,20 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: rdbu_r
-    range: [-30.0, 30.0]
+    midpoint: 0
 
 - id: era5land_precipitation_monthly_normal_1991_2020
-  name: Mean daily precipitation monthly normal (ERA5-Land, 1991–2020)
+  name: Precipitation monthly normal (ERA5-Land, 1991–2020)
   short_name: Precipitation monthly normal
   description: >-
-    Average ERA5-Land rainfall for each calendar month over 1991-2020. The baseline a monthly
-    anomaly is measured against.
+    Average ERA5-Land monthly rainfall total for each calendar month over 1991-2020. The baseline
+    a monthly anomaly is measured against.
   variable: tp
   period_type: climatology
   sync:
     kind: static
-  # mm/d, not a monthly total: the workflow averages the daily-rate (mm/d) source over
-  # the days in each calendar month, so the result stays a mean daily rate.
-  units: mm/d
+  # The mean of monthly totals (WMO-No. 1203), computed from era5land_precipitation_monthly.
+  units: mm
   source: Derived (climate_normal workflow)
   produced_by: climate_normal
   license:
@@ -125,7 +124,7 @@
       url: https://climate.copernicus.eu/
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
 
 # ---------------------------------------------------------------------------
 # Anomaly output templates for the `climate_anomaly` openEO workflow
@@ -157,7 +156,6 @@
   display:
     colormap: rdbu_r
     midpoint: 0
-    range: [-15.0, 15.0]
 
 - id: era5land_precipitation_daily_relative_anomaly_1991_2020
   name: Precipitation daily relative anomaly (ERA5-Land, vs 1991–2020 normal)
@@ -181,6 +179,9 @@
   display:
     colormap: RdBu
     midpoint: 0
+    # Fixed, not measured: a relative anomaly cannot fall below -100% but has no upper bound,
+    # and where the normal is near zero one shower reads as +1000%. A measured range centred
+    # on 0 would follow that tail and leave a total drought near neutral.
     range: [-100.0, 100.0]
 
 - id: era5land_precipitation_daily_anomaly_1991_2020
@@ -193,7 +194,7 @@
   period_type: daily
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_anomaly workflow)
   produced_by: climate_anomaly
   license:
@@ -205,7 +206,6 @@
   display:
     colormap: RdBu
     midpoint: 0
-    range: [-20.0, 20.0]
 
 # ---------------------------------------------------------------------------
 # Monthly anomaly output templates for the `climate_anomaly` workflow: pair a monthly
@@ -225,7 +225,14 @@
     kind: static
   units: degC
   source: Derived (climate_anomaly workflow)
-  produced_by: climate_anomaly
+  # Refreshed after each update of era5land_temperature_monthly, once the anomaly was created.
+  produced_by:
+    workflow: climate_anomaly
+    arguments:
+      observed_dataset_id: era5land_temperature_monthly
+      normal_dataset_id: era5land_temperature_monthly_normal_1991_2020
+      variable: t2m
+    refresh_on: observed_dataset_id
   license:
     name: Licence to Use Copernicus Products
     url: https://apps.ecmwf.int/datasets/licences/copernicus/
@@ -235,19 +242,18 @@
   display:
     colormap: rdbu_r
     midpoint: 0
-    range: [-3.0, 3.0]
 
 - id: era5land_precipitation_monthly_anomaly_1991_2020
   name: Precipitation monthly anomaly (ERA5-Land, vs 1991–2020 normal)
   short_name: Precipitation monthly anomaly
   description: >-
-    A month's ERA5-Land rainfall minus its 1991-2020 normal, as a mean daily rate. Negative is drier
-    than usual, positive wetter.
+    A month's ERA5-Land rainfall total minus its 1991-2020 normal. Negative is drier than usual,
+    positive wetter.
   variable: tp
   period_type: monthly
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_anomaly workflow)
   # Refreshed after each update of the monthly precipitation, once the anomaly was created.
   produced_by:
@@ -266,11 +272,10 @@
   display:
     colormap: RdBu
     midpoint: 0
-    range: [-10.0, 10.0]
 
 - id: era5land_precipitation_monthly_relative_anomaly_1991_2020
   name: Precipitation monthly relative anomaly (ERA5-Land, vs 1991–2020 normal)
-  short_name: Precipitation anomaly (%)
+  short_name: Precipitation monthly anomaly (%)
   description: >-
     How far a month's ERA5-Land rainfall sits from its 1991-2020 normal, as a percentage of that
     normal. Negative is drier than usual, positive wetter.
@@ -280,7 +285,15 @@
     kind: static
   units: "%"
   source: Derived (climate_anomaly workflow, method=relative)
-  produced_by: climate_anomaly
+  # Refreshed after each update of era5land_precipitation_monthly, once the anomaly was created.
+  produced_by:
+    workflow: climate_anomaly
+    arguments:
+      observed_dataset_id: era5land_precipitation_monthly
+      normal_dataset_id: era5land_precipitation_monthly_normal_1991_2020
+      variable: tp
+      method: relative
+    refresh_on: observed_dataset_id
   license:
     name: Licence to Use Copernicus Products
     url: https://apps.ecmwf.int/datasets/licences/copernicus/
@@ -290,4 +303,5 @@
   display:
     colormap: RdBu
     midpoint: 0
+    # Fixed for the same reason as the daily relative anomaly.
     range: [-100.0, 100.0]

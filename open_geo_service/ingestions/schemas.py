@@ -144,6 +144,13 @@ class ArtifactPublication(BaseModel):
     status: PublicationStatus = PublicationStatus.UNPUBLISHED
     collection_id: str | None = None
     published_at: datetime | None = None
+    snapshot_id: str | None = Field(
+        default=None,
+        description=(
+            "For a published Icechunk raster, the snapshot of its `published` branch the record "
+            "describes. A writer started after a crash describes the branch again when they differ."
+        ),
+    )
 
 
 GEOSERVICE_AUTHORITY = "geoservice"
@@ -549,6 +556,13 @@ class ArtifactRecord(BaseModel):
             "collection, whose units come from its template."
         ),
     )
+    table_schema: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Declaration of the schema a table dataset's rows were written with (`tables.schemas`), so "
+            "an edited schema file cannot change how they read. None for a raster or a feature collection."
+        ),
+    )
     request_scope: ArtifactRequestScope
     coverage: ArtifactCoverage
     created_at: datetime
@@ -663,6 +677,17 @@ class DatasetAccessLink(BaseModel):
     title: str = Field(description="Human-readable label for the link target.")
 
 
+class DatasetProvider(BaseModel):
+    """An organisation that made or published a dataset's data, as its template declares it."""
+
+    name: str = Field(description="Name of the organisation.")
+    description: str | None = Field(default=None, description="What the organisation did for this data.")
+    roles: list[str] = Field(
+        default_factory=list, description="STAC provider roles, such as producer or licensor, when declared."
+    )
+    url: str | None = Field(default=None, description="The organisation's home page.")
+
+
 class DatasetPublication(BaseModel):
     """Public publication summary for a managed dataset."""
 
@@ -690,8 +715,8 @@ class DatasetRecord(BaseModel):
         serialization_alias="itemType",
         description=(
             "What this dataset holds: 'feature' for a feature collection, 'coverage' for a "
-            "raster, 'table' for values per feature and period. The one field that lets a client "
-            "filter a listing without a request per row — `format` sits on the nested version "
+            "raster, 'table' for a table of rows, such as values per feature and period. The one "
+            "field that lets a client filter a listing without a request per row — `format` sits on the nested version "
             "record, which only the detail endpoint returns. Spelled in OGC API - Features' "
             "camelCase because the name is borrowed from that specification rather than invented here."
         ),
@@ -718,11 +743,20 @@ class DatasetRecord(BaseModel):
         default=STAC_LICENSE_OTHER,
         description=(
             "SPDX identifier for the dataset's licence, or 'other' when the licence has no "
-            "SPDX identifier. Never absent: an undeclared licence reports 'other' rather than "
+            "SPDX identifier. A table computed from several sources is bound by each, so it reports "
+            "an SPDX expression such as 'CC-BY-4.0 AND ODbL-1.0'. Never absent: an undeclared "
+            "licence reports 'other' rather than "
             "something that reads as permissive."
         ),
     )
     license_url: str | None = Field(default=None, description="URL of the licence text, when known.")
+    providers: list[DatasetProvider] = Field(
+        default_factory=list,
+        description=(
+            "Organisations that made the data, from its template; for a computed table, from the "
+            "datasets it was computed from."
+        ),
+    )
     extent: ArtifactCoverage = Field(description="Current covered spatial and temporal extent of the dataset.")
     last_updated: datetime = Field(
         description="Timestamp when Open Geo Service last materialized or updated the dataset."
