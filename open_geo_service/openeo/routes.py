@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from open_geo_service.auth.middleware import principal_of
+from open_geo_service.auth.tokens import access_settings
 from open_geo_service.openeo import collections as collections_service
 from open_geo_service.openeo import processes as processes_service
 from open_geo_service.openeo import workflows as workflow_store
@@ -51,8 +52,25 @@ def well_known_openeo(request: Request) -> dict[str, Any]:
 
 @capabilities_router.get("/credentials/oidc")
 def credentials_oidc() -> dict[str, Any]:
-    """Return OIDC authentication providers (empty = open/anonymous access)."""
-    return {"providers": []}
+    """The OIDC providers people sign in through; empty when none is configured.
+
+    A provider with an `openeo_client_id` names it as a default client, so an openEO client can
+    sign in without being registered itself.
+    """
+    providers: list[dict[str, Any]] = []
+    for provider in access_settings().providers:
+        entry: dict[str, Any] = {
+            "id": provider.id,
+            "issuer": provider.issuer,
+            "title": provider.title,
+            "scopes": list(provider.scopes),
+        }
+        if provider.openeo_client_id:
+            entry["default_clients"] = [
+                {"id": provider.openeo_client_id, "grant_types": list(provider.openeo_grant_types)}
+            ]
+        providers.append(entry)
+    return {"providers": providers}
 
 
 @capabilities_router.get("/file_formats")
@@ -188,8 +206,12 @@ def credentials_basic(request: Request) -> dict[str, str]:
 
 @capabilities_router.get("/me")
 def me(request: Request) -> dict[str, Any]:
-    """Return the principal this request runs as: `anonymous` without a credential."""
-    return {"user_id": principal_of(request).id, "links": []}
+    """Return the principal this request runs as: `anonymous` without a credential.
+
+    A person signed in through a provider is `oidc:<provider>:<subject>`, with their username as `name`.
+    """
+    principal = principal_of(request)
+    return {"user_id": principal.id, **({"name": principal.name} if principal.name else {}), "links": []}
 
 
 # ---------------------------------------------------------------------------

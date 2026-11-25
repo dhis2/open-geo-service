@@ -1331,7 +1331,7 @@ class OpenEOJobService:
         # Key presence, not truthiness: an empty or non-string id must reach validation, not fall through.
         managed = "dataset_id" in options
         if managed and owner is not None and owner.tier < Tier.OPERATOR:
-            raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs an operator token")
+            raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs the operator tier")
         # Every other path writes a job-local file, so an id there would be dropped without a word.
         if managed and ("export" in options or fmt != "ZARR" or not isinstance(result, (xr.Dataset, xr.DataArray))):
             raise ValueError("'dataset_id' writes a managed raster dataset: it needs a raster in Zarr, no 'export'")
