@@ -55,7 +55,8 @@ The writer keeps a STAC catalog of the published datasets in `catalog/`, in the 
 Portolan catalog: the root `catalog.json`, a sub-catalog per kind of dataset, and a
 `collection.json` beside each dataset's data, each with a `README.md` and an `AGENTS.md`. It
 rewrites them whenever a record changes, before the write returns, and all of them when it
-starts, which picks up an upgrade, a changed template or a changed public address.
+starts, which picks up an upgrade, a changed template or a changed public address. A read-only
+server writes none of it, so after an upgrade the writer starts first.
 
 - **Only what is published is listed.** A dataset written but not yet published has its folder
   and data, but no `collection.json`, and no catalog links to it.

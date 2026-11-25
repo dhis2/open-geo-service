@@ -237,7 +237,9 @@ which renames files on the same disk and downloads nothing:
 2. Back up the data folder.
 3. From the directory the instance's `.env` is in, see what would change:
    `uv run python -m open_geo_service.migrate_layout --dry-run`
-4. Run it without `--dry-run`, then start the servers.
+4. Run it without `--dry-run`, then start the writable server before any read-only one: the
+   writer writes the catalog in `catalog/` at startup, and a read-only server serves only what
+   is there.
 
 It refuses to run while a dataset's id breaks the id rule (lowercase letters, digits, `_` and
 `-`, starting with a letter), and names each one: delete it, or ingest it again under a valid id.
