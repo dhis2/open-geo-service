@@ -158,8 +158,11 @@ def configured_public_root() -> str:
     return origin + (path or configured_root_path())
 
 
-SEGMENT_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SEGMENT_SAFE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 """Shape of an id that can appear in a URL path and route back to the same resource.
+
+It also names the dataset's folder and files in the data folder, and is the form Portolan asks
+of a collection id (PORTO-CORE-016): lowercase, starting with a letter, no dots.
 
 Every catalogued dataset id becomes a path segment — `/stac/{id}/collection.json`, `/zarr/{id}`,
 `/features/{id}` — and an id outside this shape produces a link that does not work, or worse,
@@ -191,8 +194,8 @@ def require_segment_safe_id(value: str, what: str, where: str = "") -> str:
     if not is_segment_safe_id(value):
         place = f" in {where}" if where else ""
         raise ValueError(
-            f"invalid {what} {value!r}{place}; it becomes a URL path segment, so it must start with a "
-            "letter or digit and carry only letters, digits, '.', '_' or '-'"
+            f"invalid {what} {value!r}{place}; it becomes a URL path segment and a folder name, so it must "
+            "start with a lowercase letter and carry only lowercase letters, digits, '_' or '-'"
         )
     return value
 

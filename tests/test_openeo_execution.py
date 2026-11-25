@@ -1876,7 +1876,8 @@ def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
 # Path separators, ids that name one file but not one URL segment (shared.urls),
 # and supplied ids that are empty or not text.
 @pytest.mark.parametrize(
-    "bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "", None, 0]
+    "bad_id",
+    ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "Rain", "rain.v2", "", None, 0],
 )
 def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
     job_service: OpenEOJobService, bad_id: object

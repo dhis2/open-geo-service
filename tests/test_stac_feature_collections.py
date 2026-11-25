@@ -768,6 +768,9 @@ def test_no_module_still_advertises_the_old_parquet_spelling() -> None:
         "",
         "  x",
         "districts\n",
+        "a.b",
+        "Districts",
+        "1districts",
     ],
     ids=[
         "query",
@@ -780,6 +783,9 @@ def test_no_module_still_advertises_the_old_parquet_spelling() -> None:
         "empty",
         "padded",
         "newline",
+        "inner-dot",
+        "uppercase",
+        "leading-digit",
     ],
 )
 def test_a_collection_id_that_could_not_be_a_url_segment_is_refused(rejected: str) -> None:
@@ -795,7 +801,7 @@ def test_a_collection_id_that_could_not_be_a_url_segment_is_refused(rejected: st
         store.validate_collection_id(rejected)
 
 
-@pytest.mark.parametrize("accepted", ["districts", "worldpop_population_global2_100m", "a.b-c_1", "A1"])
+@pytest.mark.parametrize("accepted", ["districts", "worldpop_population_global2_100m", "a-b_1"])
 def test_an_ordinary_collection_id_is_still_accepted(accepted: str) -> None:
     """The allowlist has to admit the ids real templates use, or it is the wrong allowlist."""
     from open_geo_service.features import store
