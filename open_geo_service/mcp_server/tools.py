@@ -182,8 +182,9 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Any:
 
 
 def _links(dataset_id: str) -> dict[str, str]:
-    """Links to show the user: at the instance's public address, which may differ from the one
-    the call came in on behind a proxy.
+    """Links to show the user, at the instance's public address.
+
+    Behind a proxy that address may differ from the one the call came in on.
     """
     base = absolute_base(Request(current_scope.get()))
     return {
@@ -222,7 +223,7 @@ def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], lin
     }
     summary.dimensions = list(dimensions)
     # Stores keep their source's name for time: `t`, or `time` and `valid_time` for ERA5.
-    time = next((dim for dim in dimensions.values() if dim.get("type") == "temporal"), {})
+    time: dict[str, Any] = next((dim for dim in dimensions.values() if dim.get("type") == "temporal"), {})
     summary.time_start, summary.time_end = (time.get("extent") or [None, None])[:2]
     step = time.get("step")
     summary.time_step = step if isinstance(step, str) else None
