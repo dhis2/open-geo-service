@@ -102,7 +102,7 @@ def test_a_refresh_builds_vector_tiles_beside_the_geoparquet() -> None:
     assert south == pytest.approx(7.5, abs=0.01) and north == pytest.approx(8.8, abs=0.01)
 
 
-@pytest.mark.parametrize(("geometry", "kept_at_zoom_2"), [("polygon", 400), ("point", 256)])
+@pytest.mark.parametrize(("geometry", "kept_at_zoom_2"), [("polygon", 400), ("polygon z", 400), ("point", 256)])
 def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient, geometry: str, kept_at_zoom_2: int
 ) -> None:
@@ -115,6 +115,9 @@ def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
         for feature in grid:
             west, south = feature["geometry"]["coordinates"][0][0]
             feature["geometry"] = {"type": "Point", "coordinates": [west + 0.25, south + 0.25]}
+    elif geometry == "polygon z":  # GeoParquet declares these "Polygon Z"
+        for feature in grid:
+            feature["geometry"]["coordinates"] = [[[*xy, 0.0] for xy in feature["geometry"]["coordinates"][0]]]
     configs = tmp_path / "feature_templates"
     configs.mkdir()
     (configs / "grid.yaml").write_text(
@@ -144,7 +147,7 @@ def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
     assert client.post("/features/districts/refresh").status_code == 200
 
     assert counts[2] == kept_at_zoom_2
-    if geometry == "polygon":
+    if geometry != "point":
         assert set(counts.values()) == {400}
     feature_templates.reset_feature_template_caches()
 

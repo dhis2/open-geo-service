@@ -77,7 +77,8 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
                 source = Path(scratch) / "wgs84.parquet"
                 gpd.read_parquet(collection_path).to_crs("EPSG:4326").to_parquet(source)
             overview = Path(scratch) / "overview.parquet"
-            geometry_types = set(geoparquet.stored_geometry_types(collection_path))
+            # GeoParquet may say "Polygon Z"; the dimension does not change how it is tiled.
+            geometry_types = {name.split(" ")[0] for name in geoparquet.stored_geometry_types(collection_path)}
             density_drop = not geometry_types or not geometry_types <= _POLYGON_TYPES
             report = tylertoo.overview(str(source), str(overview), max_zoom="auto", density_drop=density_drop)
             if max(level["zoom"] for level in report["levels"]) < MIN_MAX_ZOOM:
