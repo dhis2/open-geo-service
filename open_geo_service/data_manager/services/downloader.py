@@ -452,7 +452,7 @@ class _PyramidLevels:
                     values = np.ascontiguousarray(base_arr[a:b])
                     for group in self.groups[1:]:
                         target = cast(zarr.Array, group[name])
-                        reduced = block_reduce(values, stride, composable_method, target.fill_value, True)
+                        reduced = block_reduce(values, stride, composable_method, target.fill_value)
                         reduced = reduced[(slice(None), *(slice(0, s) for s in target.shape[1:]))]
                         values = np.ascontiguousarray(reduced.astype(target.dtype, copy=False))
                         target[a:b] = values
