@@ -8,7 +8,7 @@ import logging
 import mimetypes
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
@@ -53,6 +53,7 @@ from open_geo_service.ingestions.schemas import (
     FeatureDetail,
     IngestionListResponse,
     IngestionResponse,
+    ProvisionalPeriod,
     PublicationStatus,
     SyncAction,
     SyncDetail,
@@ -68,6 +69,7 @@ from open_geo_service.shared.compute import get_job_slots
 from open_geo_service.shared.crs import transform_bbox
 from open_geo_service.shared.licences import DatasetLicence, declared_providers
 from open_geo_service.shared.persistence import atomic_text, index_lock
+from open_geo_service.shared.provisional import provisional_periods, refresh_after_from_template
 from open_geo_service.shared.raster_contract import TIME_ALIASES
 from open_geo_service.shared.statistics import measure_statistics
 from open_geo_service.shared.storage_size import stored_bytes
@@ -92,6 +94,7 @@ from open_geo_service.streaming.store import (
     publish_snapshot,
     published_snapshot,
     read_committed_period_ids_ordered,
+    read_fetched_at,
     read_snapshot,
     seal_version,
 )
@@ -443,6 +446,7 @@ def create_artifact(
     save_cursor: Callable[[dict[str, object]], None] | None = None,
     periods: list[str] | None = None,
     on_update_planned: Callable[[str | None], None] | None = None,
+    refresh_periods: list[str] | None = None,
 ) -> ArtifactRecord:
     """Materialize one managed dataset artifact and persist its metadata.
 
@@ -450,6 +454,10 @@ def create_artifact(
     only when the ingestion will change stored data. It receives the coverage end the data
     had before this update, or None when every period is new or rewritten. An up-to-date
     dataset returns its existing artifact without calling it.
+
+    ``refresh_periods`` are committed periods the sync planner found fetched while
+    preliminary and now final (CLIM-931). They are fetched again and written in place before
+    any new period is appended; a rematerialization refetches everything and ignores them.
 
     Source dataset materialization is plugin-backed and always writes an
     Icechunk store. Sync requests may still pass `download_start` and
@@ -533,6 +541,7 @@ def create_artifact(
         save_cursor=save_cursor,
         periods=periods,
         on_update_planned=on_update_planned,
+        refresh_periods=refresh_periods,
     )
 
 
@@ -1266,6 +1275,7 @@ def _create_streaming_artifact(
     save_cursor: Callable[[dict[str, object]], None] | None = None,
     periods: list[str] | None = None,
     on_update_planned: Callable[[str | None], None] | None = None,
+    refresh_periods: list[str] | None = None,
 ) -> ArtifactRecord:
     """Create or update one plugin-backed Icechunk artifact.
 
@@ -1313,6 +1323,7 @@ def _create_streaming_artifact(
     store_committed = False
     plugin_handed_to_orchestrator = False
     ingest_completed = False
+    refreshed_indices: list[int] = []
     try:
         timeless = registry_datasets.is_timeless(dataset)
         plugin = _load_streaming_plugin(plugin_path, params=params, static=timeless)
@@ -1332,6 +1343,11 @@ def _create_streaming_artifact(
                 overwrite=overwrite,
                 periods=periods,
             )
+        # A rematerialization fetches every period again anyway, so only an update in place
+        # refreshes. One with nothing new to append still writes the refreshed periods.
+        refresh = list(refresh_periods or []) if plan.action != SyncAction.REMATERIALIZE else []
+        if refresh and plan.action == SyncAction.NO_OP:
+            plan = replace(plan, action=SyncAction.APPEND, periods=[])
         if plan.action == SyncAction.NO_OP:
             try:
                 existing = get_latest_artifact_for_dataset_or_404(str(dataset["id"]))
@@ -1363,6 +1379,7 @@ def _create_streaming_artifact(
             on_update_planned(_previous_coverage_end(dataset, plan))
         materialization_scope = request_scope.model_copy(update={"start": plan.start, "end": plan.end})
 
+        held_back: list[str] = []
         ingest_branch = "main"
         rematerialize = plan.action == SyncAction.REMATERIALIZE and store_path.exists()
         if rematerialize or (plan.action != SyncAction.NO_OP and plan.has_committed_periods):
@@ -1403,6 +1420,7 @@ def _create_streaming_artifact(
             assert plan.start is not None and plan.end is not None
             plugin_handed_to_orchestrator = True
             result = run_streaming_ingest_sync(
+                refresh_periods=refresh if replacement_branch is None else None,
                 plugin=cast(IngestionPlugin, plugin),
                 params=params,
                 dataset=dataset,
@@ -1420,8 +1438,11 @@ def _create_streaming_artifact(
                 replace=replacement_branch is not None,
             )
             ingest_completed = True
+            refreshed_indices = result.refreshed_indices
+            held_back = result.held_back
             wrote_this_run = result.periods_written > 0
-            amended_periods = result.periods_written > 1
+            # Held-back periods were committed and then reset away, which also leaves data to collect.
+            amended_periods = result.periods_written > 1 or bool(held_back)
             if result.periods_written == 0 and (replacement_branch is not None or not store_path.exists()):
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
@@ -1439,10 +1460,12 @@ def _create_streaming_artifact(
         # the raw user request. The latter remains on the record as operation provenance.
         # A brand-new store may legitimately clamp its end to source availability; an
         # update was already planned from the source's exact available period sequence.
+        # A run that held back empty periods at its end (see "Empty periods at the end of a run are
+        # not stored" in docs/architecture.md) ends before the plan, like a first ingest may.
         if coverage.temporal.start is not None:
             coverage_matches_plan = (
                 _temporal_coverage_matches_request_scope(coverage.temporal, materialization_scope)
-                if plan.has_committed_periods
+                if plan.has_committed_periods and not held_back
                 else _temporal_coverage_matches_streaming_request_scope(coverage.temporal, materialization_scope)
             )
             if not coverage_matches_plan:
@@ -1455,7 +1478,9 @@ def _create_streaming_artifact(
                     ),
                 )
 
-        normalization = _maybe_build_pyramid(store_path, dataset, branch=ingest_branch, amend=wrote_this_run)
+        normalization = _maybe_build_pyramid(
+            store_path, dataset, branch=ingest_branch, amend=wrote_this_run, refreshed_indices=refreshed_indices
+        )
         rewritten = normalization.rewritten
         if plan.action != SyncAction.NO_OP and plan.has_committed_periods and not normalization.completed:
             raise RuntimeError(f"Could not normalize '{dataset['id']}'; the dataset update was rolled back")
@@ -1498,6 +1523,7 @@ def _create_streaming_artifact(
             variables=[str(dataset["variable"])],
             request_scope=request_scope,
             coverage=coverage,
+            provisional_periods=_recorded_provisional_periods(store_path, dataset),
             created_at=datetime.now(UTC),
             publication=ArtifactPublication(),
         )
@@ -1572,6 +1598,25 @@ def _create_streaming_artifact(
         finally:
             # Releasing the in-process writer lock must not depend on store cleanup.
             lock.release()
+
+
+def _recorded_provisional_periods(store_path: Path, dataset: dict[str, object]) -> list[ProvisionalPeriod]:
+    """The store's preliminary periods under the template's current ``sync.refresh_after``.
+
+    Derived from the store at the record step, as coverage is, and never stored separately.
+    """
+    window = refresh_after_from_template(dataset)
+    if window is None:
+        return []
+    period_type = str(dataset["period_type"])
+    fetched_at = read_fetched_at(store_path)
+    period_ids = read_committed_period_ids_ordered(store_path, period_type)
+    if fetched_at is None or len(fetched_at) != len(period_ids):
+        return []
+    return [
+        ProvisionalPeriod(period=found.period, fetched_at=found.fetched_at, final_after=found.final_after)
+        for found in provisional_periods(period_ids, fetched_at, period_type, window)
+    ]
 
 
 # Every branch an ingest creates for itself starts with this, and only lives while the ingest runs.
@@ -1845,6 +1890,7 @@ def _maybe_build_pyramid(
     *,
     branch: str = "main",
     amend: bool = False,
+    refreshed_indices: list[int] | None = None,
 ) -> _StoreNormalizationResult:
     """Apply GeoZarr conventions and a multiscale pyramid to what *branch* of the Icechunk store holds.
 
@@ -1868,8 +1914,10 @@ def _maybe_build_pyramid(
     the write amplification of re-emitting the whole store on every sync.
 
     A temporal append to a pyramid store only needs the coarser levels extended to the
-    periods level 0 has gained, which ``append_pyramid_levels`` does in place. Anything else
-    (a first ingest, a replacement, a changed resampling method) rebuilds.
+    periods level 0 has gained, which ``append_pyramid_levels`` does in place, and periods
+    refreshed in place on level 0 (``refreshed_indices``) only need their coarser levels
+    rewritten, which ``rewrite_pyramid_levels`` does. Anything else (a first ingest, a
+    replacement, a changed resampling method) rebuilds.
 
     Returns whether normalization completed and whether it rewrote the store.
     Errors remain logged and swallowed so a brand-new plain flat artifact can
@@ -1878,16 +1926,18 @@ def _maybe_build_pyramid(
     """
     from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 
+    pyramid_method = downloader.resampling_method_from_template(dataset)
     try:
         appended = downloader.append_pyramid_levels(
-            store_path,
-            pyramid_method=downloader.resampling_method_from_template(dataset),
-            branch=branch,
-            amend=amend,
+            store_path, pyramid_method=pyramid_method, branch=branch, amend=amend
         )
+        if appended is not None and refreshed_indices:
+            appended = downloader.rewrite_pyramid_levels(
+                store_path, refreshed_indices, pyramid_method=pyramid_method, branch=branch, amend=amend
+            )
     except Exception:
-        # One commit, so a failure leaves the store as the ingest committed it.
-        logger.warning("Could not append to the pyramid levels of '%s'; rebuilding", store_path.name, exc_info=True)
+        # One commit each, so a failure leaves the store as the last one committed it.
+        logger.warning("Could not update the pyramid levels of '%s'; rebuilding", store_path.name, exc_info=True)
         appended = None
     if appended is not None:
         return _StoreNormalizationResult(completed=True)
@@ -1898,7 +1948,8 @@ def _maybe_build_pyramid(
         # so a shard several periods wide would be rewritten on every append (CLIM-879).
         # Splitting merged chunks afterwards instead made the build five times slower and
         # larger in memory, since every split re-reads its merged block (CLIM-1765).
-        ds = open_icechunk_dataset(store_path, merge_time=False, branch=branch)
+        # With `fetched_at`, so the rebuilt store keeps it on every level.
+        ds = open_icechunk_dataset(store_path, merge_time=False, branch=branch, with_fetched_at=True)
     except Exception:
         logger.warning("Could not open Icechunk store for GeoZarr write; skipping", exc_info=True)
         return _StoreNormalizationResult(completed=False)
@@ -2687,7 +2738,12 @@ def _save_records(records: list[ArtifactRecord]) -> None:
 
 
 def _store_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
-    """Persist a newly created artifact record while avoiding lost updates."""
+    """Persist a newly created artifact record while avoiding lost updates.
+
+    A record for the same request and coverage is replaced in place, keeping its id and
+    publication: a sync that only replaced preliminary periods with final values (CLIM-931)
+    changed the values, statistics and provisional periods without changing the coverage.
+    """
 
     def mutate(records: list[ArtifactRecord]) -> ArtifactRecord:
         existing = _find_artifact_by_request_scope(
@@ -2697,7 +2753,11 @@ def _store_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
             format=record.format,
         )
         if existing is not None and existing.coverage == record.coverage:
-            return existing
+            replacement = record.model_copy(
+                update={"artifact_id": existing.artifact_id, "publication": existing.publication}
+            )
+            records[records.index(existing)] = replacement
+            return replacement
 
         records.append(record)
         return record
@@ -3164,6 +3224,7 @@ def _build_dataset_record(dataset_id: str, artifacts: list[ArtifactRecord]) -> D
         license_url=licence_url,
         providers=[DatasetProvider(**provider) for provider in declared_providers(source_dataset)],
         extent=latest.coverage,
+        provisional_periods=latest.provisional_periods,
         last_updated=latest.created_at,
         links=_dataset_links(dataset_id, latest, published=_latest_published(artifacts)),
         publication=DatasetPublication(

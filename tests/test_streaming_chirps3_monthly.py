@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import calendar
 from datetime import date
 from typing import Any
 
@@ -116,91 +115,20 @@ def test_rejects_a_malformed_end_too() -> None:
         monthly_period_ids("2025-01", "2025-13")
 
 
-# --- the mm/d conversion --------------------------------------------------------------
+# --- the stored values ----------------------------------------------------------------
 
 
-def test_monthly_total_becomes_a_mean_daily_rate(stub_raster: None) -> None:
-    """310 mm over a 31-day month is 10 mm/d. The core of CLIM-867's units decision."""
-    ds = CHIRPS3MonthlyPlugin().fetch_period("2025-01", [33.0, -14.0, 34.0, -13.0])
-    assert float(ds["precip"].mean()) == pytest.approx(10.0)
-
-
-@pytest.mark.parametrize(
-    ("period", "days"),
-    [("2025-01", 31), ("2025-02", 28), ("2024-02", 29), ("2025-04", 30)],
-)
-def test_divides_by_the_actual_days_in_month(stub_raster: None, period: str, days: int) -> None:
-    """February differs between years, so a fixed 30 or 31 would be wrong twice over."""
-    ds = CHIRPS3MonthlyPlugin().fetch_period(period, [33.0, -14.0, 34.0, -13.0])
-    assert float(ds["precip"].mean()) == pytest.approx(310.0 / days)
-    assert days == calendar.monthrange(int(period[:4]), int(period[5:7]))[1]
-
-
-def test_nodata_is_masked_not_scaled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reason the conversion guards the sentinel.
-
-    The monthly COGs declare no nodata, so a masked read leaves a raw -9999 in the array.
-    Dividing it by the day count would give ~-322.5, which no longer matches the sentinel
-    normalize_period masks on — so it would be stored as a plausible negative rainfall rate.
-    """
+@pytest.mark.parametrize("period", ["2025-01", "2024-02"])
+def test_stores_the_monthly_total_as_published(monkeypatch: pytest.MonkeyPatch, period: str) -> None:
+    """The source's total is stored unchanged, whatever the month's length, and the -9999
+    sentinel the COGs leave in a masked read becomes NaN."""
     import rioxarray
 
     monkeypatch.setattr(rioxarray, "open_rasterio", lambda url, **_: _source_raster(with_nodata=True))
-    ds = CHIRPS3MonthlyPlugin().fetch_period("2025-01", [33.0, -14.0, 34.0, -13.0])
-    values = ds["precip"].values
+    values = CHIRPS3MonthlyPlugin().fetch_period(period, [33.0, -14.0, 34.0, -13.0])["precip"].values
     assert np.isnan(values).sum() == 1, "the sentinel cell should be NaN"
-    finite = values[np.isfinite(values)]
-    assert finite.min() > 0, "no negative rate should survive"
-    assert not np.any(np.isclose(finite, _NODATA / 31, atol=1.0)), "the sentinel was scaled instead of masked"
-
-
-def test_the_clip_runs_before_the_conversion(stub_raster: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ordering is the fix, so assert the mechanism and not just the result (CLIM-951).
-
-    The source is a global COG. `normalize_period` clips it, and that clip only becomes a
-    windowed read while the array is still lazy — any arithmetic beforehand materialises the
-    whole globe to keep the handful of cells the bbox asks for. Guarding the *result* alone
-    would not catch a regression here, because both orderings produce identical values.
-    """
-    seen: list[xr.DataArray] = []
-    original = chirps3.normalize_period
-
-    def spy(obj: xr.DataArray, **kwargs: Any) -> xr.Dataset:
-        seen.append(obj)
-        return original(obj, **kwargs)
-
-    monkeypatch.setattr(chirps3, "normalize_period", spy)
-    CHIRPS3MonthlyPlugin().fetch_period("2025-01", [33.0, -14.0, 34.0, -13.0])
-
-    assert len(seen) == 1
-    # Still the raw monthly total, not 310/31 — nothing has scaled it before the clip.
-    assert float(np.nanmax(seen[0].values)) == pytest.approx(310.0)
-
-
-def test_reordering_preserves_the_previous_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clip-then-scale must equal scale-then-clip, sentinel included.
-
-    Reproduces the superseded ordering inline and compares. Against the live COGs the two
-    were bit-identical for the same month (max abs diff 0.0); this pins that here so the
-    optimisation cannot quietly change stored values.
-    """
-    import rioxarray
-
-    monkeypatch.setattr(rioxarray, "open_rasterio", lambda url, **_: _source_raster(with_nodata=True))
-    bbox = [33.0, -14.0, 34.0, -13.0]
-    actual = CHIRPS3MonthlyPlugin().fetch_period("2025-01", bbox)["precip"].values
-
-    # The previous implementation: scale everything except the sentinel, then clip and mask.
-    days = calendar.monthrange(2025, 1)[1]
-    raw = _source_raster(with_nodata=True)
-    scaled_first = raw.where(raw == _NODATA, raw / days)
-    expected = chirps3.normalize_period(
-        scaled_first, variable="precip", period="2025-01-01", nodata=_NODATA, bbox=bbox
-    )["precip"].values
-
-    assert actual.shape == expected.shape
-    assert np.array_equal(np.isnan(actual), np.isnan(expected)), "NaN pattern differs"
-    assert np.array_equal(actual, expected, equal_nan=True), "values differ"
+    assert np.nanmin(values) == pytest.approx(310.0)
+    assert np.nanmax(values) == pytest.approx(310.0)
 
 
 def test_time_coordinate_is_the_first_of_the_month(stub_raster: None) -> None:
@@ -291,9 +219,14 @@ def test_template_is_registered_with_the_monthly_plugin() -> None:
     assert template["ingestion"]["plugin"].endswith("CHIRPS3MonthlyPlugin")
 
 
-def test_template_units_match_the_monthly_normal() -> None:
-    """The whole point of converting: an anomaly pairs these two, so units must agree."""
-    loaded = {d["id"]: d for d in registry.list_datasets()}
-    assert loaded["chirps3_precipitation_monthly"]["units"] == "mm/d"
-    assert loaded["chirps3_precipitation_monthly_normal_1991_2020"]["units"] == "mm/d"
-    assert loaded["era5land_precipitation_monthly"]["units"] == "mm/d"
+def test_precipitation_templates_declare_totals() -> None:
+    """Every precipitation dataset is a total in mm (CLIM-1638), so an observed month, its
+    normal and their absolute anomaly agree, and only a relative anomaly is in percent."""
+    precipitation = [d for d in registry.list_datasets() if d.get("variable") in {"precip", "tp"}]
+    assert len(precipitation) >= 15
+    for template in precipitation:
+        expected = "%" if "relative_anomaly" in template["id"] else "mm"
+        assert template["units"] == expected, template["id"]
+        if template.get("ingestion") and template["period_type"] != "climatology":
+            assert template["standard_name"] == "lwe_thickness_of_precipitation_amount", template["id"]
+            assert template["cell_methods"] == "time: sum", template["id"]

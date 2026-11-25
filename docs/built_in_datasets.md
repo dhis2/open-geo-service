@@ -14,6 +14,25 @@ See **[ERA5-Land datasets](era5_land_datasets.md)** for the full reference, incl
 
 ---
 
+## ERA5-Heat — thermal comfort index (UTCI, daily)
+
+| Property               | Value                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Dataset ID**         | `era5heat_utci_daily`                                                                                            |
+| **Variable**           | `utci`                                                                                                           |
+| **Units**              | °C                                                                                                               |
+| **Period**             | Daily                                                                                                            |
+| **Spatial coverage**   | Global                                                                                                           |
+| **Spatial resolution** | 0.25° (~28 km)                                                                                                   |
+| **Record start**       | 1940-01-02                                                                                                       |
+| **Source**             | [CDS ERA5-Heat (derived-utci-historical)](https://cds.climate.copernicus.eu/datasets/derived-utci-historical?tab=overview) |
+
+The Universal Thermal Climate Index: how hot or cold the outdoors feels to the body, from air temperature, humidity, wind and radiation. The daily mean is averaged from the hourly values of the UTC calendar day. `era5heat_utci_daily_max` and `era5heat_utci_daily_min` are the same, with the daily maximum and minimum. It reads from the Copernicus Climate Data Store and needs `CDS_API_KEY` in `.env`, as the [ERA5-Land daily datasets](era5_land_datasets.md#copernicus-climate-data-store-daily-datasets) do.
+
+**Sync behaviour** — new days are appended as the source publishes them, about five days behind. Recent days are the intermediate product, computed from ECMWF's preliminary ERA5T, and are replaced by the consolidated product from final ERA5 later. Each template declares `sync.refresh_after: P4M`, so a sync fetches a day again once, four months after it, when its final values are out. See [Preliminary periods](architecture.md#preliminary-periods). A store ingested before this existed takes its preliminary days as final; ingest it again to have them replaced.
+
+---
+
 ## CHIRPS v3 — daily precipitation
 
 | Property               | Value                                              |
@@ -41,7 +60,7 @@ CHIRPS (Climate Hazards Group InfraRed Precipitation with Station data) v3 is a 
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_daily_prelim`                                               |
 | **Variable**           | `precip`                                                                           |
-| **Units**              | mm/d                                                                               |
+| **Units**              | mm                                                                                 |
 | **Period**             | Daily                                                                              |
 | **Spatial coverage**   | Global land, 50°S–50°N                                                             |
 | **Spatial resolution** | ~5 km                                                                              |
@@ -69,7 +88,7 @@ DHIS2 then holds the best value available for each day. It does not show which v
 | ---------------------- | -------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_monthly`                    |
 | **Variable**           | `precip`                                           |
-| **Units**              | mm/d                                               |
+| **Units**              | mm                                                 |
 | **Period**             | Monthly                                            |
 | **Spatial coverage**   | Global land, 50°S–50°N                             |
 | **Spatial resolution** | ~5 km                                              |
@@ -80,9 +99,7 @@ The monthly CHIRPS product, published as one global raster per calendar month. P
 
 **Sync behaviour** — as for the daily dataset, the latest published month is discovered by probing the CHIRPS server rather than assuming a fixed lag. The monthly final product typically trails the calendar by a month or two.
 
-**Transforms** — the source raster is a monthly **total** in mm; it is divided by the number of days in the month and stored as a mean daily rate (`mm/d`). Unlike the daily dataset, where mm and mm/day are the same number, this is a real conversion.
-
-That choice keeps every monthly precipitation dataset on the same units, which matters because `chirps3_precipitation_monthly_normal_1991_2020` is also `mm/d` and is the natural partner for a monthly anomaly — storing the raw total under the same label would make that comparison wrong by a factor of about 30. It is also the form xclim's drought indices expect.
+**Transforms** — none applied; the month's total is stored as received in mm. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ---
 

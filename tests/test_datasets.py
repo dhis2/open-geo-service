@@ -1352,7 +1352,7 @@ def test_create_artifact_uses_streaming_plugin_for_direct_ingest(
 
     def fake_run_streaming_ingest_sync(**kwargs: object) -> object:
         captured["run"] = kwargs
-        return type("Result", (), {"periods_written": 1})()
+        return type("Result", (), {"periods_written": 1, "held_back": [], "refreshed_indices": []})()
 
     monkeypatch.setattr(services, "run_streaming_ingest_sync", fake_run_streaming_ingest_sync)
 
@@ -1407,6 +1407,7 @@ def test_create_artifact_uses_streaming_plugin_for_direct_ingest(
         "committed_periods": [],
         "branch": "main",
         "replace": False,
+        "refresh_periods": [],
     }
     assert artifact.format == ArtifactFormat.ICECHUNK
     assert artifact.path == str(store_path.resolve())
@@ -1438,7 +1439,7 @@ def test_create_artifact_uses_streaming_plugin_for_store_based_sync(
 
     def fake_run_streaming_ingest_sync(**kwargs: object) -> object:
         captured["run"] = kwargs
-        return type("Result", (), {"periods_written": 2})()
+        return type("Result", (), {"periods_written": 2, "held_back": [], "refreshed_indices": []})()
 
     monkeypatch.setattr(services, "run_streaming_ingest_sync", fake_run_streaming_ingest_sync)
     monkeypatch.setattr(
@@ -1513,7 +1514,7 @@ def test_create_artifact_appends_a_contiguous_union_and_preserves_request_proven
 
     def fake_ingest(**kwargs: object) -> object:
         captured.update(kwargs)
-        return type("Result", (), {"periods_written": 2})()
+        return type("Result", (), {"periods_written": 2, "held_back": [], "refreshed_indices": []})()
 
     monkeypatch.setattr(services, "run_streaming_ingest_sync", fake_ingest)
     monkeypatch.setattr(
@@ -1586,7 +1587,7 @@ def test_create_artifact_rolls_back_append_when_pyramid_rebuild_fails(
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
-        lambda **_: type("Result", (), {"periods_written": 1})(),
+        lambda **_: type("Result", (), {"periods_written": 1, "held_back": [], "refreshed_indices": []})(),
     )
     monkeypatch.setattr(
         services,
@@ -1696,7 +1697,10 @@ def test_create_artifact_forwards_country_code_to_streaming_plugin(
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
-        lambda **kwargs: captured.update({"run": kwargs}) or type("Result", (), {"periods_written": 1})(),
+        lambda **kwargs: (
+            captured.update({"run": kwargs})
+            or type("Result", (), {"periods_written": 1, "held_back": [], "refreshed_indices": []})()
+        ),
     )
     monkeypatch.setattr(
         services,
@@ -1792,7 +1796,7 @@ def test_create_artifact_allows_streaming_coverage_clamped_to_source_availabilit
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
-        lambda **kwargs: type("Result", (), {"periods_written": 1})(),
+        lambda **kwargs: type("Result", (), {"periods_written": 1, "held_back": [], "refreshed_indices": []})(),
     )
     monkeypatch.setattr(services, "_upsert_artifact_record", lambda record, **_: record)
 
@@ -1857,7 +1861,7 @@ def test_create_artifact_rejects_streaming_coverage_with_late_start(
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
-        lambda **kwargs: type("Result", (), {"periods_written": 1})(),
+        lambda **kwargs: type("Result", (), {"periods_written": 1, "held_back": [], "refreshed_indices": []})(),
     )
     monkeypatch.setattr(services, "_upsert_artifact_record", lambda record, **_: record)
     monkeypatch.setattr(
@@ -1903,7 +1907,7 @@ def test_create_artifact_returns_409_when_streaming_plugin_has_no_periods(
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
-        lambda **kwargs: type("Result", (), {"periods_written": 0})(),
+        lambda **kwargs: type("Result", (), {"periods_written": 0, "held_back": [], "refreshed_indices": []})(),
     )
 
     with pytest.raises(services.HTTPException, match="Source has no data for the requested temporal scope"):
