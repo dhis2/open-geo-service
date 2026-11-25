@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -230,14 +231,15 @@ def test_a_write_is_in_the_files_before_it_returns_and_an_unpublished_folder_has
     assert data_href == f"./{Path(str(second.path)).name}", "a refresh rewrites the collection"
 
 
-def test_the_zarr_asset_follows_the_configured_address(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_zarr_asset_follows_the_configured_address(
+    data: Path, monkeypatch: pytest.MonkeyPatch, restart_writer: Callable[[], None]
+) -> None:
     collection = data / "catalog" / "rasters" / "rain" / "collection.json"
     assert json.loads(collection.read_text())["assets"]["zarr"]["href"] == f"{PUBLIC}/zarr/rain"
 
     # A restart with another address rewrites every document.
     monkeypatch.setenv("GEOSERVICE_BASE_URL", "https://moved.example.org")
-    with TestClient(app):
-        pass
+    restart_writer()
     assert json.loads(collection.read_text())["assets"]["zarr"]["href"] == "https://moved.example.org/zarr/rain"
 
     # An origin-only address behind a proxy prefix composes as a request-built URL does.
