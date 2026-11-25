@@ -76,7 +76,6 @@ def store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     }
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: state["plugin"])
     monkeypatch.setattr(downloader, "get_icechunk_path", lambda _: state["path"])
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", state["path"].parent)
     return state
 
 

@@ -2260,8 +2260,7 @@ def reconcile_published_branches() -> int:
         changed += 1
         logger.warning("Brought the publication of '%s' and its record into step", store_path.name)
     registered = {Path(path).resolve() for path in by_store}
-    directory = Path(downloader.DOWNLOAD_DIR)
-    for store_path in directory.glob("*.icechunk") if directory.is_dir() else []:
+    for store_path in layout.raster_stores():
         if store_path.resolve() in registered or not (store_path / "repo").exists():
             continue
         try:
