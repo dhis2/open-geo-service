@@ -4,8 +4,8 @@ Laid out as a static catalog, so a client that follows links reads it as files: 
 `catalog.json`, a sub-catalog `{kind}/catalog.json` per kind of dataset, and one folder per
 collection, `{kind}/{id}/`, holding `collection.json` beside the dataset's data. Each catalog and
 collection has its `README.md` and `AGENTS.md` beside it. The links are relative, so `/stac`
-serves a published dataset's data files too, as a static host of `catalog/` would. Every route
-answers HEAD, as a static host does and a link checker expects.
+serves the datasets' data files too: it serves `catalog/` as a static host of the folder would.
+Every route answers HEAD, as a static host does and a link checker expects.
 """
 
 from fastapi import APIRouter
@@ -19,6 +19,6 @@ router = APIRouter()
 @router.get("/{path:path}", response_class=FileResponse)
 @router.head("/{path:path}", response_class=FileResponse, include_in_schema=False)
 def get_stac_file(path: str) -> FileResponse:
-    """A document of the STAC catalog, or a data file of a published dataset, at its path in the catalog."""
+    """A document of the STAC catalog, or a dataset's data file, at its path in the catalog."""
     file, media_type = catalog_files.served_file(path)
     return FileResponse(file, media_type=media_type, headers={"Cache-Control": catalog_files.cache_control(file)})

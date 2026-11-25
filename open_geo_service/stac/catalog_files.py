@@ -294,24 +294,13 @@ def cache_control(file: Path) -> str:
 
 
 def served_file(path: str) -> tuple[Path, str]:
-    """The file at *path* in `catalog/` and its media type, or 404.
+    """The file at *path* in `catalog/` and its media type, or 404, as a static host of the folder serves it.
 
-    A document is served wherever it is, as the writer writes one only for what the catalog
-    lists. A data file is served only from the folder of a published dataset of its kind, so a
-    dataset written before it is published stays out of reach, as it stays out of the catalog.
+    No records are read: a dataset written but not yet published is not ready rather than private,
+    as wherever else the folder is served (`docs/data_folder_layout.md`), and no catalog links to it.
     """
     root = layout.catalog_root().resolve()
     target = (root / path).resolve()
     if not target.is_relative_to(root) or not target.is_file():
         raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
-    parts = target.relative_to(root).parts
-    if not (target.name in portolan.DOCUMENT_NAMES and len(parts) <= 3) and not _published_folder(parts):
-        raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
     return target, _MEDIA_TYPES.get(target.suffix, "application/octet-stream")
-
-
-def _published_folder(parts: tuple[str, ...]) -> bool:
-    if len(parts) < 3:
-        return False
-    artifact = ingestion_services.stac_eligible_artifacts_cached().get(parts[1])
-    return artifact is not None and layout.kind_of(artifact.format).value == parts[0]
