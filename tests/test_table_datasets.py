@@ -777,11 +777,17 @@ def test_a_period_ends_on_its_last_day(period_type: str | None, start: date, end
             {"name": "period", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
             r"declares \['period'\], which readers add beside the period column",
         ),
+        (
+            {"name": "day", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
+            r"\['day'\] identify a row, so they must be in the key",
+        ),
+        ({"name": "day", "type": "date", "key": ["station", "station"]}, "names a key column more than once"),
     ],
 )
 def test_a_schema_that_cannot_hold_its_rules_is_refused_naming_its_file(column: dict[str, Any], message: str) -> None:
     from open_geo_service.tables.schemas import parse_schema
 
-    declared = {"id": "stations", "columns": [{"name": "station", "type": "string"}, column], "key": ["station"]}
+    key = column.pop("key", ["station"])
+    declared = {"id": "stations", "columns": [{"name": "station", "type": "string"}, column], "key": key}
     with pytest.raises(ValueError, match=f"table schema 'stations' in stations.yaml.*{message}"):
         parse_schema(declared, source="stations.yaml")

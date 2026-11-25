@@ -692,8 +692,10 @@ The store adds `written_at` to every table.
 
 A column's `represents` tells the store and its readers what it holds, which adds what they do
 with it. The names are the aggregation schema's columns, and a column with one of those names
-represents it without saying so; mark only a column named otherwise. At most one column
-represents each, except `value`:
+represents it without saying so; mark only a column named otherwise, and rename a column that
+holds something else under one of those names. At most one column represents each, except
+`value`, and a column representing `collection_id`, `collection_version`, `feature_id` or
+`period_start` must be in the key:
 
 | `represents` | Column type | What it adds |
 | --- | --- | --- |

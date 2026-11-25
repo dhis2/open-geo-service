@@ -54,6 +54,9 @@ Each has an Apache Iceberg type, so a table can later become an Iceberg table ov
 (CLIM-1983).
 """
 
+_IDENTIFYING = ("collection_id", "collection_version", "feature_id", "period_start")
+"""What a key must include when a column represents it, since each tells rows apart."""
+
 _REPRESENTED_ONCE = {
     "dataset_id": ("string",),
     "collection_id": ("string",),
@@ -197,7 +200,7 @@ def _schemas_cached(config_path: str | None, plugins_dir: str | None) -> dict[st
         base = Path(config_path).parent if config_path else Path()
         folder = (base / plugins_dir).resolve() / "tables" / "schemas"
         if folder.is_dir():
-            for schema in _parse_files(sorted(folder.iterdir()), source=str(folder)):
+            for schema in _parse_files(folder.iterdir(), source=str(folder)):
                 merged[schema.id] = schema
     return merged
 
@@ -210,7 +213,7 @@ def _builtin() -> tuple[TableSchema, ...]:
 
 def _parse_files(files: Iterable[Any], *, source: str) -> list[TableSchema]:
     schemas: list[TableSchema] = []
-    for file in files:
+    for file in sorted(files, key=lambda f: f.name):
         if not file.name.endswith((".yaml", ".yml")):
             continue
         declared = yaml.safe_load(file.read_text(encoding="utf-8"))
@@ -237,6 +240,8 @@ def parse_schema(declared: object, *, source: str) -> TableSchema:
     key = tuple(str(name) for name in _list(declared, "key", where))
     if unknown := sorted(set(key) - set(names)):
         raise ValueError(f"{where} has key columns it does not declare: {unknown}")
+    if len(set(key)) != len(key):
+        raise ValueError(f"{where} names a key column more than once")
 
     if unknown := sorted(set(declared) - {"id", "name", "description", "columns", "key"}):
         raise ValueError(f"{where} has unknown fields {unknown}")
@@ -276,6 +281,9 @@ def parse_schema(declared: object, *, source: str) -> TableSchema:
         raise ValueError(f"{where}: a column representing collection_version needs one representing collection_id")
     if ("coverage" in represented or "unit" in represented) and not values:
         raise ValueError(f"{where}: coverage and unit describe values; mark the value columns 'represents: value'")
+    # Without these in the key, a later write for another feature or period would replace this row.
+    if outside := [represented[m] for m in _IDENTIFYING if m in represented and represented[m] not in key]:
+        raise ValueError(f"{where}: {outside} identify a row, so they must be in the key")
 
     name = declared.get("name", schema_id)
     description = declared.get("description", "")
