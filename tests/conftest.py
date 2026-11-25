@@ -201,6 +201,24 @@ def _no_catalog_files_on_record_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ingestion_services, "rewrite_catalog", lambda: None)
 
 
+@pytest.fixture
+def restart_writer() -> Generator[Callable[[], None]]:
+    """Start the app and stop it, as a writer that restarts does, for what it does at startup.
+
+    Stopping it shuts the job services down; they are made live again for the tests after this one.
+    """
+    from open_geo_service.jobs.service import reset_job_service
+    from open_geo_service.openeo.jobs import reset_openeo_job_service
+
+    def restart() -> None:
+        with TestClient(app):
+            pass
+
+    yield restart
+    reset_job_service()
+    reset_openeo_job_service()
+
+
 class CatalogWritingClient(TestClient):
     """A client that writes `catalog/` from the records before each `/stac` request.
 
