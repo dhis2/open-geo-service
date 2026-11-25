@@ -301,8 +301,8 @@ What this means:
 
 - `description` carries the dataset template's own prose, and is `null` when the template
   declares none. It is where a dataset states what its values actually mean, so it is worth
-  reading before using one: `chirps3_precipitation_monthly` is a mean daily rate rather than a
-  monthly total. The same text is published as the STAC collection `description`.
+  reading before using one: `chirps3_precipitation_monthly` says it holds monthly totals. The
+  same text is published as the STAC collection `description`.
 - `items` is wrapped in a `kind` envelope for consistency and self-description
 - dataset items contain public metadata and access links only
 - internal artifact ids, filesystem paths, and downloader implementation details are intentionally omitted

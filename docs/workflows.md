@@ -195,6 +195,8 @@ When the job finishes, the new change dataset appears under `/datasets` and on t
 
 `climate_normal` computes a **climatological normal** — a WMO-style multi-year average of a variable for each **day-of-year** (1–366) or **month** (1–12) over a reference period (e.g. 1991–2020) — and publishes it as a new managed dataset. Use it to derive a "what's typical" baseline from a collection you have already ingested for the reference period; the anomaly workflow below then compares observations against it.
 
+A variable that adds up over time, declared with `cell_methods: "time: sum"` (precipitation, for one), is a sum parameter in WMO-No. 1203: its monthly normal is the mean of monthly totals. Compute it from a dataset at the normal's period, a monthly one for `frequency: month`. On daily or dekadal totals it is refused, since averaging them gives a per-day or per-dekad amount rather than a monthly one. A variable averaged over time, such as temperature or NDVI, has no such limit: its monthly normal from daily data is the mean of the daily values.
+
 ### Parameters
 
 | Name | Description |
@@ -251,10 +253,10 @@ The two methods publish **different units**, so a pre-registered template belong
 
 | `method` | Published units | Suitable range |
 |---|---|---|
-| `absolute` | the observed variable's unit (e.g. `mm/d`) | none: the measured default, made symmetric about the midpoint |
+| `absolute` | the observed variable's unit (e.g. `mm`) | none: the measured default, made symmetric about the midpoint |
 | `relative` | `%` | `[-100, 100]`: it cannot fall below −100 % but has no upper bound, and a measured range would follow the tail where the normal is near zero |
 
-An auto-registered template takes its units from the computed result, so it is correct either way. A pre-registered one is authoritative, and publishing a relative anomaly into a template declaring `mm/d` is **refused** rather than relabelled — otherwise 20 % of normal would be stored as 20 mm of rain per day, which is plausible enough that nothing downstream could catch it. The shipped templates come in both forms: `*_anomaly_1991_2020` declares the observed unit for `absolute`, and `*_relative_anomaly_1991_2020` declares `%` for `relative`. Target the one matching the `method` you pass — precipitation only, since a relative anomaly is refused for temperature.
+An auto-registered template takes its units from the computed result, so it is correct either way. A pre-registered one is authoritative, and publishing a relative anomaly into a template declaring `mm` is **refused** rather than relabelled — otherwise 20 % of normal would be stored as 20 mm of rain, which is plausible enough that nothing downstream could catch it. The shipped templates come in both forms: `*_anomaly_1991_2020` declares the observed unit for `absolute`, and `*_relative_anomaly_1991_2020` declares `%` for `relative`. Target the one matching the `method` you pass — precipitation only, since a relative anomaly is refused for temperature.
 
 The observed and normal cubes must be on the **same grid** — same cell count, same spacing, same positions — otherwise the anomaly is refused.
 

@@ -598,6 +598,66 @@ def test_orchestrator_writes_and_reads_through_real_icechunk_repo(tmp_path: Path
     assert rerun.periods_written == 0
 
 
+class _UnpublishedTailPlugin(_FakePlugin):
+    """2026-01-02 and 03 are a real gap; the newest two days are listed empty until ``published``."""
+
+    def __init__(self, dtype: str, missing: float) -> None:
+        self.dtype = dtype
+        self.missing = missing
+        self.published = False
+        self.fails_on: str | None = None
+
+    async def periods(self, start: str, end: str) -> list[str]:
+        return [f"2026-01-0{day}" for day in range(1, 7)]
+
+    async def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
+        if period_id == self.fails_on:
+            raise OSError(f"connection lost fetching {period_id}")
+        ds = await super().fetch_period(period_id, bbox, **params)
+        ds["precip"] = ds["precip"].astype(self.dtype)
+        ds["precip"].encoding["_FillValue"] = self.missing
+        if period_id in ("2026-01-02", "2026-01-03") or (period_id >= "2026-01-05" and not self.published):
+            ds["precip"][:] = self.missing
+        return ds
+
+
+@pytest.mark.parametrize(("dtype", "missing"), [("float32", np.nan), ("uint8", 255)])
+def test_orchestrator_refuses_empty_periods_at_the_end_of_a_run(tmp_path: Path, dtype: str, missing: float) -> None:
+    """Empty periods at the end are fetched again by the next sync; a gap before data is written (CLIM-1878)."""
+    store_path = tmp_path / "streaming-store.icechunk"
+    plugin = _UnpublishedTailPlugin(dtype, missing)
+
+    def sync() -> list[str]:
+        return run_streaming_ingest_sync(
+            plugin=plugin,
+            params={},
+            bbox=[0.0, 0.0, 1.0, 1.0],
+            start="2026-01-01",
+            end="2026-01-06",
+            store_path=store_path,
+            period_type="daily",
+        ).held_back
+
+    def committed() -> tuple[list[str], list[float]]:
+        repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+        with xr.open_zarr(repo.readonly_session("main").store) as ds:
+            return [str(t)[:10] for t in ds["t"].values], ds["precip"].values[:, 0, 0].tolist()
+
+    # A run that fails after committing the empty 2026-01-05 does not keep it either.
+    plugin.fails_on = "2026-01-06"
+    with pytest.raises(OSError, match="connection lost"):
+        sync()
+    assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
+
+    plugin.fails_on = None
+    assert sync() == ["2026-01-05", "2026-01-06"]
+    assert committed()[0] == ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
+
+    plugin.published = True
+    assert sync() == []
+    np.testing.assert_array_equal(committed()[1], [1, missing, missing, 4, 5, 6])
+
+
 def test_orchestrator_resume_supports_custom_time_dimension(tmp_path: Path) -> None:
     store_path = tmp_path / "streaming-store-custom-time.icechunk"
 
