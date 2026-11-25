@@ -137,13 +137,15 @@ def test_a_derived_source_without_a_licence_is_followed_to_the_datasets_it_was_c
     assert _listed(client)["license"] == "CC-BY-4.0 AND ODbL-1.0"
 
 
-def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(client: TestClient) -> None:
+def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A public instance: Portolan asks for the host's address, which only configuration knows.
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "http://testserver")
     record = _computed("precip", "districts")
 
     catalog = client.get("/stac/tables/catalog.json").json()
-    assert "http://testserver/stac/tables/precip_districts/collection.json" in [
-        link["href"] for link in catalog["links"] if link["rel"] == "child"
-    ]
+    assert "./precip_districts/collection.json" in [link["href"] for link in catalog["links"] if link["rel"] == "child"]
     assert {
         "rel": "stac",
         "href": "/stac/tables/precip_districts/collection.json",
@@ -167,7 +169,7 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     assert columns["period_start"]["type"] == "date32[day]"
 
     data = collection["assets"]["data"]
-    assert data["href"] == "http://testserver/tables/precip_districts/data.parquet"
+    assert data["href"] == f"./{Path(record.asset_paths[0]).name}", "the file beside the collection"
     assert data["roles"] == ["data"]
     assert data["description"]
     path = Path(record.asset_paths[0])
@@ -177,10 +179,10 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     links = collection["links"]
     # Only the published input: `precip` has a template but no collection, so a link would not resolve.
     assert [link["href"] for link in links if link["rel"] == "derived_from"] == [
-        "http://testserver/stac/vectors/districts/collection.json",
+        "../../vectors/districts/collection.json",
     ]
     assert [link["href"] for link in links if link["rel"] == "via"] == [PRECIP["source_url"]]
-    assert {link["rel"] for link in links} >= {"self", "root", "parent", "describedby", "agents"}
+    assert {link["rel"] for link in links} >= {"root", "parent", "describedby", "agents"}
     assert [(provider["name"], provider.get("roles")) for provider in collection["providers"]] == [
         ("UCSB Climate Hazards Center", ["producer"]),
         ("Overture Maps", ["producer", "licensor"]),
@@ -215,13 +217,14 @@ def test_the_readme_documents_the_columns_and_joins_the_table_to_its_features(cl
     assert "- CC-BY-4.0\n- ODbL-1.0" in readme
     assert "Monthly periods from 2026-01 to 2026-02." in readme
     assert "| `value` | double |" in readme
-    assert "JOIN 'http://testserver/features/districts/data.parquet' AS f" in readme
+    # The features' file in the catalog, relative to the table's folder.
+    assert "JOIN '../../vectors/districts/districts." in readme
     assert """ON t."collection_id" = 'districts'""" in readme
     assert 'CAST(f."orgUnitCode" AS VARCHAR) = t."feature_id"' in readme
 
     agents = client.get("/stac/tables/precip_districts/AGENTS.md").text
-    assert "http://testserver/tables/precip_districts/data.parquet" in agents
-    assert "## [Tables](http://testserver/stac/tables/catalog.json)" in client.get("/stac/README.md").text
+    assert "The data is one Parquet file: ./" in agents and "/tables/precip_districts/rows" in agents
+    assert "## [Tables](./tables/catalog.json)" in client.get("/stac/README.md").text
 
 
 def test_the_dataset_page_shows_each_features_latest_value(client: TestClient) -> None:

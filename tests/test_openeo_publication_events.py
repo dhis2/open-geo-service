@@ -953,8 +953,8 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     assert 'href="/jobs/job-1"' in page and f'href="/datasets/{source}"' in page
     assert "updated since" not in page
     assert [link["href"] for link in collection["links"] if link["rel"] == "derived_from"] == [
-        f"http://testserver/stac/rasters/{source}/collection.json",
-        "http://testserver/stac/vectors/districts/collection.json",
+        f"../{source}/collection.json",
+        "../../vectors/districts/collection.json",
     ]
     # The openEO copy links the same inputs at their openEO collections, so following
     # provenance from openEO stays in openEO.
@@ -985,7 +985,8 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     readme = client.get(f"/stac/rasters/{_DATASET}/README.md").text
     assert "(processor)" in readme and "(host)" in readme
     agents = client.get(f"/stac/rasters/{_DATASET}/AGENTS.md").text
-    assert f'xr.open_zarr("http://testserver/zarr/{_DATASET}"' in agents
+    # Root-relative without a configured public address: it resolves on the instance serving it.
+    assert f'xr.open_zarr("/zarr/{_DATASET}"' in agents
     assert client.get(f"/datasets/{source}").json()["provenance"] is None
 
     plugin.available.append("2026-01-03")

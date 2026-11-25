@@ -2670,6 +2670,14 @@ def _save_records(records: list[ArtifactRecord]) -> None:
     with index_lock(ARTIFACTS_INDEX_PATH):
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1
+    _records_changed()
+
+
+def _records_changed() -> None:
+    """Rewrite the catalog files, which describe the records, before the write that changed them returns."""
+    from open_geo_service.stac.catalog_files import write_catalog_after_change
+
+    write_catalog_after_change()
 
 
 def _store_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
@@ -2857,7 +2865,8 @@ def _mutate_records(mutation: Callable[[list[ArtifactRecord]], MutationResult]) 
         result = mutation(records)
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1
-        return result
+    _records_changed()
+    return result
 
 
 def _normalize_request_period(value: str, *, period_type: str, field_name: str) -> str:

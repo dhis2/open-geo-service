@@ -262,6 +262,7 @@ def test_a_published_collection_carries_its_classes_in_stac(
     monkeypatch.setattr(stac_services, "_zarr_asset_metadata", lambda _: {})
     monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {})
 
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "http://testserver")  # so the Zarr asset is written
     doc = client.get("/stac/rasters/heat_levels/collection.json").json()
 
     if "classes" in template:

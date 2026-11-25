@@ -155,7 +155,7 @@ def test_the_thumbnail_is_served_and_advertised_in_stac(client: TestClient, monk
     assert served.headers["content-type"] == "image/png"
 
     asset = client.get("/stac/vectors/districts/collection.json").json()["assets"]["thumbnail"]
-    assert asset["href"] == "http://testserver/datasets/districts/thumbnail.png"
+    assert asset["href"] == "./thumbnail.png"
     assert asset["roles"] == ["thumbnail"]
 
 

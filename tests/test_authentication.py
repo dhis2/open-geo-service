@@ -25,6 +25,7 @@ from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import get_openeo_job_service
+from open_geo_service.stac import documents as stac_documents
 from open_geo_service.stac import services as stac_services
 from open_geo_service.stac.services import AUTHENTICATION_EXTENSION
 from open_geo_service.system.templates import actions_closed
@@ -518,9 +519,15 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
         "assets": {"zarr": {"href": "https://testserver/zarr/rain"}},
     }
     synced = datetime(2026, 1, 1, tzinfo=UTC)
-    published = {"rain": SimpleNamespace(dataset_name="Rain", format=ArtifactFormat.ICECHUNK, created_at=synced)}
+    published = {
+        "rain": SimpleNamespace(dataset_name="Rain", format=ArtifactFormat.ICECHUNK, created_at=synced, path=None)
+    }
     monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: published)
     monkeypatch.setattr(stac_services, "_build_raster_collection", lambda *_: raster)
+    monkeypatch.setattr(stac_documents, "collection_readme", lambda *_: "# Rain\n")
+    monkeypatch.setattr(stac_documents, "collection_agents", lambda *_: "# Reading Rain\n")
+    # The written catalog carries the Zarr URL only with the instance's public address configured.
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "https://testserver")
     catalog = client.get("/stac/catalog.json", headers=_bearer(CLIENT_SECRET)).json()
     assert set(catalog["auth:schemes"]) == {"basic", "bearer"}
     assert AUTHENTICATION_EXTENSION in catalog["stac_extensions"]

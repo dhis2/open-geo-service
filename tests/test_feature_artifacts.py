@@ -846,7 +846,7 @@ def test_the_catalogue_and_openeo_both_advertise_a_feature_collection(
     catalog = client.get("/stac/vectors/catalog.json").json()
     dataset = client.get("/datasets/districts").json()
 
-    assert any(link["href"].endswith("/stac/vectors/districts/collection.json") for link in catalog["links"])
+    assert "./districts/collection.json" in [link["href"] for link in catalog["links"]]
     assert {link["rel"] for link in dataset["links"]} == {"self", "stac", "features"}
     assert [collection["id"] for collection in client.get("/collections").json()["collections"]] == ["districts"]
 

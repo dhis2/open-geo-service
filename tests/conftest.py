@@ -49,6 +49,7 @@ from open_geo_service.ingestions import services as ingestion_services  # noqa: 
 from open_geo_service.main import app  # noqa: E402
 from open_geo_service.openeo import earthkit_processes, xclim_processes  # noqa: E402
 from open_geo_service.shared import compute, urls  # noqa: E402
+from open_geo_service.stac import catalog_files  # noqa: E402
 
 _connect = socket.socket.connect
 _connect_ex = socket.socket.connect_ex
@@ -189,9 +190,33 @@ def _unset_configured_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app, "root_path", "")
 
 
+@pytest.fixture(autouse=True)
+def _no_catalog_files_on_record_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write records without rewriting `catalog/` after each write.
+
+    Most tests write records with fake store paths, which no collection can be built from, and a
+    rewrite after every write would describe each of them. `client` writes the catalog before a
+    `/stac` request instead; `test_catalog_files.py` overrides this fixture to test the rewrite.
+    """
+    monkeypatch.setattr(ingestion_services, "_records_changed", lambda: None)
+
+
+class CatalogWritingClient(TestClient):
+    """A client that writes `catalog/` from the records before each `/stac` request.
+
+    `/stac` serves the written files, and many tests set up what is published by patching the
+    record lookup rather than by writing records, which would rewrite the catalog in production.
+    """
+
+    def request(self, method: str, url: Any, *args: Any, **kwargs: Any) -> Any:
+        if str(url).split("?")[0].removeprefix(str(self.base_url)).startswith("/stac"):
+            catalog_files.write_catalog()
+        return super().request(method, url, *args, **kwargs)
+
+
 @pytest.fixture
 def client() -> TestClient:
-    return TestClient(app)
+    return CatalogWritingClient(app)
 
 
 MountedClientFactory = Callable[..., TestClient]

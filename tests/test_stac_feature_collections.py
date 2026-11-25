@@ -26,6 +26,7 @@ from open_geo_service.ingestions.schemas import (
     PublicationStatus,
 )
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
+from open_geo_service.stac import catalog_files
 from open_geo_service.stac import services as stac_services
 
 DATACUBE_FIELDS = ("cube:dimensions", "cube:variables")
@@ -54,6 +55,13 @@ def _collection_payload() -> dict[str, Any]:
             _feature("SL-CLINIC", 4, {"type": "Point", "coordinates": [-10.5, 9.5]}),
         ],
     }
+
+
+@pytest.fixture(autouse=True)
+def _public_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write the catalog for an instance that knows its public address, as these tests read the
+    host's URL, which the files carry only then (`test_catalog_files.py`)."""
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "http://testserver")
 
 
 @pytest.fixture(autouse=True)
@@ -118,11 +126,11 @@ def test_a_published_feature_collection_appears_in_the_stac_catalogue(
 ) -> None:
     catalog = client.get("/stac/catalog.json").json()
     [subcatalog] = [link for link in catalog["links"] if link["rel"] == "child"]
-    assert subcatalog["href"].endswith("/stac/vectors/catalog.json")
+    assert subcatalog["href"] == "./vectors/catalog.json"
 
-    children = [link for link in client.get(subcatalog["href"]).json()["links"] if link["rel"] == "child"]
+    children = [link for link in client.get("/stac/vectors/catalog.json").json()["links"] if link["rel"] == "child"]
     assert [link["title"] for link in children] == ["District boundaries"]
-    assert children[0]["href"].endswith("/stac/vectors/districts/collection.json")
+    assert children[0]["href"] == "./districts/collection.json"
 
 
 def test_the_collection_declares_the_table_extension_from_the_stored_data(
@@ -214,10 +222,11 @@ def test_the_collection_carries_the_standard_link_set(client: TestClient, distri
     doc = client.get("/stac/vectors/districts/collection.json").json()
 
     by_rel = {link["rel"]: link["href"] for link in doc["links"]}
-    assert by_rel["self"].endswith("/stac/vectors/districts/collection.json")
-    assert by_rel["root"].endswith("/stac/catalog.json")
-    assert by_rel["parent"].endswith("/stac/vectors/catalog.json")
-    assert by_rel["alternate"].endswith("/features/districts")
+    # Relative, so the folder is a catalog wherever it is hosted; no `self`, and no link to an
+    # API route, which a static host would not serve.
+    assert by_rel["root"] == "../../catalog.json"
+    assert by_rel["parent"] == "../catalog.json"
+    assert "self" not in by_rel and "alternate" not in by_rel
 
 
 def test_the_generated_collection_validates_as_stac(client: TestClient, districts: ArtifactRecord) -> None:
@@ -250,7 +259,8 @@ def test_the_collection_renders_the_fields_stac_browser_navigates_by(
     assert doc["stac_version"] == stac_services.STAC_VERSION
     for field in ("id", "title", "description", "license", "extent", "links", "assets"):
         assert doc.get(field), f"STAC Browser needs a non-empty {field}"
-    assert {link["rel"] for link in doc["links"]} >= {"self", "root"}
+    # No `self`: STAC Browser takes the document's own URL instead.
+    assert {link["rel"] for link in doc["links"]} >= {"root", "parent"}
 
 
 # --- licence and attribution ----------------------------------------------------------------
@@ -425,13 +435,12 @@ def test_the_catalog_and_a_feature_collection_link_a_readme_and_agents_guide(
     assert "## Licence" in readme and "CC-BY-4.0" in readme
     assert "- Ministry of Health (producer)" in readme and "https://moh.example/hierarchy" in readme
     agents = client.get("/stac/vectors/districts/AGENTS.md").text
-    assert "http://testserver/features/districts/data.parquet" in agents and "`orgUnitCode`" in agents
+    # The file beside it, which a copy of the folder still has.
+    assert f"./{Path(str(districts.path)).name}" in agents and "`orgUnitCode`" in agents
     catalog = client.get("/stac/README.md").text
-    assert "## [Vector datasets](http://testserver/stac/vectors/catalog.json)" in catalog
-    assert "- [District boundaries](http://testserver/stac/vectors/districts/collection.json)" in catalog
-    assert "- [District boundaries](http://testserver/stac/vectors/districts/collection.json)" in (
-        client.get("/stac/vectors/README.md").text
-    )
+    assert "## [Vector datasets](./vectors/catalog.json)" in catalog
+    assert "- [District boundaries](./vectors/districts/collection.json)" in catalog
+    assert "- [District boundaries](./districts/collection.json)" in (client.get("/stac/vectors/README.md").text)
     assert "Each `child` link is one collection." in client.get("/stac/vectors/AGENTS.md").text
     # Headed by the instance's own name, not the product's.
     monkeypatch.setattr("open_geo_service.config.get_name", lambda: "Malawi Geo Service")
@@ -495,7 +504,7 @@ def test_an_unknown_collection_has_no_readme(client: TestClient) -> None:
     for name in ("README.md", "AGENTS.md"):
         response = client.get(f"/stac/vectors/nothing_here/{name}")
         assert response.status_code == 404
-        assert response.json()["detail"] == "STAC collection 'vectors/nothing_here' not found"
+        assert response.json()["detail"] == f"No file 'vectors/nothing_here/{name}' in the catalog"
 
 
 def test_a_feature_collections_data_files_carry_their_size_but_are_not_hashed(
@@ -539,7 +548,10 @@ def test_a_collection_with_no_file_left_does_not_declare_the_file_extension(
     layout.thumbnail(layout.Kind.VECTOR, "districts").unlink(missing_ok=True)
     data.unlink()
 
-    doc = client.get("/stac/vectors/districts/collection.json").json()
+    # Built directly: the written catalog leaves out a collection it cannot describe in full.
+    doc: dict[str, Any] = stac_services.build_collection_for_artifact(
+        "districts", districts, catalog_files._catalog_request()
+    )
 
     assert "file:size" not in doc["assets"]["data"]
     assert "https://stac-extensions.github.io/file/v2.1.0/schema.json" not in doc["stac_extensions"]
@@ -584,7 +596,8 @@ def test_the_advertised_asset_url_serves_the_stored_file(client: TestClient, dis
     doc = client.get("/stac/vectors/districts/collection.json").json()
     href = doc["assets"]["data"]["href"]
 
-    response = client.get(href.replace("http://testserver", ""))
+    # Beside the document, so `/stac` serves it as a static host of the folder would.
+    response = client.get(urljoin("/stac/vectors/districts/collection.json", href))
 
     assert response.status_code == 200
     assert response.headers["content-type"] == PARQUET_MEDIA_TYPE
@@ -928,8 +941,7 @@ def test_the_asset_route_serves_the_artifact_stac_advertises(
     )
 
     doc = client.get("/stac/vectors/districts/collection.json").json()
-    href = doc["assets"]["data"]["href"].replace("http://testserver", "")
-    response = client.get(href)
+    response = client.get(urljoin("/stac/vectors/districts/collection.json", doc["assets"]["data"]["href"]))
 
     assert response.status_code == 200
     assert response.content == Path(str(districts.path)).read_bytes()

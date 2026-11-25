@@ -345,30 +345,8 @@ def test_an_unknown_collection_names_what_was_missing(client: TestClient) -> Non
 
 
 def test_open_dataset_names_the_missing_collection(client: TestClient) -> None:
-    with pytest.raises(httpx.HTTPStatusError, match="STAC collection 'rasters/missing' not found"):
+    with pytest.raises(httpx.HTTPStatusError, match="No file 'rasters/missing/collection.json' in the catalog"):
         _service_on(client).open_dataset("missing")
-
-
-def test_datasets_lists_every_kind_through_the_sub_catalogs(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from open_geo_service.ingestions.schemas import ArtifactFormat
-    from open_geo_service.stac import services as stac_services
-
-    from .test_stac import _artifact
-
-    published = {
-        "chirps3_precipitation_daily": _artifact(artifact_id="a1"),
-        # Only the format and id matter to the listing, so a copy rather than a valid vector record.
-        "districts": _artifact(artifact_id="a2").model_copy(
-            update={"dataset_id": "districts", "format": ArtifactFormat.GEOPARQUET}
-        ),
-    }
-    monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: published)
-
-    datasets = _service_on(client).datasets()
-
-    assert [link["id"] for link in datasets] == ["rasters/chirps3_precipitation_daily", "vectors/districts"]
 
 
 def test_an_openeo_error_message_reaches_the_caller() -> None:

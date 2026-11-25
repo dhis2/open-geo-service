@@ -6,18 +6,25 @@ The datasets sit in `catalog/`, one folder per dataset, laid out as a
 
 ```
 data/
-  catalog/                       the datasets
+  catalog/                       the datasets, and the STAC catalog describing them
+    catalog.json  README.md  AGENTS.md
     rasters/
+      catalog.json  README.md  AGENTS.md
       <id>/
+        collection.json  README.md  AGENTS.md
         <id>.icechunk/           the Icechunk store
         thumbnail.png
     vectors/
+      catalog.json  README.md  AGENTS.md
       <id>/
+        collection.json  README.md  AGENTS.md
         <id>.<uuid>.parquet      one GeoParquet file per version
         <id>.<uuid>.pmtiles      its vector tiles
         thumbnail.png
     tables/
+      catalog.json  README.md  AGENTS.md
       <id>/
+        collection.json  README.md  AGENTS.md
         <stamp>-<uuid>.parquet   one Parquet file per version
   artifacts/records.json         the dataset records, which name each dataset's current files
   gc-pending/<id>                stores with unreachable data due for collection
@@ -39,10 +46,30 @@ data/
 - **A new version of a vector or table dataset is a new file.** The record names the current
   one. A replaced file is removed once the file that replaced it is a minute old, so a reader
   that has just read the record can still open the file it named.
-- **The records decide what exists.** A file in `catalog/` that no record names is not served.
+- **The records decide what exists.** A folder no published record names is not served, and
+  the listings read the records, never the folder.
 
-The `/stac` routes describe the published datasets. The catalog documents (`catalog.json`,
-`collection.json`) are not yet written into `catalog/`.
+## The catalog
+
+The writer keeps a STAC catalog of the published datasets in `catalog/`, in the shape of a
+Portolan catalog: the root `catalog.json`, a sub-catalog per kind of dataset, and a
+`collection.json` beside each dataset's data, each with a `README.md` and an `AGENTS.md`. It
+rewrites them whenever a record changes, before the write returns, and all of them when it
+starts, which picks up an upgrade, a changed template or a changed public address.
+
+- **Only what is published is listed.** A dataset written but not yet published has its folder
+  and data, but no `collection.json`, and no catalog links to it.
+- **Every link stays inside `catalog/`.** Links between documents are relative, and so are the
+  data assets: the Icechunk store, the GeoParquet and PMTiles files, the Parquet file, the
+  thumbnail. A copy of `catalog/`, served by any static host, is a complete catalog.
+- **What GeoService generates on request needs its public address.** A raster's `zarr` asset,
+  a feature collection's MapLibre `style` and the host provider's address are written only when
+  `GEOSERVICE_BASE_URL` is set, with that address. Portolan asks for the host's address, so a
+  catalog meant to be published needs it set.
+
+`/stac` serves these files, and the data files of published datasets beside them, as a static
+host of `catalog/` would. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way,
+and openEO's `/collections` are still built on request, with absolute links.
 
 ## Moving an instance to this layout
 

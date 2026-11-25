@@ -6,18 +6,15 @@ import json
 import os
 import shutil
 import stat
-from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
 import pytest
-import xarray as xr
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service import migrate_layout
 from open_geo_service.shared import layout
+from open_geo_service.stac import portolan
 
 from .test_writer_lease import start_other_writer
 
@@ -253,66 +250,16 @@ def _back_to_the_old_layout(data: Path) -> None:
 def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A data folder before catalog/: a raster, a feature collection and a table, with thumbnails
     and an openEO job that published the raster, written by this version and moved back."""
-    from open_geo_service.data_manager.services import downloader
-    from open_geo_service.features import services as feature_services
     from open_geo_service.ingestions import services as ingestion_services
-    from open_geo_service.ingestions.schemas import (
-        ArtifactCoverage,
-        ArtifactFormat,
-        ArtifactPublication,
-        ArtifactRecord,
-        ArtifactRequestScope,
-        CoverageSpatial,
-        CoverageTemporal,
-        PublicationStatus,
-    )
-    from open_geo_service.tables import store as table_store
+
+    from .test_catalog_files import write_one_of_each
 
     data = tmp_path / "data"
-    data.mkdir()
-    monkeypatch.setattr(api_config, "get_data_root", lambda: data)
-    monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", data / "artifacts")
-    monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", data / "artifacts" / "records.json")
-
-    cube = xr.Dataset(
-        {"precip": (("t", "y", "x"), np.ones((2, 2, 2), dtype="float32"))},
-        coords={"t": pd.date_range("2026-01-01", periods=2, freq="D"), "y": [1.5, 0.5], "x": [10.5, 11.5]},
-    )
-    store = layout.raster_store("rain")
-    downloader.write_to_icechunk_store(cube, store, commit_message="test")
-    record = ArtifactRecord(
-        artifact_id="a1",
-        dataset_id="rain",
-        dataset_name="Rain",
-        variable="precip",
-        period_type="daily",
-        format=ArtifactFormat.ICECHUNK,
-        path=str(store),
-        asset_paths=[str(store)],
-        variables=["precip"],
-        request_scope=ArtifactRequestScope(start="2026-01-01", end="2026-01-02"),
-        coverage=ArtifactCoverage(
-            temporal=CoverageTemporal(start="2026-01-01", end="2026-01-02"),
-            spatial=CoverageSpatial(xmin=10.0, ymin=0.0, xmax=12.0, ymax=2.0),
-        ),
-        created_at=datetime(2026, 1, 2, tzinfo=UTC),
-        publication=ArtifactPublication(status=PublicationStatus.PUBLISHED, collection_id="rain"),
-    )
-    ingestion_services.register_artifact_record(record, publish=True)
-    box = {
-        "type": "Feature",
-        "properties": {"orgUnitCode": "D1"},
-        "geometry": {"type": "Polygon", "coordinates": [[[10, 0], [12, 0], [12, 2], [10, 2], [10, 0]]]},
-    }
-    feature_services.refresh_feature_collection(
-        template={"id": "districts", "name": "Districts", "id_property": "orgUnitCode"},
-        features={"type": "FeatureCollection", "features": [box]},
-    )
-    table_store.write_rows(
-        dataset_id="rain_districts",
-        collection_id="districts",
-        rows=[{"feature_id": "D1", "period_start": "2026-01-01", "value": 1.0, "reducer": "mean"}],
-    )
+    write_one_of_each(data, monkeypatch)
+    [record] = [record for record in ingestion_services._load_records() if record.dataset_id == "rain"]
+    # The catalog's documents came with that layout; the files of the layout before it did not.
+    for key in portolan.managed_keys(data / "catalog"):
+        (data / "catalog" / key).unlink()
     for kind, dataset_id in ((layout.Kind.RASTER, "rain"), (layout.Kind.VECTOR, "districts")):
         layout.thumbnail(kind, dataset_id).write_bytes(b"\x89PNG\r\n\x1a\n" + dataset_id.encode())
     jobs = [
@@ -320,7 +267,7 @@ def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "id": "job-1",
             "status": "finished",
             "usage": {"output_path": "managed://rain"},
-            "publication": {"store_path": str(store), "record": record.model_dump(mode="json")},
+            "publication": {"store_path": str(record.path), "record": record.model_dump(mode="json")},
         }
     ]
     (data / "openeo_jobs").mkdir()

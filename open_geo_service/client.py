@@ -37,7 +37,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -75,14 +75,15 @@ def _collection_url(base_url: str, dataset_id: str) -> str:
 
 def _catalogued_collections(get: Callable[[str], Any], base_url: str) -> list[dict]:
     """The child links of every sub-catalog of the root catalog: one per published collection."""
+    root = f"{base_url}/stac/catalog.json"
     links: list[dict] = []
-    for subcatalog in _child_links(get(f"{base_url}/stac/catalog.json"), base_url):
-        links += _child_links(get(subcatalog["href"]), base_url)
+    for subcatalog in _child_links(get(root), base_url, root):
+        links += _child_links(get(subcatalog["href"]), base_url, subcatalog["href"])
     return links
 
 
-def _child_links(catalog: Any, source: str) -> list[dict]:
-    """Extract STAC child links (one per published dataset) from a catalog response."""
+def _child_links(catalog: Any, source: str, url: str) -> list[dict]:
+    """The child links of the catalog read from *url*, with their hrefs resolved against it."""
     raw_links = catalog.get("links") if isinstance(catalog, dict) else None
     if not isinstance(raw_links, list):
         raise ValueError(f"Invalid STAC catalog response from {source}: missing or non-list 'links' field")
@@ -92,8 +93,25 @@ def _child_links(catalog: Any, source: str) -> list[dict]:
             href = link.get("href")
             if not isinstance(href, str) or not href:
                 raise ValueError(f"STAC child link from {source} has a missing or invalid href")
-            links.append({**link, "id": _id_from_href(href)})
+            resolved = urljoin(url, href)
+            links.append({**link, "href": resolved, "id": _id_from_href(resolved)})
     return links
+
+
+def _zarr_asset_of(get: Callable[[str], Any], base_url: str, dataset_id: str) -> tuple[str, dict]:
+    """The Zarr asset of a raster: from its STAC collection, or from openEO's when the STAC has none.
+
+    The written catalog carries the `/zarr` URL only on an instance that knows its public
+    address; openEO's collection, built on request, always does.
+    """
+    collection = get(_collection_url(base_url, dataset_id))
+    if (
+        isinstance(collection, dict)
+        and isinstance(collection.get("assets"), dict)
+        and "zarr" not in collection["assets"]
+    ):
+        collection = get(f"{base_url}/collections/{dataset_id.rpartition('/')[2]}")
+    return _zarr_asset(collection, dataset_id, base_url)
 
 
 def _zarr_asset(collection: Any, dataset_id: str, source: str) -> tuple[str, dict]:
@@ -223,10 +241,13 @@ class GeoService:
         and returns the opened (lazy) dataset. Requires the ``xarray`` extra. ``dataset_id``
         is a raster's id, alone or as its collection id (``rasters/{id}``).
         """
-        response = self._http.get(_collection_url(self.base_url, dataset_id))
-        _raise_for_status(response)
-        href, open_kwargs = _zarr_asset(response.json(), dataset_id, self.base_url)
-        return _open_zarr(href, open_kwargs)
+
+        def get(url: str) -> Any:
+            response = self._http.get(url)
+            _raise_for_status(response)
+            return response.json()
+
+        return _open_zarr(*_zarr_asset_of(get, self.base_url, dataset_id))
 
     def processes(self) -> list[dict]:
         """Return all openEO processes available on the instance (``GET /processes``)."""
@@ -299,7 +320,10 @@ def open_dataset(dataset_id: str, *, base_url: str | None = None) -> xr.Dataset:
     ``http://127.0.0.1:9000``.
     """
     url = (base_url or _default_base_url()).rstrip("/")
-    response = httpx.get(_collection_url(url, dataset_id), timeout=_DEFAULT_TIMEOUT)
-    _raise_for_status(response)
-    href, open_kwargs = _zarr_asset(response.json(), dataset_id, url)
-    return _open_zarr(href, open_kwargs)
+
+    def get(target: str) -> Any:
+        response = httpx.get(target, timeout=_DEFAULT_TIMEOUT)
+        _raise_for_status(response)
+        return response.json()
+
+    return _open_zarr(*_zarr_asset_of(get, url, dataset_id))

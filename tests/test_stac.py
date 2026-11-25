@@ -31,6 +31,13 @@ def _clear_xstac_collection_cache() -> None:
     stac_services._clear_xstac_collection_cache()
 
 
+@pytest.fixture(autouse=True)
+def _public_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Write the catalog for an instance that knows its public address, as these tests read the
+    `zarr` asset and the host's URL, which the files carry only then (`test_catalog_files.py`)."""
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "http://testserver")
+
+
 def _minimal_xstac_payload(dataset_id: str = "chirps3_precipitation_daily") -> dict[str, object]:
     """Return a minimal xstac-style collection payload for tests that don't need full metadata."""
     return {
@@ -90,8 +97,9 @@ def test_stac_landing_returns_catalog(client: TestClient) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["type"] == "Catalog"
-    assert any(link["rel"] == "self" for link in payload["links"])
-    assert any(link["rel"] == "root" for link in payload["links"])
+    # A document in a folder is wherever it is read from, so it names no `self` (PORTO-CORE-081).
+    assert not any(link["rel"] == "self" for link in payload["links"])
+    assert {"rel": "root", "href": "./catalog.json", "type": "application/json"} in payload["links"]
 
 
 def test_the_stac_documents_answer_head_as_a_static_host_does(client: TestClient) -> None:
@@ -102,20 +110,6 @@ def test_the_stac_documents_answer_head_as_a_static_host_does(client: TestClient
         assert int(response.headers["content-length"]) > 0
 
 
-def test_a_raster_collection_answers_head(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The crawl past the root sends HEAD to each raster collection's `collection.json` too."""
-    monkeypatch.setattr(
-        stac_services,
-        "build_collection",
-        lambda kind, dataset_id, request: {"type": "Collection", "id": f"{kind}/{dataset_id}", "links": []},
-    )
-
-    response = client.head("/stac/rasters/chirps3_precipitation_daily/collection.json")
-
-    assert response.status_code == 200
-    assert int(response.headers["content-length"]) > 0
-
-
 def test_stac_catalog_lists_child_collections(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     artifacts = {
         "chirps3_precipitation_daily": _artifact(artifact_id="a1"),
@@ -124,20 +118,22 @@ def test_stac_catalog_lists_child_collections(client: TestClient, monkeypatch: p
         ),
     }
     monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: artifacts)
+    monkeypatch.setattr(stac_services.registry_datasets, "get_dataset", lambda _: {"period_type": "daily"})
+    monkeypatch.setattr(stac_services, "_build_collection_with_xstac", lambda **_: _minimal_xstac_payload())
+    monkeypatch.setattr(stac_services, "_zarr_asset_metadata", lambda _: {})
+    monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {})
 
     response = client.get("/stac/catalog.json")
 
     assert response.status_code == 200
     payload = response.json()
     # The root lists one sub-catalog per kind with a published collection, and it lists the collections.
-    assert [link["href"] for link in payload["links"] if link["rel"] == "child"] == [
-        "http://testserver/stac/rasters/catalog.json"
-    ]
+    assert [link["href"] for link in payload["links"] if link["rel"] == "child"] == ["./rasters/catalog.json"]
     rasters = client.get("/stac/rasters/catalog.json").json()
     assert rasters["id"] == "rasters"
     assert [link["href"] for link in rasters["links"] if link["rel"] == "child"] == [
-        "http://testserver/stac/rasters/chirps3_precipitation_daily/collection.json",
-        "http://testserver/stac/rasters/era5_temperature_daily/collection.json",
+        "./chirps3_precipitation_daily/collection.json",
+        "./era5_temperature_daily/collection.json",
     ]
     assert client.get("/stac/vectors/catalog.json").status_code == 404, "no vector collection is published"
     # The latest of its collections' `updated`: a catalog whose collections are all mirrors is
@@ -165,23 +161,9 @@ def test_stac_landing_links_to_collections(client: TestClient) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert any(link["href"].endswith("/stac/catalog.json") for link in payload["links"] if link["rel"] == "root")
+    assert [link["href"] for link in payload["links"] if link["rel"] == "root"] == ["./catalog.json"]
     # The Portolan profile's versioned URI, its only conformance signal.
     assert payload["stac_extensions"] == ["https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"]
-
-
-def test_catalog_self_link_reflects_request_path(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ingestion_services,
-        "list_artifacts",
-        lambda: SimpleNamespace(items=[_artifact(artifact_id="a1")]),
-    )
-
-    response = client.get("/stac/catalog.json")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["links"][0]["href"].endswith("/stac/catalog.json")
 
 
 def test_catalog_excludes_unpublished_and_netcdf(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,21 +297,6 @@ def test_collection_uses_xstac_and_adds_expected_fields(
     assert (render["colormap"]["0"], render["colormap"]["255"]) == (first, last)
     # Only a name is passed on as a name; a list of colours has none to give.
     assert render.get("colormap_name") == (colormap if isinstance(colormap, str) else None)
-
-
-def test_stac_collection_compatibility_route_builds_collection(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        stac_services,
-        "build_collection",
-        lambda kind, dataset_id, request: {"type": "Collection", "id": f"{kind}/{dataset_id}", "links": []},
-    )
-
-    response = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
-
-    assert response.status_code == 200
-    assert response.json()["id"] == "rasters/chirps3_precipitation_daily"
 
 
 def test_collections_logs_skipped_dataset_failures(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -702,9 +669,7 @@ def test_openeo_listing_does_not_follow_the_stac_gate(client: TestClient, monkey
     stac_detail = client.get("/stac/rasters/districts/collection.json")
 
     assert [c["id"] for c in openeo_listing.json()["collections"]] == ["chirps3_precipitation_daily"]
-    assert any(
-        link["href"].endswith("/stac/rasters/districts/collection.json") for link in stac_catalog.json()["links"]
-    )
+    assert "./districts/collection.json" in [link["href"] for link in stac_catalog.json()["links"]]
     assert openeo_detail.status_code == 404
     assert stac_detail.status_code == 200
 

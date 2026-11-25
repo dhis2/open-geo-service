@@ -450,6 +450,13 @@ each sub-catalog links its collections. A collection's id is its path in the cat
 `{kind}/{dataset_id}` (`rasters/chirps3_precipitation_daily`); in openEO `/collections` it is the
 dataset id alone.
 
+`/stac` serves the catalog the instance writes into its data folder (see
+[Data folder layout](data_folder_layout.md#the-catalog)), so its links are relative and resolve
+against the document's own URL: a collection's `data` asset is the file beside its
+`collection.json`, served under `/stac` too. The `zarr` and `style` assets are there only when
+`GEOSERVICE_BASE_URL` is set; without it, take the Zarr URL from `/datasets/{dataset_id}` or
+openEO's `/collections/{dataset_id}`, as the Python client does.
+
 What this means:
 
 - `/stac` is the public STAC discovery surface for published datasets, raster and vector alike

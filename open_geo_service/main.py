@@ -229,6 +229,11 @@ async def _services() -> AsyncGenerator[None]:
             collect_pending_garbage_everywhere()
         except Exception:
             logger.exception("Could not run pending store collections; continuing startup")
+        # Every document again: an upgrade, a changed template or public address changes them
+        # without changing a record. Logged rather than raised, as a record write does.
+        from open_geo_service.stac.catalog_files import write_catalog_after_change
+
+        write_catalog_after_change()
         maintenance = asyncio.create_task(_collect_pending_garbage_periodically())
         pipeline_recovery = asyncio.create_task(_recover_pipeline_runs_periodically())
         notification_replay = asyncio.create_task(_replay_notifications_periodically())

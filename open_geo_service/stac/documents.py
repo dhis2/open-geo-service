@@ -30,8 +30,8 @@ def catalog_readme(request: Request) -> str:
     lines = [
         f"# {_instance_name()}",
         "",
-        f"The published datasets of this instance, at {absolute_url(request, '/')}: rasters as "
-        "GeoZarr stores, vector datasets as GeoParquet, and tables as Parquet.",
+        "The published datasets of this instance: rasters as GeoZarr stores, vector datasets as "
+        "GeoParquet, and tables as Parquet.",
         "",
         "Each collection declares its own licence in its STAC document, and its providers where they are known.",
         "",
@@ -159,7 +159,10 @@ def collection_readme(kind: layout.Kind, dataset_id: str, request: Request) -> s
         lines.append("- A Zarr v3 store with GeoZarr metadata; its `AGENTS.md` link says how to open it.")
     elif artifact.features is not None:
         detail = artifact.features
-        types = ", ".join(store.stored_geometry_types(artifact)) or "unknown"
+        try:
+            types = ", ".join(store.stored_geometry_types(artifact)) or "unknown"
+        except (OSError, ValueError):  # an unreadable footer leaves the types unknown, as openEO does
+            types = "unknown"
         lines += [
             f"- {detail.feature_count} features, geometry types: {types}.",
             f"- Identifier property: `{detail.id_property}`.",
