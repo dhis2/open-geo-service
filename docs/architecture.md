@@ -369,3 +369,5 @@ The orchestrator therefore commits every period as usual, and checks each for va
 In case 2 the sync still succeeds, with a warning in its message and the log naming the periods held back: for a source such as dynamical.org this happens on every sync that lands in its update window, and the dataset still advances to the last period with data, so it is not a failure. A source that never fills a listed period shows as a dataset whose end stops advancing, with the same warning on every sync.
 
 The reset also runs when the run fails or is cancelled part way, so empty periods are never left at the end of the store. The newest period of a run that is truly empty is held back until a later period is listed, then written.
+
+A preliminary period fetched again for its final values (see [Preliminary periods](zarr_and_geozarr.md#preliminary-periods)) is not covered by these cases: it is written in place before any new period, so case 1 would keep it empty. One that comes back with every value missing is not written at all. It keeps its preliminary values and `fetched_at`, so the next sync fetches it again.
