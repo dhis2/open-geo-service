@@ -192,9 +192,13 @@ def listed_tier(method: str, path: str) -> Tier | None:
     tier wins.
     """
     method = "GET" if method.upper() == "HEAD" else method.upper()
-    path = path.rstrip("/") or "/"
-    tiers = [tier for entry_method, pattern, tier in _ENTRIES if entry_method == method and pattern.match(path)]
-    return max(tiers, default=None)
+    # The path as requested first: `/zarr/{id}/` is a route of its own, a store's root with an
+    # empty file path, which the path without its slash does not match.
+    for candidate in dict.fromkeys((path, path.rstrip("/") or "/")):
+        tiers = [tier for verb, pattern, tier in _ENTRIES if verb == method and pattern.match(candidate)]
+        if tiers:
+            return max(tiers)
+    return None
 
 
 def route_tier(method: str, path: str) -> Tier:

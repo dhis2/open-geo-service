@@ -490,7 +490,9 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     # A session reads what the pages and the map viewer load.
     cookie = _session(client, CLIENT_SECRET)
     assert client.get("/datasets", headers={**cookie, **HTML}).status_code == 200
-    assert client.get("/zarr/abc/zarr.json", headers=cookie).status_code not in (401, 403)
+    # A store's root too, which GDAL asks for with a trailing slash.
+    for store in ("/zarr/abc/zarr.json", "/zarr/abc/", "/icechunk/abc/"):
+        assert client.get(store, headers=cookie).status_code not in (401, 403)
     assert client.get("/datasets", headers=cookie).headers["cache-control"] == "private"
 
     # Read-only refuses writes by the table's tiers, so gated reads still answer a token.
