@@ -28,8 +28,9 @@ from open_geo_service import config as api_config  # noqa: E402
 from open_geo_service import writer_lease  # noqa: E402
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset  # noqa: E402
 from open_geo_service.data_manager.services import downloader  # noqa: E402
-from open_geo_service.ingestions import services  # noqa: E402
+from open_geo_service.ingestions import services, sync_engine  # noqa: E402
 from open_geo_service.ingestions.schemas import PublicationStatus  # noqa: E402
+from open_geo_service.publications.services import managed_dataset_id_for  # noqa: E402
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period  # noqa: E402
 
 NY, NX = 101, 75
@@ -73,17 +74,21 @@ def store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
     return state
 
 
+DATASET: dict[str, object] = {
+    "id": "tg_daily",
+    "name": "Daily temperature",
+    "variable": "tg",
+    "period_type": "daily",
+    "sync": {"kind": "temporal"},
+    "ingestion": {"plugin": "example.ValuePlugin"},
+}
+
+
 def _ingest(
     state: dict[str, Any], *, overwrite: bool, end: str = DAYS[-1], publish: bool = False
 ) -> services.ArtifactRecord:
     return services.create_artifact(
-        dataset={
-            "id": "tg_daily",
-            "name": "Daily temperature",
-            "variable": "tg",
-            "period_type": "daily",
-            "ingestion": {"plugin": "example.ValuePlugin"},
-        },
+        dataset=DATASET,
         start=DAYS[0],
         end=end,
         bbox=[1.0, 2.0, 3.0, 4.0],
@@ -91,6 +96,15 @@ def _ingest(
         overwrite=overwrite,
         publish=publish,
     )
+
+
+def _sync(monkeypatch: pytest.MonkeyPatch, record: services.ArtifactRecord) -> str:
+    """Sync *record*'s dataset to the last day, the way a schedule does; returns the sync status."""
+    monkeypatch.setattr(services.registry_datasets, "get_dataset", lambda _: DATASET)
+    monkeypatch.setattr(services, "get_dataset_or_404", lambda _: None)
+    monkeypatch.setattr(sync_engine, "_query_available_periods", lambda _, start, end: DAYS)
+    dataset_id = managed_dataset_id_for(record)
+    return services.sync_dataset(dataset_id=dataset_id, end=DAYS[-1], publish=False).status
 
 
 def _read(path: Path) -> tuple[int, float]:
@@ -147,13 +161,21 @@ def test_an_overwrite_moves_readers_to_the_new_version_in_one_step(
     measured = services.list_artifacts().items[0].statistics
     assert measured is not None and measured.max == 1.0
 
-    # The next sync publishes `main` again, though the rollback left the coverage as it was.
-    synced = _ingest(store, overwrite=False)
+    # The next sync publishes `main` again though nothing new is due, and the record follows.
+    assert _sync(monkeypatch, replaced) == "up_to_date"
     assert _read(store["path"]) == (3, 2.0)
-    assert synced.statistics == replaced.statistics
+    assert services.list_artifacts().items[0].statistics == replaced.statistics
+
+    # So does publishing again without a snapshot id.
+    services.publish_artifact_record(replaced.artifact_id, snapshot_id=before)
+    republished = services.publish_artifact_record(replaced.artifact_id)
+    assert _read(store["path"]) == (3, 2.0)
+    assert republished.statistics == replaced.statistics
 
 
-def test_a_sync_that_fails_part_way_is_not_a_version_to_roll_back_to(store: dict[str, Any]) -> None:
+def test_a_sync_that_fails_part_way_is_not_a_version_to_roll_back_to(
+    store: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     record = _ingest(store, overwrite=False, end=DAYS[0], publish=True)
     store["plugin"] = _ValuePlugin(1.0, fail_at=DAYS[2])
     with pytest.raises(Exception, match="upstream fetch failed"):
@@ -164,6 +186,11 @@ def test_a_sync_that_fails_part_way_is_not_a_version_to_roll_back_to(store: dict
     with pytest.raises(HTTPException) as refused:
         services.publish_artifact_record(record.artifact_id, snapshot_id=partial)
     assert refused.value.status_code == 404
+    # Nor one the next sync publishes before it resumes.
+    published = _published(store["path"])
+    with pytest.raises(Exception, match="upstream fetch failed"):
+        _sync(monkeypatch, record)
+    assert _published(store["path"]) == published
 
 
 def test_retention_zero_keeps_only_the_current_version(store: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1309,8 +1309,6 @@ def _create_streaming_artifact(
     # whether it amended earlier ones away, which leaves data for a collection.
     wrote_this_run = False
     amended_periods = False
-    # Set when a sync finds `published` rolled back behind `main`, which it publishes again.
-    undoing_rollback = False
     store_committed = False
     plugin_handed_to_orchestrator = False
     ingest_completed = False
@@ -1350,17 +1348,15 @@ def _create_streaming_artifact(
                     or str(dataset["period_type"]) == "climatology"
                     or (temporal.start == plan.start and temporal.end == plan.end)
                 )
-                undoing_rollback = _rolled_back(store_path)
-                if coverage_is_current and not undoing_rollback:
+                if coverage_is_current:
                     if publish and existing.publication.status != PublicationStatus.PUBLISHED:
                         return publish_artifact_record(existing.artifact_id)
                     return existing
                 logger.warning(
-                    "Re-registering committed store '%s' because %s",
+                    "Re-registering committed store '%s' because coverage %s..%s is stale",
                     store_path,
-                    "it was rolled back"
-                    if coverage_is_current
-                    else f"coverage {temporal.start}..{temporal.end} is stale",
+                    temporal.start,
+                    temporal.end,
                 )
         if plan.action != SyncAction.NO_OP and on_update_planned is not None:
             on_update_planned(_previous_coverage_end(dataset, plan))
@@ -1504,8 +1500,7 @@ def _create_streaming_artifact(
             created_at=datetime.now(UTC),
             publication=ArtifactPublication(),
         )
-        # Replacing the rolled-back record, which may have the same coverage but describes the older version.
-        stored_record = _upsert_artifact_record(record, overwrite=overwrite or undoing_rollback)
+        stored_record = _upsert_artifact_record(record, overwrite=overwrite)
         store_committed = True
         if published_before is not None:
             # The branch moved above, so the record follows it.
@@ -2006,19 +2001,20 @@ def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) ->
     ingest of the same store runs.
 
     A rollback also describes the version it publishes on the record: its coverage and
-    statistics. `main` keeps the newer versions, so the next sync, finding the record behind
-    the store, publishes `main` again.
+    statistics. `main` keeps the newer versions; publishing it again, which the next sync does,
+    describes it again too.
     """
     record = get_artifact_or_404(artifact_id)
     if record.format == ArtifactFormat.ICECHUNK and record.path:
         store_path = Path(record.path)
         if not (store_path / "repo").exists():
             raise HTTPException(status_code=409, detail=f"Artifact '{artifact_id}' has no store at {store_path}")
+        rolled_back = snapshot_id is None and _rolled_back(store_path)
         try:
             publish_snapshot(store_path, snapshot_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if snapshot_id is not None:
+        if snapshot_id is not None or rolled_back:
             record = _describing_published(record, store_path)
     elif snapshot_id is not None:
         raise HTTPException(status_code=409, detail=f"Artifact '{artifact_id}' has no versions to publish")
@@ -2026,12 +2022,17 @@ def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) ->
 
 
 def _rolled_back(store_path: Path) -> bool:
-    """Whether `published` holds an older version than the tip of `main`, as after a rollback."""
+    """Whether `published` holds an older version than a complete tip of `main`, as after a rollback.
+
+    A sync that failed part way also leaves `published` behind, but on a tip not marked complete.
+    Call holding the store lock: an ingest between sealing `main` and publishing it looks the same.
+    """
     if not (store_path / "repo").exists():
         return False
     repo = open_or_create_repo(store_path)
     published = published_snapshot(repo)
-    return published is not None and published != str(repo.lookup_branch("main"))
+    tip = next(iter(repo.ancestry(branch="main")))
+    return published is not None and published != str(tip.id) and bool(tip.metadata.get("ogs_complete"))
 
 
 def _describing_published(record: ArtifactRecord, store_path: Path) -> ArtifactRecord:
@@ -2135,6 +2136,16 @@ def sync_dataset(
     source_dataset = registry_datasets.get_dataset(latest_artifact.dataset_id)
     if source_dataset is None:
         raise HTTPException(status_code=404, detail=f"Source dataset '{latest_artifact.dataset_id}' not found")
+    if latest_artifact.format == ArtifactFormat.ICECHUNK and latest_artifact.path:
+        # After a rollback, the sync publishes `main` again, also when nothing new is due. An
+        # ingest holding the store publishes it itself.
+        lock = _acquire_store_lock(Path(latest_artifact.path))
+        if lock.acquire(blocking=False):
+            try:
+                if _rolled_back(Path(latest_artifact.path)):
+                    latest_artifact = publish_artifact_record(latest_artifact.artifact_id)
+            finally:
+                lock.release()
     extent = get_extent()
     resolved_country_code = extent.get("country_code") if extent else None
     try:

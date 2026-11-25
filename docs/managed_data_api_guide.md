@@ -888,7 +888,8 @@ publish_artifact_record(record.artifact_id, snapshot_id="<snapshot id>")
 ```
 
 The record then describes that version, its coverage and statistics, while `main` keeps the
-newer ones, so the next sync finds the record behind the store and publishes `main` again. The
+newer ones. The next sync publishes `main` again, also when nothing new is due, and the record
+describes it again; so does publishing without a snapshot id. The
 thumbnail and the size still describe the store as a whole, and no update event is sent. A
 snapshot that is not a complete, kept version of the store is refused.
 
