@@ -2316,14 +2316,18 @@ def _latest_published_raster_artifacts_cached() -> dict[str, ArtifactRecord]:
     """Return `latest_published_raster_artifacts_by_dataset()`, recomputed only when records.json changes.
 
     A map view requests hundreds of chunks, and resolving the dataset from scratch reads, validates
-    and path-resolves every record on the instance each time, so it is cached by `_records_version`.
-    A store deleted from disk without a record change stays in the result until the next write;
-    serving it then fails as a missing path.
+    and path-resolves every record on the instance each time. Record writes replace records.json
+    whole, so the cache is keyed on its path, modification time and size, which catches writes by
+    other processes, and on this process's write count, which catches writes the modification time
+    cannot tell apart where it is coarse. A store deleted from disk without a record change stays in
+    the result until the next write; serving it then fails as a missing path.
     """
     global _store_artifacts_cache
-    key = _records_version()
-    if key is None:
+    try:
+        stat = ARTIFACTS_INDEX_PATH.stat()
+    except OSError:
         return latest_published_raster_artifacts_by_dataset()
+    key = (str(ARTIFACTS_INDEX_PATH), stat.st_mtime_ns, stat.st_size, _records_write_count)
     if _store_artifacts_cache is not None and _store_artifacts_cache[0] == key:
         return _store_artifacts_cache[1]
     artifacts = latest_published_raster_artifacts_by_dataset()
@@ -2333,37 +2337,6 @@ def _latest_published_raster_artifacts_cached() -> dict[str, ArtifactRecord]:
         _open_repositories.clear()
         _open_sessions.clear()
     return artifacts
-
-
-def _records_version() -> tuple[str, int, int, int] | None:
-    """What changes whenever the records do, for the caches of what they say; None before the first write.
-
-    Record writes replace records.json whole, so its path, modification time and size catch writes
-    by other processes, and this process's write count catches those the modification time cannot
-    tell apart where it is coarse.
-    """
-    try:
-        stat = ARTIFACTS_INDEX_PATH.stat()
-    except OSError:
-        return None
-    return (str(ARTIFACTS_INDEX_PATH), stat.st_mtime_ns, stat.st_size, _records_write_count)
-
-
-_stac_artifacts_cache: tuple[tuple[str, int, int, int], dict[str, ArtifactRecord]] | None = None
-
-
-def stac_eligible_artifacts_cached() -> dict[str, ArtifactRecord]:
-    """`stac_eligible_artifacts_by_dataset()`, recomputed only when the records change.
-
-    For `/stac` file requests: a reader of an Icechunk store in the catalog sends one per chunk.
-    """
-    global _stac_artifacts_cache
-    key = _records_version()
-    if key is None:
-        return stac_eligible_artifacts_by_dataset()
-    if _stac_artifacts_cache is None or _stac_artifacts_cache[0] != key:
-        _stac_artifacts_cache = (key, stac_eligible_artifacts_by_dataset())
-    return _stac_artifacts_cache[1]
 
 
 def _get_latest_published_icechunk_artifact(dataset_id: str) -> ArtifactRecord:

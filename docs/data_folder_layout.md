@@ -70,8 +70,9 @@ starts, which picks up an upgrade, a changed template or a changed public addres
   `GEOSERVICE_BASE_URL` is set, with that address. Portolan asks for the host's address, so a
   catalog meant to be published needs it set.
 
-`/stac` serves these files, and the data files of published datasets beside them, as a static
-host of `catalog/` would. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way,
+`/stac` serves `catalog/` as a static host of it would: the documents and the data files beside
+them, without reading the records. A dataset written but not yet published is reachable by its
+path there, as in any copy of the folder, but nothing links to it. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way,
 and openEO's `/collections` are still built on request, with absolute links.
 
 ## Moving an instance to this layout

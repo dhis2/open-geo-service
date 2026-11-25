@@ -266,9 +266,7 @@ def test_the_zarr_asset_follows_the_configured_address(data: Path, monkeypatch: 
     assert [provider.get("url") for provider in written["providers"] if "host" in provider["roles"]] == [None]
 
 
-def test_stac_serves_the_files_and_the_data_of_published_datasets_only(
-    data: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     feature_services.refresh_feature_collection(
         template={**DISTRICTS, "id": "regions", "name": "Regions"},
         features={"type": "FeatureCollection", "features": [_box("R1")]},
@@ -288,18 +286,14 @@ def test_stac_serves_the_files_and_the_data_of_published_datasets_only(
     data_file = next((data / "catalog" / "vectors" / "districts").glob("*.parquet"))
     ranged = client.get(f"/stac/vectors/districts/{data_file.name}", headers={"Range": "bytes=0-3"})
     assert ranged.status_code == 206 and ranged.content == b"PAR1"
-    # A reader of a store sends a request per chunk; the records are read again only once they change.
-    lookups: list[None] = []
-    lookup = ingestion_services.stac_eligible_artifacts_by_dataset
-    monkeypatch.setattr(
-        ingestion_services, "stac_eligible_artifacts_by_dataset", lambda: lookups.append(None) or lookup()
-    )
-    for _ in range(3):
-        assert client.get(f"/stac/vectors/districts/{data_file.name}").status_code == 200
-    assert lookups == []
+    # A reader of a store sends a request per chunk, so a file is served without reading the records.
+    monkeypatch.setattr(ingestion_services, "_load_records", lambda: pytest.fail("a file request read the records"))
+    assert client.get(f"/stac/vectors/districts/{data_file.name}").status_code == 200
 
+    # As from any copy of the folder: not ready rather than private, and nothing links to it.
     unpublished = next((data / "catalog" / "vectors" / "regions").glob("*.parquet"))
-    assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 404
+    assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 200
+    assert client.get("/stac/vectors/regions/collection.json").status_code == 404
     assert client.get("/stac/../artifacts/records.json").status_code == 404
     assert client.get("/stac/rasters/districts/README.md").status_code == 404
 
