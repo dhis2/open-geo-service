@@ -584,9 +584,15 @@ def test_a_failed_job_links_to_logs_that_carry_its_error(client: TestClient) -> 
     assert [entry["level"] for entry in entries] == ["error"]
     assert entries[0]["message"].startswith("failed: HTTPException: 404: Collection 'no_such_dataset'")
     assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
-    # A client polling from the first failure still sees the second one after a re-run.
-    run_until_failed()
-    after_rerun = client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
+    # A client polling from the first failure still sees the second one after a re-run. Waited
+    # for by its log entry: the status reads "error" from the first run until the re-run starts.
+    assert client.post(f"/jobs/{job_id}/results").status_code == 202
+    deadline = time.monotonic() + 30
+    while not (
+        after_rerun := client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
+    ):
+        assert time.monotonic() < deadline, "the re-run did not fail within 30 s"
+        time.sleep(0.05)
     assert [entry["level"] for entry in after_rerun] == ["error"]
     assert after_rerun[0]["id"] != entries[0]["id"]
 
