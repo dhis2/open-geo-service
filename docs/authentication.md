@@ -71,7 +71,8 @@ every public route then needs the authenticated tier, except the few a client ne
 how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
 sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
 lists the catalogue, is gated. The table's tiers do not change, so read-only mode, which reads
-them, still serves reads to a token. Responses are marked `Cache-Control: private`, so a caching
+them, still serves reads to a token. Responses are marked `Cache-Control: private`, added in front
+of any caching a route sets itself, so a browser still keeps what the route allows and a caching
 proxy in front does not serve one caller's answer to another.
 
 Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
