@@ -90,7 +90,7 @@ def _commit_messages(store: Path) -> list[str]:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    return [snapshot.message for snapshot in repo.ancestry(branch="main")]
+    return [snapshot.message for snapshot in repo.ancestry(branch="ingest")]
 
 
 def _stored_value(store: Path) -> float:

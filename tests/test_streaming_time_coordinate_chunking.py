@@ -62,9 +62,9 @@ def test_streaming_ingest_writes_the_time_axis_as_one_chunk(monkeypatch: pytest.
     processes.execute_ingestion(dataset_id=_DATASET_ID, start=_MONTHS[0], end=_MONTHS[-1], publish=False)
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    group = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    group = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
     t = group["t"]
     assert isinstance(t, zarr.Array)
     assert t.chunks == (len(_MONTHS),)
-    ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+    ds = xr.open_zarr(repo.readonly_session("ingest").store, consolidated=False)
     assert list(ds.t.values) == list(pd.to_datetime([f"{m}-01" for m in _MONTHS]))

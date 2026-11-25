@@ -67,6 +67,7 @@ from open_geo_service.ingestions.schemas import (
 from open_geo_service.ingestions.sync_engine import SyncConfigurationError, plan_sync, run_sync
 from open_geo_service.publications.services import managed_dataset_id_for, publish_artifact
 from open_geo_service.shared import layout
+from open_geo_service.shared.branches import PUBLISHED_BRANCH, WRITE_BRANCH
 from open_geo_service.shared.compute import get_job_slots
 from open_geo_service.shared.crs import transform_bbox
 from open_geo_service.shared.licences import DatasetLicence, declared_providers
@@ -89,7 +90,6 @@ from open_geo_service.shared.urls import path_segment as _segment
 from open_geo_service.streaming.orchestrator import run_static_ingest_sync, run_streaming_ingest_sync
 from open_geo_service.streaming.protocol import IngestionPlugin, StaticIngestionPlugin, close_ingestion_plugin
 from open_geo_service.streaming.store import (
-    PUBLISHED_BRANCH,
     expire_replaced_snapshots,
     is_store_empty,
     open_or_create_repo,
@@ -1250,7 +1250,7 @@ def _plan_static_materialization(*, store_path: Path, overwrite: bool) -> _Strea
 
     There are no periods to compare, so a stored dataset is current: an ingest without
     ``overwrite`` keeps it, and one with ``overwrite`` fetches it again into a replacement that
-    `main` moves to once it is complete.
+    the write branch moves to once it is complete.
     """
     has_store = store_path.exists() and not is_store_empty(store_path)
     if has_store and not overwrite:
@@ -1332,13 +1332,13 @@ def _create_streaming_artifact(
             detail=f"An ingest or sync is already running for dataset '{dataset['id']}'. Wait for it to finish.",
         )
     plugin: IngestionPlugin | StaticIngestionPlugin | None = None
-    # Set when the store already holds data: the version readers see on `main` before this ingest,
-    # kept by a rollback branch until the new version is recorded.
+    # Set when the store already holds data: the tip of the write branch before this ingest, kept
+    # by a rollback branch until the new version is recorded.
     repo: Any | None = None
     rollback_branch: str | None = None
     rollback_snapshot: str | None = None
     replacement_branch: str | None = None
-    # Where `published` was before this ingest moved it, when it did.
+    # Where `main` was before this ingest published to it, when it did.
     published_before: str | None = None
     rewritten = False
     # Whether this ingest committed periods, which normalization then amends into one version, and
@@ -1405,25 +1405,25 @@ def _create_streaming_artifact(
         materialization_scope = request_scope.model_copy(update={"start": plan.start, "end": plan.end})
 
         held_back: list[str] = []
-        ingest_branch = "main"
+        ingest_branch = WRITE_BRANCH
         rematerialize = plan.action == SyncAction.REMATERIALIZE and store_path.exists()
         if rematerialize or (plan.action != SyncAction.NO_OP and plan.has_committed_periods):
-            # Keep the version readers see reachable until the new one is recorded, so a failure
-            # after the ingest completes (normalization, the record) resets `main` to it. A
+            # Keep the current version reachable until the new one is recorded, so a failure after
+            # the ingest completes (normalization, the record) resets the write branch to it. A
             # forward append that fails part way keeps the periods it committed instead, so a
             # retry resumes rather than downloading them again.
             existing_repo = open_or_create_repo(store_path)
-            rollback_snapshot = existing_repo.lookup_branch("main")
+            rollback_snapshot = existing_repo.lookup_branch(WRITE_BRANCH)
             rollback_branch = f"{_INGEST_BRANCH_PREFIX}rollback-{uuid4().hex}"
             existing_repo.create_branch(rollback_branch, rollback_snapshot)
             repo = existing_repo
         if rematerialize:
             assert repo is not None
             # A prepend or overwrite is built on its own branch and replaces what it holds, and
-            # `main` moves to it only once it is fetched, validated and normalized. Fetching is the
-            # least reliable part of ingestion, and readers keep the current data until then. The
-            # branch starts from `main`, so the version it replaces stays in the history, kept for
-            # the retention period like any other.
+            # the write branch moves to it only once it is fetched, validated and normalized.
+            # Fetching is the least reliable part of ingestion. The branch starts from the write
+            # branch, so the version it replaces stays in the history, kept for the retention
+            # period like any other.
             replacement_branch = f"{_INGEST_BRANCH_PREFIX}replacement-{uuid4().hex}"
             repo.create_branch(replacement_branch, rollback_snapshot)
             ingest_branch = replacement_branch
@@ -1511,25 +1511,25 @@ def _create_streaming_artifact(
             raise RuntimeError(f"Could not normalize '{dataset['id']}'; the dataset update was rolled back")
         if wrote_this_run:
             # Complete now, so a rollback may publish it; a run that fails before here leaves its
-            # periods on `main` unmarked, for a retry. Only the mark: the update stands without it.
+            # periods on the write branch unmarked, for a retry. Only the mark: the update stands without it.
             try:
                 seal_version(store_path, ingest_branch)
             except Exception:
                 logger.warning("Could not mark '%s' as a complete version", store_path, exc_info=True)
         if replacement_branch is not None:
             assert repo is not None
-            # Readers move from the old version to the complete new one in one step. Nothing else
-            # moves `main` meanwhile: the writer lease keeps other processes out and the store lock
-            # other ingests, which is also what lets a failure reset it below.
-            repo.reset_branch("main", repo.lookup_branch(replacement_branch))
+            # The write branch moves from the old version to the complete new one in one step.
+            # Nothing else moves it meanwhile: the writer lease keeps other processes out and the
+            # store lock other ingests, which is also what lets a failure reset it below.
+            repo.reset_branch(WRITE_BRANCH, repo.lookup_branch(replacement_branch))
         if (store_path / "repo").exists() and published_snapshot(open_or_create_repo(store_path)) is not None:
             # A published dataset's readers move to the new version before its record is written,
             # as every publication does: the branch decides, the record follows.
             published_before = publish_snapshot(store_path)
         # Once per sync run, here rather than per commit: a streaming ingest commits one
         # period at a time, so rendering on each would produce a few hundred PNGs during a
-        # historical backfill and keep the last. After `main` has moved, so it renders the version
-        # readers see. Never raises — see write_dataset_thumbnail.
+        # historical backfill and keep the last. After the write branch has moved, so it renders
+        # the new version. Never raises — see write_dataset_thumbnail.
         write_dataset_thumbnail(store_path, dataset)
 
         record = ArtifactRecord(
@@ -1542,7 +1542,7 @@ def _create_streaming_artifact(
             format=ArtifactFormat.ICECHUNK,
             path=str(store_path.resolve()),
             asset_paths=[str(store_path.resolve())],
-            # After `main` has moved, like the thumbnail: the size and statistics of what readers see.
+            # After the write branch has moved, like the thumbnail: the size and statistics of the new version.
             size_bytes=stored_bytes(store_path),
             statistics=measure_statistics(store_path, str(dataset["variable"])),
             variables=[str(dataset["variable"])],
@@ -1573,7 +1573,7 @@ def _create_streaming_artifact(
             rolled_back = False
             if published_before is not None and not store_committed:
                 # Readers go back to the version the record still describes, also after a NO_OP
-                # that re-registered the store and so has no rollback of `main`.
+                # that re-registered the store and so has no rollback of the write branch.
                 try:
                     open_or_create_repo(store_path).reset_branch(PUBLISHED_BRANCH, published_before)
                 except Exception:
@@ -1587,7 +1587,7 @@ def _create_streaming_artifact(
                 rolled_back = not store_committed and ingest_completed
                 if rolled_back:
                     try:
-                        repo.reset_branch("main", rollback_snapshot)
+                        repo.reset_branch(WRITE_BRANCH, rollback_snapshot)
                     except Exception as exc:
                         rollback_error = exc
                         logger.error("Could not roll back the update of '%s'", store_path, exc_info=True)
@@ -1617,7 +1617,7 @@ def _create_streaming_artifact(
                 raise RuntimeError(
                     f"Ingestion failed and rollback could not complete for '{store_path}'. "
                     f"Branch '{rollback_branch}' names the version before it, snapshot "
-                    f"'{rollback_snapshot}'; reset `main` to it before retrying, then delete the branch. "
+                    f"'{rollback_snapshot}'; reset '{WRITE_BRANCH}' to it before retrying, then delete the branch. "
                     "Nothing else deletes it."
                 ) from rollback_error
         finally:
@@ -1686,9 +1686,9 @@ def clean_up_interrupted_ingest(store_path: Path) -> bool:
     """Remove the branches an ingest killed part way left in *store_path*, and free what only they kept.
 
     An ingest that is killed rather than failing never runs its own cleanup. Its branches hold
-    nothing readers use: `main` is either where the ingest found it or where it moved it, and
-    either is a complete version. They only keep an abandoned replacement, or the version `main`
-    replaced, from being collected. A collection left pending by an earlier ingest runs here too,
+    nothing readers use: the write branch is either where the ingest found it or where it moved
+    it, and either is a complete version. They only keep an abandoned replacement, or the version
+    the write branch replaced, from being collected. A collection left pending by an earlier ingest runs here too,
     once its retention window has passed.
 
     Call with the store's write lock held. Returns True when it removed a branch.
@@ -1739,7 +1739,7 @@ def expire_and_collect(store_path: Path) -> None:
 def _collect_replaced_versions(store_path: Path) -> None:
     """Free the data no branch reaches any more.
 
-    A replaced version stays in the history of `main`, readable and a rollback target, for the
+    A replaced version stays in the history of the write branch, readable and a rollback target, for the
     retention period (`snapshot_retention_days`); an abandoned or expired one is reachable from
     no branch. Objects written within :data:`_GC_RETENTION` are kept for readers that opened
     them, and a pending collection frees them later. Never raises.
@@ -1756,7 +1756,7 @@ def _collect_replaced_versions(store_path: Path) -> None:
 
 
 # Unreachable objects younger than this are kept. Readers take no store lock, and one that
-# opened ``main`` while an ingest was committing sits on a snapshot the rollback makes
+# opened the write branch while an ingest was committing sits on a snapshot the rollback makes
 # unreachable. Icechunk keeps every snapshot newer than the cutoff, and all it references, so
 # such a reader can keep reading for this long after the commit it opened. It is a window, not
 # a guarantee: a reader still on that interim snapshot after it can fail with "object not
@@ -1768,7 +1768,7 @@ _GC_RETENTION = timedelta(hours=1)
 def collect_unreachable_objects(repo: Any, store_path: Path) -> bool:
     """Delete the snapshots, manifests and chunks that no branch or tag reaches.
 
-    A rolled-back ingest resets ``main`` to where it was, so every period the attempt
+    A rolled-back ingest resets the write branch to where it was, so every period the attempt
     committed becomes unreachable, and Icechunk keeps it until collected: on the Norway
     instance a daily store held 44 GB of such data, two thirds of its size. Only unreachable
     objects are removed, so every version any branch or tag can reach is kept, and so is
@@ -1937,7 +1937,7 @@ def _maybe_build_pyramid(
     store_path: Path,
     dataset: dict[str, object],
     *,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
     refreshed_indices: list[int] | None = None,
 ) -> _StoreNormalizationResult:
@@ -1954,7 +1954,7 @@ def _maybe_build_pyramid(
     The rewrite is one commit on *branch* of the same repository, read lazily from the version
     the branch held before it: a readonly session keeps the version it opened, so topozarr
     streams the pyramid out of it while the commit is written, without materialising the whole
-    store in RAM. Readers of `main` see the old version until the commit lands and the new one
+    store in RAM. Readers of *branch* see the old version until the commit lands and the new one
     after, with no moment in between.
 
     A *temporal append* to an already-normalised flat store produces nothing new, though:
@@ -2106,14 +2106,14 @@ def register_artifact_record(record: ArtifactRecord, *, publish: bool, replace_s
 def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) -> ArtifactRecord:
     """Publish an artifact and persist publication metadata.
 
-    For an Icechunk raster the `published` branch decides and the record follows: the branch
-    moves first, to the tip of `main` or to *snapshot_id*, an older version kept by retention,
-    which rolls the dataset back. Readers outside GeoService see only the branch. Call while no
-    ingest of the same store runs.
+    For an Icechunk raster `main` decides and the record follows: the branch moves first, to the
+    tip of the write branch or to *snapshot_id*, an older version kept by retention, which rolls
+    the dataset back. Readers outside GeoService see only the branch. Call while no ingest of the
+    same store runs.
 
     A rollback also describes the version it publishes on the record: its coverage and
-    statistics. `main` keeps the newer versions; publishing it again, which the next sync does,
-    describes it again too.
+    statistics. The write branch keeps the newer versions; publishing it again, which the next
+    sync does, describes it again too.
     """
     record = get_artifact_or_404(artifact_id)
     if record.format == ArtifactFormat.ICECHUNK and record.path:
@@ -2133,21 +2133,21 @@ def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) ->
 
 
 def _rolled_back(store_path: Path) -> bool:
-    """Whether `published` holds an older version than a complete tip of `main`, as after a rollback.
+    """Whether `main` holds an older version than a complete tip of the write branch, as after a rollback.
 
-    A sync that failed part way also leaves `published` behind, but on a tip not marked complete.
-    Call holding the store lock: an ingest between sealing `main` and publishing it looks the same.
+    A sync that failed part way also leaves `main` behind, but on a tip not marked complete. Call
+    holding the store lock: an ingest between sealing the write branch and publishing it looks the same.
     """
     if not (store_path / "repo").exists():
         return False
     repo = open_or_create_repo(store_path)
     published = published_snapshot(repo)
-    tip = next(iter(repo.ancestry(branch="main")))
+    tip = next(iter(repo.ancestry(branch=WRITE_BRANCH)))
     return published is not None and published != str(tip.id) and bool(tip.metadata.get("ogs_complete"))
 
 
 def _describing_published(record: ArtifactRecord, store_path: Path) -> ArtifactRecord:
-    """*record* with the coverage and statistics of the version `published` holds."""
+    """*record* with the coverage and statistics of the version `main` holds."""
     coverage = get_data_coverage_for_paths(
         {"period_type": record.period_type}, icechunk_path=str(store_path), branch=PUBLISHED_BRANCH
     )
@@ -2168,7 +2168,7 @@ def _artifact_coverage(coverage_data: dict[str, Any]) -> ArtifactCoverage:
 def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
     """Mark *record* published, keeping its publication metadata if it already was.
 
-    For an Icechunk raster, also note the snapshot of `published` it now describes.
+    For an Icechunk raster, also note the snapshot of `main` it now describes.
     """
     artifact_id = record.artifact_id
     published = record if record.publication.status == PublicationStatus.PUBLISHED else publish_artifact(record)
@@ -2189,14 +2189,45 @@ def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
     return _mutate_records(mutate)
 
 
-def reconcile_published_branches() -> int:
-    """Bring each raster store's `published` branch and its records into step; return how many changed.
+# The branch readers opened before `main` became the published version.
+_OLD_PUBLISHED_BRANCH = "published"
 
-    Run by the writer at startup. Publication and sync move the branch before they write the
-    record, so a crash between the two leaves a newest record that is not marked published, or
-    that describes an earlier snapshot than the branch holds; the record then follows the branch.
-    A store with a published record and no branch predates the branch, and gets one at the tip
-    of `main`. There is no unpublishing, so nothing else leaves the two apart.
+
+def _adopt_write_branch(store_path: Path, published: bool) -> bool:
+    """Move a store written before the write branch existed to the current layout; return whether it did.
+
+    Its writers committed to `main`, and its readers opened `published` once it was published.
+    The write branch takes the tip of `main`, and `main` takes the tip of `published`, or goes back
+    to the initial, empty snapshot when the store was never published. A store published before
+    either branch existed (*published* with no `published` branch) keeps `main` where it is, marked
+    complete so a rollback may return to it.
+    """
+    repo = open_or_create_repo(store_path)
+    branches = repo.list_branches()
+    if WRITE_BRANCH in branches:
+        return False
+    if published and _OLD_PUBLISHED_BRANCH not in branches:
+        seal_version(store_path, PUBLISHED_BRANCH)
+    repo.create_branch(WRITE_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
+    if _OLD_PUBLISHED_BRANCH in branches:
+        repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
+        repo.delete_branch(_OLD_PUBLISHED_BRANCH)
+    elif not published:
+        *_, initial = repo.ancestry(branch=PUBLISHED_BRANCH)
+        repo.reset_branch(PUBLISHED_BRANCH, initial.id)
+    return True
+
+
+def reconcile_published_branches() -> int:
+    """Bring each raster store's `main` branch and its records into step; return how many changed.
+
+    Run by the writer at startup. Publication and sync move `main` before they write the record,
+    so a crash between the two leaves a newest record that is not marked published, or that
+    describes an earlier snapshot than `main` holds; the record then follows the branch. A store
+    with a published record and nothing on `main` is published from its write branch. A store
+    written before the write branch existed is moved to the current layout first, including one
+    with no record, such as a first ingestion that stopped part way, so a retry can write to it.
+    There is no unpublishing, so nothing else leaves the two apart.
     """
     by_store: dict[str, list[ArtifactRecord]] = {}
     for record in _load_records():
@@ -2208,10 +2239,12 @@ def reconcile_published_branches() -> int:
         if not (store_path / "repo").exists():
             continue
         try:
+            any_published = any(r.publication.status == PublicationStatus.PUBLISHED for r in records)
+            adopted = _adopt_write_branch(store_path, any_published)
             tip = published_snapshot(open_or_create_repo(store_path))
             newest = max(records, key=lambda record: record.created_at)
             published = newest.publication.status == PublicationStatus.PUBLISHED
-            if tip is None and any(r.publication.status == PublicationStatus.PUBLISHED for r in records):
+            if tip is None and any_published:
                 publish_snapshot(store_path)
                 # Its tip may hold more than the record describes, such as periods a failed sync kept.
                 _record_publication(_describing_published(newest, store_path))
@@ -2219,13 +2252,22 @@ def reconcile_published_branches() -> int:
                 _record_publication(newest)
             elif tip is not None and newest.publication.snapshot_id != tip:
                 _record_publication(_describing_published(newest, store_path))
-            else:
+            elif not adopted:
                 continue
         except Exception:
             logger.warning("Could not reconcile the publication of '%s'", store_path, exc_info=True)
             continue
         changed += 1
         logger.warning("Brought the publication of '%s' and its record into step", store_path.name)
+    registered = {Path(path).resolve() for path in by_store}
+    directory = Path(downloader.DOWNLOAD_DIR)
+    for store_path in directory.glob("*.icechunk") if directory.is_dir() else []:
+        if store_path.resolve() in registered or not (store_path / "repo").exists():
+            continue
+        try:
+            changed += _adopt_write_branch(store_path, published=False)
+        except Exception:
+            logger.warning("Could not move '%s' to the current branch layout", store_path, exc_info=True)
     return changed
 
 
@@ -2248,7 +2290,7 @@ def sync_dataset(
     if source_dataset is None:
         raise HTTPException(status_code=404, detail=f"Source dataset '{latest_artifact.dataset_id}' not found")
     if latest_artifact.format == ArtifactFormat.ICECHUNK and latest_artifact.path:
-        # After a rollback, the sync publishes `main` again, also when nothing new is due. An
+        # After a rollback, the sync publishes the write branch again, also when nothing new is due. An
         # ingest holding the store publishes it itself.
         lock = _acquire_store_lock(Path(latest_artifact.path))
         if lock.acquire(blocking=False):
@@ -2402,14 +2444,14 @@ def _get_latest_published_icechunk_artifact(dataset_id: str) -> ArtifactRecord:
 
 
 def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
-    """Return a read-only session on the tip of a published artifact's `published` branch.
+    """Return a read-only session on the version readers see: the tip of `main` once published.
 
     The repository stays open between requests, so its snapshot and manifests stay in its cache,
     and the session is reopened only when the branch has moved. A chunk request then costs one
     read of the branch ref besides the chunk itself (CLIM-1580). Each open repository keeps its
     own caches until the records change and everything is reopened.
 
-    A store without a `main` branch is a 404; any other failure to read the branch is a 500.
+    A store without its branches is a 404; any other failure to read them is a 500.
     """
     if artifact.format != ArtifactFormat.ICECHUNK:
         raise HTTPException(status_code=409, detail="Artifact is not an Icechunk-backed Zarr store")
@@ -2437,7 +2479,7 @@ def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
             if _open_repositories.get(store_path) is repo:
                 del _open_repositories[store_path]
         if isinstance(exc, icechunk.RefNotFoundError):
-            raise HTTPException(status_code=404, detail="Icechunk store has no main branch") from exc
+            raise HTTPException(status_code=404, detail="Icechunk store has no readable branch") from exc
         raise _store_read_failed(store_path, exc) from exc
     session = _open_sessions.get(store_path)
     if session is None or session.snapshot_id != snapshot_id:
@@ -2948,10 +2990,10 @@ def measure_missing_statistics(should_stop: Callable[[], bool] = lambda: False) 
         if not slots.acquire(should_stop):
             break
         try:
-            # A published record describes `published`, which a rollback leaves behind `main`.
+            # A published record describes `main`, which a rollback leaves behind the write branch.
             published = record.publication.status == PublicationStatus.PUBLISHED
             statistics = measure_statistics(
-                record.path, record.variable, branch=PUBLISHED_BRANCH if published else "main"
+                record.path, record.variable, branch=PUBLISHED_BRANCH if published else WRITE_BRANCH
             )
         finally:
             slots.release()

@@ -367,10 +367,10 @@ for both.
 import icechunk, xarray as xr
 
 repo = icechunk.Repository.open(icechunk.http_storage("http://127.0.0.1:9000/icechunk/chirps3_precipitation_daily"))
-ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, consolidated=False)
+ds = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3, consolidated=False)
 ```
 
-Open the `published` branch, which is what GeoService serves; `main` can hold a sync in progress.
+`main` holds the published version, which is what GeoService serves; the `ingest` branch can hold a sync in progress.
 
 Both endpoints are advertised as `assets` in the STAC collection:
 
@@ -907,40 +907,43 @@ Expected planning response:
 `append` here means Open Geo Service reuses the planner's source-available delta and
 writes only missing periods to the existing Icechunk store. A rollback branch keeps the
 version before the append until normalization and artifact registration succeed, and a
-failure after that point resets `main` to it.
+failure after that point resets the `ingest` branch to it.
 Progress counts the new periods in this append, excluding already committed history.
 
 If a complete store has lost its artifact record, repeating `/ingest` reconstructs the
 record from the store without querying or fetching historical source data. Recovery
 validates and normalizes the store and honors the request's publication setting.
 
-Writers commit to `main`; readers open the `published` branch, which publishing moves. Every
-reader opens it: `/zarr`, `/icechunk`, openEO, STAC, and tools outside GeoService such as GDAL
-(`ICECHUNK:<path>?branch=published`). A dataset not published yet has no `published` branch,
-and GeoService's own pages read `main` for it.
+Writers commit to the `ingest` branch; readers open `main`, which publishing moves. Every reader
+opens it: `/zarr`, `/icechunk`, openEO, STAC, and tools outside GeoService. `main` is the branch
+Icechunk readers open by default, so GDAL (`ICECHUNK:<path>`), the Icechunk libraries and QGIS
+get the published version without being told a branch. Until a dataset is first published, `main`
+is the repository's initial, empty snapshot, and GeoService's own pages read `ingest` for it.
 
-- **An ingest or sync** commits each period to `main` as it is fetched, as one snapshot per run:
+- **An ingest or sync** commits each period to `ingest` as it is fetched, as one snapshot per run:
   later periods amend the run's first commit. When the update is complete and recorded,
-  `published` moves to it, so readers never see a sync half done. A sync that fails part way
-  keeps the periods it committed on `main` for the next attempt to resume from, and readers
+  `main` moves to it, so readers never see a sync half done. A sync that fails part way
+  keeps the periods it committed on `ingest` for the next attempt to resume from, and readers
   keep the version they had.
-- **A rematerialization or an overwrite** is built on a temporary branch, from `main`, and
-  `main` moves to it in one step once it is fetched, validated and normalized. A pyramid rebuild
+- **A rematerialization or an overwrite** is built on a temporary branch, from `ingest`, and
+  `ingest` moves to it in one step once it is fetched, validated and normalized. A pyramid rebuild
   is one commit. A killed ingest leaves only its temporary branches, which the next ingest of
   that store removes. If rollback itself fails, the job reports it and names the rollback branch,
   which still points at the version before the ingest.
-- **Publication decides, the record follows.** Publishing moves `published` first and then marks
+- **Publication decides, the record follows.** Publishing moves `main` first and then marks
   the record published, and a sync of a published dataset moves the branch with it. The record
   notes the snapshot it describes. A writer started after a crash between the two marks the
-  record published, or describes the branch's version on it when the snapshots differ, and gives
-  a store from before the branch existed one at the tip of `main`. Whatever `published` moves
-  to is marked complete, so a rollback may return to any version readers were served.
+  record published, or describes the branch's version on it when the snapshots differ. Whatever
+  `main` moves to is marked complete, so a rollback may return to any version readers were served.
+- **A store written when writers committed to `main`** and readers opened a `published` branch is
+  moved to this layout when the writer starts: `ingest` takes what `main` held, and `main` what
+  `published` held, or the initial snapshot for a dataset never published.
 
-**Versions and rollback.** Each sync leaves one snapshot in the history of `main`: its periods,
+**Versions and rollback.** Each sync leaves one snapshot in the history of `ingest`: its periods,
 pyramid levels and other normalization in one commit, marked complete once the sync has finished.
 The snapshots of the last `snapshot_retention_days` (default 30, see the
 [instance guide](instance_guide.md)) are kept, also across an overwrite, and older ones are
-expired at the next update of the store. A sync that fails part way leaves its periods on `main`
+expired at the next update of the store. A sync that fails part way leaves its periods on `ingest`
 for the retry, unmarked.
 
 A dataset can be rolled back to any kept, complete version by publishing it again. It writes to
@@ -954,8 +957,8 @@ record = get_latest_artifact_for_dataset_or_404("chirps3_precipitation_daily")
 publish_artifact_record(record.artifact_id, snapshot_id="<snapshot id>")
 ```
 
-The record then describes that version, its coverage and statistics, while `main` keeps the
-newer ones. The next sync publishes `main` again, also when nothing new is due, and the record
+The record then describes that version, its coverage and statistics, while `ingest` keeps the
+newer ones. The next sync publishes `ingest` again, also when nothing new is due, and the record
 describes it again; so does publishing without a snapshot id. The
 thumbnail and the size still describe the store as a whole, and no update event is sent. A
 snapshot that is not a complete, kept version of the store is refused.

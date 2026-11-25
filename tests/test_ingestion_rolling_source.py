@@ -15,6 +15,7 @@ from open_geo_service.ingestions import processes, services, sync_engine
 from open_geo_service.ingestions.schemas import ArtifactVersion, CoverageTemporal, SyncAction
 from open_geo_service.openeo import execution as openeo_execution
 from open_geo_service.pipelines import runner
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.provisional import FETCHED_AT
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period, orchestrator
 from open_geo_service.streaming.store import read_fetched_at
@@ -140,7 +141,7 @@ def test_forward_ingestion_preserves_retired_source_history(
 
     # A gap in the missing delta must still fail before any data is written.
     repo = services.open_or_create_repo(store_path)
-    snapshot = repo.lookup_branch("main")
+    snapshot = repo.lookup_branch("ingest")
     plugin.available = ["2026-01-06"]
     with pytest.raises(services.HTTPException, match="contiguous sequence beginning at 2026-01-05"):
         ingest("2026-01-06", "2026-01-06")
@@ -149,7 +150,7 @@ def test_forward_ingestion_preserves_retired_source_history(
     plugin.available = ["2026-01-03", "2026-01-04"]
     with pytest.raises(services.HTTPException, match="Source cannot materialize"):
         ingest("2025-12-31", "2026-01-04")
-    assert repo.lookup_branch("main") == snapshot
+    assert repo.lookup_branch("ingest") == snapshot
     assert services._load_records()[-1].artifact_id == artifact.artifact_id
     assert len(plugin.fetched) == 4
 
@@ -374,7 +375,7 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     assert _pipeline_runs(response) == [("2026-01-01", "2026-01-03", "appended")]
     # Chunked as `t`, rechunked at the end of each sync, so the refresh and the append above
     # wrote into a chunk of several periods, and the planner reads the array in few requests.
-    root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session("main").store, mode="r")
+    root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
     assert [cast(zarr.Array, root[name]).chunks for name in (FETCHED_AT, "t")] == [(3,), (3,)]
 
     # Fetched after maturity, no period is due again: each was fetched at most twice.

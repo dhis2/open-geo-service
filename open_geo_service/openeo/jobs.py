@@ -61,6 +61,7 @@ from open_geo_service.openeo.schemas import (
     OpenEOLogLevel,
 )
 from open_geo_service.shared import layout
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.cancellation import (
     ExecutionCancelled,
     cancellation_scope,
@@ -1465,19 +1466,19 @@ def _netcdf_safe_attrs(ds: Any) -> Any:
 
 
 def store_head(store_path: Path) -> str | None:
-    """The snapshot ``main`` points at in an Icechunk store, or None when there is no store yet."""
+    """The tip of an Icechunk store's write branch, or None when there is no store yet."""
     import icechunk
 
     if not store_path.exists():
         return None
     repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
-    return str(repo.lookup_branch("main"))
+    return str(repo.lookup_branch(WRITE_BRANCH))
 
 
 def committed_snapshot(store_path: Path, commit_message: str, base_snapshot_id: str | None) -> str | None:
     """The snapshot an attempt committed, found by its own commit message above its base.
 
-    Walks ``main`` from its head back to ``base_snapshot_id`` (the head before the attempt
+    Walks the write branch from its head back to ``base_snapshot_id`` (the head before the attempt
     wrote; for a new store, all the way down) and returns the snapshot whose message is
     ``commit_message``. A head that merely differs from the base proves nothing: another
     writer may have committed since, so only this attempt's own message counts.
@@ -1487,7 +1488,7 @@ def committed_snapshot(store_path: Path, commit_message: str, base_snapshot_id: 
     if not store_path.exists():
         return None
     repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
-    for snapshot in repo.ancestry(branch="main"):
+    for snapshot in repo.ancestry(branch=WRITE_BRANCH):
         if base_snapshot_id is not None and snapshot.id == base_snapshot_id:
             return None
         if snapshot.message == commit_message:
