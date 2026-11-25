@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -61,6 +62,9 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
     records = {record.dataset_id: record for record in ingestion_services._load_records()}
     districts = Path(str(records["districts"].path))
     table = Path(records["rain_districts"].asset_paths[0])
+    # Written a day ago; what follows is newer than them, and older than the grace period.
+    for path in (data / "catalog").rglob("*.p*"):
+        os.utime(path, (time.time() - 86400, time.time() - 86400))
 
     # The first half of each write, the file, with no record after it: what a process stopped
     # between the two leaves.
@@ -79,9 +83,17 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
         id_property="orgUnitCode",
     )
 
+    # Older than the grace period, as after a restart; a reader may still hold a younger one.
+    for path in (stopped_vector, stopped_table, unrecorded):
+        os.utime(path, (time.time() - 3600, time.time() - 3600))
+    fresh, _count, _geometry = feature_store.write_feature_collection(
+        dataset_id="towns", features={"type": "FeatureCollection", "features": [_box("T1")]}, id_property="orgUnitCode"
+    )
+
     with TestClient(app):  # the writer starts
         pass
 
     assert not stopped_vector.exists() and not stopped_table.exists() and not unrecorded.exists()
+    assert fresh.exists(), "a file younger than the grace period waits for the next start"
     assert districts.exists() and table.exists(), "the files the records name stay"
     assert TestClient(app).get("/features/districts/data.parquet").status_code == 200

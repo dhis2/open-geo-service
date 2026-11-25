@@ -1835,8 +1835,13 @@ def remove_files_no_record_names() -> int:
     A vector or table write puts its new file, then the record naming it. A write stopped in
     between leaves a file no record names, newer than every file a record names in its folder.
     Run by the writer at startup, when no write is in progress. An older file no record names is
-    a replaced version, which `shared.versions` removes once its grace period has passed.
+    a replaced version, which `shared.versions` removes once its grace period has passed. A file
+    younger than that grace period is left too: a reader may have resolved a record that named it,
+    such as a first publication that failed and was rolled back; the next startup removes it.
     """
+    from open_geo_service.shared.versions import SUPERSEDED_FILE_GRACE_SECONDS
+
+    settled = datetime.now(UTC) - timedelta(seconds=SUPERSEDED_FILE_GRACE_SECONDS)
     objects = storage.objects()
     named: set[str] = set()
     for record in _load_records():
@@ -1854,7 +1859,8 @@ def remove_files_no_record_names() -> int:
         for files in folders.values():
             current = [listed.modified for listed in files if listed.key in named]
             for listed in files:
-                if listed.key not in named and (not current or listed.modified > max(current)):
+                unnamed = listed.key not in named and listed.modified < settled
+                if unnamed and (not current or listed.modified > max(current)):
                     logger.info("Removing '%s', which a write left without a record", listed.key)
                     objects.delete(listed.key)
                     removed += 1
