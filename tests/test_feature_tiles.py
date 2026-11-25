@@ -33,9 +33,8 @@ def _no_vector_tiles() -> None:
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Keep collections, records and thumbnails out of the developer's data directory."""
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
+    root = layout.kind_root(layout.Kind.VECTOR)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -206,7 +205,7 @@ def test_an_unpublished_collection_serves_no_tiles(client: TestClient) -> None:
 def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
-    _refresh()
+    _refresh()  # keeps the file it replaces
     current = Path(str(_refresh().path))  # removes it, past a zero grace period
 
     assert not first.exists()
@@ -219,6 +218,7 @@ def test_an_archive_that_cannot_be_removed_is_tried_again_later(monkeypatch: pyt
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
     archive = tiles.archive_path(first)
+    _refresh()  # keeps the file it replaces
     archive.unlink()
     archive.mkdir()  # an archive that cannot be unlinked
     (archive / "held").touch()

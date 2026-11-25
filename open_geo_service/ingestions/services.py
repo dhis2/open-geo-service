@@ -1742,6 +1742,19 @@ def _mark_collection_pending(store_path: Path, *, at: datetime | None = None) ->
         logger.warning("Could not mark a pending collection for '%s'", store_path, exc_info=True)
 
 
+def _adopt_legacy_marker(store_path: Path) -> None:
+    """Move a pending collection an earlier version marked beside the store to where the sweep looks."""
+    legacy = store_path.with_name(f"{store_path.name}.gc-pending")
+    if not legacy.is_file():
+        return
+    marker = _collection_marker(store_path)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(marker)
+    except OSError:
+        logger.warning("Could not move the pending-collection marker '%s'", legacy, exc_info=True)
+
+
 def _move_collection_after_writes(store_path: Path) -> None:
     """Move a pending collection of *store_path* to its newest write, when that is later than the marker."""
     marker = _collection_marker(store_path)
@@ -1797,6 +1810,7 @@ def clean_up_interrupted_ingests() -> int:
         if not lock.acquire(blocking=False):
             continue
         try:
+            _adopt_legacy_marker(store_path)
             _move_collection_after_writes(store_path)
             changed += clean_up_interrupted_ingest(store_path)
         finally:

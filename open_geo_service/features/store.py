@@ -115,12 +115,12 @@ def collection_files(dataset_id: str) -> list[Path]:
     return sorted(root.glob(f"{dataset_id}.*.parquet")) if root.is_dir() else []
 
 
-def prune_superseded_files(dataset_id: str, *, keep: Iterable[Path]) -> None:
-    """Remove this collection's files that a newer one replaced more than the grace period ago.
+def prune_superseded_files(dataset_id: str, *, current: Path | None, replaced: Iterable[Path] = ()) -> None:
+    """Remove this collection's files that are no longer needed (`shared.versions.prune_superseded`).
 
-    `keep` is what `shared.versions.prune_superseded` keeps. Each file's vector tiles go with it.
+    Each file's vector tiles go with it.
     """
-    prune_superseded(collection_files(dataset_id), keep=keep, remove=_remove_version)
+    prune_superseded(collection_files(dataset_id), current=current, replaced=replaced, remove=_remove_version)
 
 
 def _remove_version(path: Path) -> None:

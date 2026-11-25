@@ -28,7 +28,7 @@ from open_geo_service.exports.base import (
 from open_geo_service.exports.report import ExportOutcome, ExportReport
 from open_geo_service.ingestions.schemas import ArtifactProvenance
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
-from open_geo_service.shared.urls import SEGMENT_SAFE_ID_PATTERN
+from open_geo_service.shared.urls import ID_RULE, SEGMENT_SAFE_ID_PATTERN, require_segment_safe_id
 from open_geo_service.shared.vectors import GEOMETRY_FIELD, SPATIAL_REDUCER_ATTR
 
 _PERIOD_FIELD = "t"
@@ -91,7 +91,7 @@ class TableExportPlugin(BaseExportPlugin):
                 "served at /tables/{id}/rows. A revised value replaces the previous one."
             ),
             fields=(
-                SettingsFormField(name="dataset_id", label="Dataset id", help_text="Letters, digits, '.', '_', '-'."),
+                SettingsFormField(name="dataset_id", label="Dataset id", help_text=f"Must {ID_RULE}."),
                 SettingsFormField(name="name", label="Name", help_text="Optional display name."),
             ),
         )
@@ -196,8 +196,9 @@ class TableExportPlugin(BaseExportPlugin):
             raise ValueError(f"Unsupported table mapping fields {unknown}")
         for field in ("dataset_id", "collection_id"):
             value = mapping.get(field)
-            if not isinstance(value, str) or not SEGMENT_SAFE_ID_PATTERN.fullmatch(value):
-                raise ValueError(f"table mapping requires {field}: letters, digits, '.', '_' or '-'")
+            if not isinstance(value, str):
+                raise ValueError(f"table mapping requires {field}")
+            require_segment_safe_id(value, f"table mapping {field}")
         for field in ("name", "period_type", "unit"):
             if field in mapping and not isinstance(mapping[field], str):
                 raise ValueError(f"table mapping {field} must be a string")

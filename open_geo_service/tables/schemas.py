@@ -27,7 +27,7 @@ import pyarrow as pa
 import yaml
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id, is_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,10 @@ def _parse_files(files: Iterable[Any], *, source: str) -> list[TableSchema]:
         declared = yaml.safe_load(file.read_text(encoding="utf-8"))
         if not isinstance(declared, list):
             raise ValueError(f"{source} ({file.name}) must contain a list of table schemas")
-        schemas += [parse_schema(item, source=f"{source} ({file.name})") for item in declared]
+        where = f"{source} ({file.name})"
+        schemas += [
+            parse_schema(item, source=where) for item in declared if not has_refused_id(item, "table schema", where)
+        ]
     return schemas
 
 

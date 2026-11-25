@@ -58,10 +58,11 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
     reprojected into a temporary copy first.
     """
     target = archive_path(collection_path)
-    staging = layout.staging_dir() / f"{target.name}.{uuid4().hex}.writing"
+    staging: Path | None = None
     try:
         import tylertoo
 
+        staging = layout.staging_dir() / f"{target.name}.{uuid4().hex}.writing"
         with tempfile.TemporaryDirectory(prefix="geoservice-tiles-") as scratch:
             source = collection_path
             if canonical_crs_code(crs) not in _TILEABLE_CRS:
@@ -79,7 +80,8 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
         logger.warning("Could not build vector tiles for feature collection '%s'", collection_id, exc_info=True)
         return None
     finally:
-        staging.unlink(missing_ok=True)
+        if staging is not None:
+            staging.unlink(missing_ok=True)
     return target
 
 

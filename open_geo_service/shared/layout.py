@@ -75,6 +75,15 @@ def thumbnail(kind: Kind, dataset_id: str) -> Path:
     return local(f"thumbnails/{dataset_id}.png")
 
 
+def find_thumbnail(dataset_id: str) -> Path | None:
+    """The thumbnail of *dataset_id*, whichever its kind, or None when it has none."""
+    for kind in Kind:
+        path = thumbnail(kind, dataset_id)
+        if path.is_file():
+            return path
+    return None
+
+
 def staging_dir() -> Path:
     """A folder for files being written, which are then moved into place with `os.replace`.
 

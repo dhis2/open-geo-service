@@ -474,10 +474,14 @@ def test_a_killed_overwrite_leaves_the_store_readable(
     assert any(branch.startswith("ogs-ingest-replacement-") for branch in _branches(store["path"]))
 
     # The next writer's startup cleans up, also for a store that is never ingested again, and
-    # moves the collection to start then, after everything the killed process wrote.
+    # moves the collection to start then, after everything the killed process wrote. A marker
+    # an earlier version left beside the store is moved to where the sweep looks first.
     marker = services._collection_marker(store["path"])
-    marker.write_text("2000-01-01T00:00:00+00:00")
+    marker.unlink(missing_ok=True)
+    legacy = store["path"].with_name("tg.icechunk.gc-pending")
+    legacy.write_text("2000-01-01T00:00:00+00:00")
     assert services.clean_up_interrupted_ingests() == 1
+    assert not legacy.exists()
     assert _branches(store["path"]) == {"main"}
     assert marker.read_text() > "2026", "the pending collection starts after what the killed process wrote"
     moved = marker.read_text()

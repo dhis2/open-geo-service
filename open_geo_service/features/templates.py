@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id, require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -209,9 +209,14 @@ def _load_from_dir(folder: Path) -> list[dict[str, Any]]:
                 file_templates = yaml.safe_load(f)
                 if not isinstance(file_templates, list):
                     raise ValueError(f"{file_path.name} must contain a list of feature templates")
-                for template in file_templates:
+                kept = [
+                    template
+                    for template in file_templates
+                    if not has_refused_id(template, "feature template", str(file_path))
+                ]
+                for template in kept:
                     _validate_feature_template(template, source=str(file_path))
-                templates.extend(file_templates)
+                templates.extend(kept)
         except Exception:
             logger.exception("Error loading %s", file_path.name)
             raise

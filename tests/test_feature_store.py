@@ -339,6 +339,43 @@ def test_a_file_current_until_a_refresh_stays_however_old_an_unregistered_file_a
     assert len(store.read_feature_collection(current)) == 2, "a reader holding the replaced record can still read it"
 
 
+def test_a_file_a_killed_refresh_left_does_not_shorten_the_grace_of_the_file_before_it() -> None:
+    """A file no record ever named is removed by the next refresh, so it cannot stand in as the
+    replacement of the current file and make that one look replaced long ago."""
+    current = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    _age(Path(str(current.path)), 1000)
+    orphan, _count, _geometry = store.write_feature_collection(
+        dataset_id="districts", features=_collection(), id_property="orgUnitCode"
+    )
+    _age(orphan, 500)
+
+    feature_services.refresh_feature_collection(
+        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
+    )
+    assert not orphan.exists()
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+
+    assert len(store.read_feature_collection(current)) == 2, "replaced moments ago, so still readable"
+
+
+def test_the_files_to_keep_are_found_behind_a_symlinked_data_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Records hold resolved paths; a listing of a symlinked folder does not."""
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    old, new = real / "old.parquet", real / "new.parquet"
+    old.touch()
+    new.touch()
+    _age(old, 10)
+
+    versions.prune_superseded((tmp_path / "link").glob("*.parquet"), current=new, replaced=[old])
+
+    assert old.exists()
+
+
 def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -35,7 +35,6 @@ def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
-    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
 
 

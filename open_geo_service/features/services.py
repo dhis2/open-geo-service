@@ -25,7 +25,6 @@ from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord, 
 from open_geo_service.publications.services import managed_dataset_id_for
 from open_geo_service.shared.licences import parse_licence
 from open_geo_service.shared.thumbnails import write_feature_thumbnail
-from open_geo_service.shared.versions import make_current
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +154,12 @@ def _refresh_feature_collection_locked(
         # becomes the newest again, so `written` goes one grace period after the rollback, and
         # the restored file one grace period after whatever replaces it next.
         _restore_records(dataset_id, prior_records)
-        for restored in previous:
-            if restored.is_file():
-                make_current(restored)
-        store.prune_superseded_files(dataset_id, keep=previous)
+        restored = previous[0] if previous and previous[0].is_file() else None
+        store.prune_superseded_files(dataset_id, current=restored)
         raise
     # Only now, with the record durable and pointing at `written`, can the files it
     # superseded go. A failure here leaves an orphan, not a wrong answer.
-    store.prune_superseded_files(dataset_id, keep=[written, *previous])
+    store.prune_superseded_files(dataset_id, current=written, replaced=previous)
     # Last, and never raising: a collection that cannot be drawn is still registered.
     tiles.build_archive(written, dataset_id, store_crs)
     write_feature_thumbnail(written, dataset_id)

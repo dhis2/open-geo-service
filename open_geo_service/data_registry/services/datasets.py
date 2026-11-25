@@ -15,7 +15,7 @@ from open_geo_service import config as api_config
 from open_geo_service.data_registry import recipes
 from open_geo_service.ingestions.schemas import parse_declared_artifact_version
 from open_geo_service.shared.time import SUPPORTED_PERIOD_TYPES
-from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id, require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -365,9 +365,14 @@ def _load_from_dir(folder: Path) -> list[dict[str, Any]]:
                 file_datasets = yaml.safe_load(f)
                 if not isinstance(file_datasets, list):
                     raise ValueError(f"{file_path.name} must contain a list of dataset templates")
-                for dataset in file_datasets:
+                kept = [
+                    dataset
+                    for dataset in file_datasets
+                    if not has_refused_id(dataset, "dataset template", str(file_path))
+                ]
+                for dataset in kept:
                     _validate_dataset_template(dataset, source=str(file_path))
-                datasets.extend(file_datasets)
+                datasets.extend(kept)
         except Exception:
             logger.exception("Error loading %s", file_path.name)
             raise

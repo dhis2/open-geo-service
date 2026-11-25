@@ -170,7 +170,8 @@ def write_rows(
             raise
         prune_superseded(
             _dataset_root(dataset_id).glob("*.parquet"),
-            keep=[written, *(Path(path) for path in (existing.asset_paths if existing else []))],
+            current=written,
+            replaced=[Path(path) for path in (existing.asset_paths if existing else [])],
         )
         return registered
 

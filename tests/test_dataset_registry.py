@@ -37,6 +37,31 @@ def test_dataset_registry_requires_sync_kind(monkeypatch: pytest.MonkeyPatch, tm
         datasets.list_datasets()
 
 
+def test_a_template_with_an_id_the_rule_refuses_is_skipped_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One template written under the older id rule must not take every other one down with it."""
+    (tmp_path / "saved.yaml").write_text(
+        """
+- id: rain.v2
+  name: Saved by openEO under the older rule
+  variable: value
+  sync:
+    kind: static
+- id: rain_v3
+  name: Saved under the current rule
+  variable: value
+  sync:
+    kind: static
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(datasets, "CONFIGS_DIR", tmp_path)
+
+    assert [dataset["id"] for dataset in datasets.list_datasets()] == ["rain_v3"]
+    assert "Skipping dataset template 'rain.v2'" in caplog.text
+
+
 def test_dataset_registry_rejects_unsupported_sync_kind(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

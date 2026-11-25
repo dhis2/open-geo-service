@@ -753,7 +753,7 @@ def test_the_collection_omits_the_thumbnail_when_there_is_none(client: TestClien
     assert "zarr" in payload["assets"]
 
 
-def test_the_route_serves_the_thumbnail(client: TestClient, _published: None) -> None:
+def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
     written = _write_a_thumbnail()
 
     response = client.get("/datasets/thumb_dataset/thumbnail.png")

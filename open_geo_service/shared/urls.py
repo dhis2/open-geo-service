@@ -179,6 +179,10 @@ an id is unroutable however it is written. `?`, `#` and space do survive escapin
 """
 
 
+ID_RULE = "start with a lowercase letter and carry only lowercase letters, digits, '_' or '-'"
+"""`SEGMENT_SAFE_ID_PATTERN` in words, for messages and form help."""
+
+
 def is_segment_safe_id(value: str) -> bool:
     """True when *value* can be a URL path segment that routes back to the same resource.
 
@@ -194,10 +198,28 @@ def require_segment_safe_id(value: str, what: str, where: str = "") -> str:
     if not is_segment_safe_id(value):
         place = f" in {where}" if where else ""
         raise ValueError(
-            f"invalid {what} {value!r}{place}; it becomes a URL path segment and a folder name, so it must "
-            "start with a lowercase letter and carry only lowercase letters, digits, '_' or '-'"
+            f"invalid {what} {value!r}{place}; it becomes a URL path segment and a folder name, so it must {ID_RULE}"
         )
     return value
+
+
+_SKIPPED_IDS: set[tuple[str, str]] = set()
+
+
+def has_refused_id(declared: object, what: str, source: str) -> bool:
+    """True when *declared*, a template or schema read from *source*, has an id the rule refuses.
+
+    For loaders, which skip such an entry rather than fail every entry beside it: one written
+    under an earlier, looser rule (an openEO `save_result` template, say) would otherwise take
+    the whole catalogue down. Logged once per process; a missing id is left to the loader.
+    """
+    declared_id = declared.get("id") if isinstance(declared, dict) else None
+    if not isinstance(declared_id, str) or not declared_id or is_segment_safe_id(declared_id):
+        return False
+    if (declared_id, source) not in _SKIPPED_IDS:
+        _SKIPPED_IDS.add((declared_id, source))
+        logger.warning("Skipping %s %r in %s: an id must %s; rename it", what, declared_id, source, ID_RULE)
+    return True
 
 
 def path_segment(value: str) -> str:
