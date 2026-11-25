@@ -852,9 +852,15 @@ def write_to_icechunk_store(
         pyramid = create_pyramid(
             ds, levels=levels, x_dim=x_dim, y_dim=y_dim, method=cast(CoarseningMethod, composable_method)
         )
+        # An encoding given to the write replaces the variable's own, so carry its CF keys over:
+        # `fetched_at` is float64 seconds (FETCHED_AT_ENCODING), not whole days.
+        time_coord_encodings = {
+            name: {key: value for key, value in ds[name].encoding.items() if key in ("units", "calendar", "dtype")}
+            for name in time_coords
+        }
         for level_encoding in pyramid.encoding.values():
-            for name in time_coords:
-                level_encoding[name] = {"chunks": (_ROOT_TIME_COORD_MAX_CHUNK,)}
+            for name, encoding in time_coord_encodings.items():
+                level_encoding[name] = {**encoding, "chunks": (_ROOT_TIME_COORD_MAX_CHUNK,)}
         # Pyramid.write() writes the root group attributes from ``pyramid.attrs``,
         # so merge the GeoZarr conventions (multiscales / proj / spatial) in here.
         pyramid.attrs.update(geozarr_attrs)

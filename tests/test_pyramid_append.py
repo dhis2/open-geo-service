@@ -329,7 +329,7 @@ def test_every_level_keeps_its_time_coordinates_in_blocks_through_appends_and_re
     _ingest(state, "2026-01-05")
     assert_blocks(5)
 
-    state["now"] = datetime(2026, 5, 1, tzinfo=UTC)
+    state["now"] = datetime(2026, 5, 1, 13, 30, tzinfo=UTC)  # not midnight: fetched_at keeps seconds
     state["plugin"].final = {"2026-01-02"}
     _ingest(state, "2026-01-05", refresh_periods=["2026-01-02"])
     assert_blocks(5)
