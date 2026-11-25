@@ -374,6 +374,8 @@ ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, conso
 
 Open the `published` branch, which is what GeoService serves; `main` can hold a sync in progress.
 
+GDAL opens it through its `repo` file: `gdalinfo "ICECHUNK:/vsicurl/http://127.0.0.1:9000/icechunk/chirps3_precipitation_daily/repo"`.
+
 Both endpoints are advertised as `assets` in the STAC collection:
 
 ```json
@@ -384,7 +386,7 @@ Both endpoints are advertised as `assets` in the STAC collection:
     "xarray:open_kwargs": { "consolidated": true }
   },
   "icechunk": {
-    "href": "https://host/icechunk/chirps3_precipitation_daily",
+    "href": "https://host/icechunk/chirps3_precipitation_daily/",
     "type": "application/octet-stream",
     "xarray:open_kwargs": { "zarr_format": 3, "consolidated": false }
   },

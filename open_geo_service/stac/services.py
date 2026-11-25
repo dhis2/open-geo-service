@@ -407,12 +407,14 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         collection_payload["stac_extensions"] = sorted({*collection_payload["stac_extensions"], FILE_EXTENSION})
     if artifact.format == ArtifactFormat.ICECHUNK:
         collection_payload["assets"]["icechunk"] = {
-            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}"),
+            # The repository's directory, with its slash, so no client is redirected to it.
+            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/"),
             "type": "application/octet-stream",
             "title": "Icechunk store (native SDK access)",
             "description": (
                 "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
-                "JavaScript, with the dataset's version history."
+                "JavaScript, with the dataset's version history. GDAL opens it through its repo file: "
+                "ICECHUNK:/vsicurl/<href>repo."
             ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
