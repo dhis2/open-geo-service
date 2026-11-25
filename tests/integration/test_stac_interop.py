@@ -21,6 +21,7 @@ Manual setup example:
 
 import os
 import socket
+from urllib.parse import urljoin
 
 import httpx
 import pytest
@@ -34,15 +35,19 @@ def test_openeo_can_load_stac_collection() -> None:
     base_url = os.getenv("STAC_BASE_URL", "http://127.0.0.1:9000").rstrip("/")
     dataset_id = os.getenv("STAC_DATASET_ID")
 
-    catalog_url = f"{base_url}/stac/catalog.json"
+    # Rasters have their own sub-catalog; its children are their collections.
+    catalog_url = f"{base_url}/stac/rasters/catalog.json"
     with httpx.Client(timeout=10.0) as client:
         catalog_response = client.get(catalog_url)
         catalog_response.raise_for_status()
         catalog = catalog_response.json()
         assert isinstance(catalog, dict)
 
+        # Resolved against the catalog, whether written relative or absolute.
         child_links = [
-            link for link in catalog.get("links", []) if isinstance(link, dict) and link.get("rel") == "child"
+            {**link, "href": urljoin(catalog_url, str(link.get("href")))}
+            for link in catalog.get("links", [])
+            if isinstance(link, dict) and link.get("rel") == "child"
         ]
         assert child_links, "Catalog returned no child collection links"
 
@@ -50,7 +55,7 @@ def test_openeo_can_load_stac_collection() -> None:
             collection_href = child_links[0].get("href")
             assert isinstance(collection_href, str)
         else:
-            suffix = f"/stac/{dataset_id}/collection.json"
+            suffix = f"/stac/rasters/{dataset_id}/collection.json"
             collection_href = next(
                 (
                     link.get("href")
