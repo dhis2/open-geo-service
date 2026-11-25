@@ -63,6 +63,16 @@ retain older periods already stored by Open Geo Service. Requests wholly within 
 coverage do not query the source. Extending backwards or repairing an existing gap
 requires the source to reproduce the complete union, including committed history.
 
+**`periods()` lists what the source says is available.** Read it from metadata (a
+catalogue, a file listing, an archive's time axis) rather than opening the data to check
+its values. A source can list periods shortly before their data is written: the framework
+does not store empty periods at the end of a run, and fetches them again on a later sync,
+while an empty period followed by one with data (water or cloud over the whole extent) is
+written as it is. See [Empty periods at the end of a run are not
+stored](architecture.md#empty-periods-at-the-end-of-a-run-are-not-stored). A period that is
+only partly written is stored as it is, so if a source fills a period in pieces, clamp
+`periods()` to the last complete one.
+
 **`fetch_period`** — fetches exactly one period and returns it as an `xarray.Dataset`
 normalized to `(t, y, x)`. Write it as a regular (blocking) method and the framework runs
 it in a worker thread, so ordinary blocking I/O is fine; the framework appends the result

@@ -20,10 +20,11 @@ import inspect
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import xarray as xr
 import zarr
 
@@ -62,6 +63,9 @@ class StreamingIngestResult:
     store_path: Path
     period_type: str | None
     periods_written: int
+    # Periods at the end of the run whose values were all missing, and so were not kept. A later
+    # sync fetches them again.
+    held_back: list[str] = field(default_factory=list)
 
 
 def _strip_cf_encoding(ds: xr.Dataset, period_type: str, *, time_dim: str) -> None:
@@ -82,6 +86,20 @@ def _strip_cf_encoding(ds: xr.Dataset, period_type: str, *, time_dim: str) -> No
         ds[time_dim].encoding.update({"units": units, "dtype": "int32"})
 
 
+def _nodata_of(da: xr.DataArray) -> Any:
+    """The variable's no-data sentinel, read before `_strip_cf_encoding` removes it."""
+    return da.encoding.get("_FillValue", da.attrs.get("_FillValue"))
+
+
+def _all_values_missing(da: xr.DataArray) -> bool:
+    """Whether every cell is NaN or the no-data sentinel, which an integer raster keeps unmasked."""
+    missing = da.isnull()
+    nodata = _nodata_of(da)
+    if nodata is not None and not np.isnan(float(nodata)):
+        missing |= da == nodata
+    return bool(missing.all())
+
+
 def _grid_spec_from_dataset(ds: xr.Dataset, *, time_dim: str, x_dim: str, y_dim: str, crs: str) -> GridSpec:
     """Infer the store `GridSpec` from the first fetched period.
 
@@ -94,7 +112,7 @@ def _grid_spec_from_dataset(ds: xr.Dataset, *, time_dim: str, x_dim: str, y_dim:
     except StopIteration as exc:
         raise RuntimeError("Fetched dataset has no data variables to infer a GridSpec from") from exc
     da = ds[primary]
-    nodata = da.encoding.get("_FillValue", da.attrs.get("_FillValue"))
+    nodata = _nodata_of(da)
     try:
         shape = (int(ds.sizes[y_dim]), int(ds.sizes[x_dim]))
     except KeyError as exc:
@@ -246,6 +264,7 @@ async def run_streaming_ingest(
     # standard_name="unknown", or a unit conversion's dimensionally-generic "mm" for
     # what the template declares as a rate "mm/d"). Fields the template omits are kept.
     cf_attrs = cf_attrs_from_template(dataset)
+    template_variable = (dataset or {}).get("variable")
 
     # fetch_period may be a plain (blocking) method or an async one. Run blocking
     # implementations in a worker thread; await native coroutines directly.
@@ -265,6 +284,11 @@ async def run_streaming_ingest(
             break
         in_flight.append((period_id, asyncio.create_task(_fetch(period_id))))
     written = 0
+    # The periods at the end of the run whose values are all missing, and the snapshot before
+    # the first of them, to reset to. See "Empty periods at the end of a run are not stored" in
+    # docs/architecture.md.
+    empty_tail: list[str] = []
+    before_empty_tail: str | None = None
     try:
         while in_flight:
             if is_cancel_requested and is_cancel_requested():
@@ -288,8 +312,23 @@ async def run_streaming_ingest(
                 # so the nodata sentinel survives into the spec.
                 if spec is None:
                     spec = _grid_spec_from_dataset(ds, time_dim=time_dim, x_dim=x_dim, y_dim=y_dim, crs=prepared.crs)
+
+                # Before _strip_cf_encoding, which removes the _FillValue the check needs.
+                # to_zarr reads a variable without dask chunks whole anyway, so loading it first
+                # costs no extra memory and spares a second read of the source. A dask-backed
+                # period stays lazy, so to_zarr can still write it chunk by chunk.
+                if all(var.chunks is None for var in ds.data_vars.values()):
+                    ds.load()
+                checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
+                if _all_values_missing(ds[checked]):
+                    if not empty_tail:
+                        before_empty_tail = repo.lookup_branch(branch)
+                    empty_tail.append(period_id)
+                else:
+                    empty_tail.clear()
+
                 _strip_cf_encoding(ds, period_type, time_dim=spec.time_dim)
-                apply_cf_metadata(ds, cf_attrs, variable=(dataset or {}).get("variable"), overwrite=True)
+                apply_cf_metadata(ds, cf_attrs, variable=template_variable, overwrite=True)
                 try:
                     spatial_shape = (int(ds.sizes[spec.y_dim]), int(ds.sizes[spec.x_dim]))
                 except KeyError as exc:
@@ -359,7 +398,21 @@ async def run_streaming_ingest(
             next_period = next(period_queue, None)
             if next_period is not None:
                 in_flight.append((next_period, asyncio.create_task(_fetch(next_period))))
+
+        if empty_tail:
+            span = empty_tail[0] if len(empty_tail) == 1 else f"{empty_tail[0]} to {empty_tail[-1]}"
+            logger.warning(
+                "Every value is missing for %s at the end of this run, in %s: the source lists these periods "
+                "but may not have published their data yet. They were not kept; a later sync fetches them again.",
+                span,
+                store_path,
+            )
     finally:
+        if empty_tail:
+            # However the run ends, undo the empty periods at its end, the way ingestions/services.py
+            # rolls back a failed sync, so a later sync fetches them again.
+            assert before_empty_tail is not None
+            repo.reset_branch(branch, before_empty_tail)
         tasks_to_cancel = [task for _, task in in_flight if not task.done()]
         for task in tasks_to_cancel:
             task.cancel()
@@ -367,7 +420,12 @@ async def run_streaming_ingest(
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         close_ingestion_plugin(plugin)
 
-    return StreamingIngestResult(store_path=store_path, period_type=period_type, periods_written=written)
+    return StreamingIngestResult(
+        store_path=store_path,
+        period_type=period_type,
+        periods_written=written - len(empty_tail),
+        held_back=list(empty_tail),
+    )
 
 
 def run_streaming_ingest_sync(

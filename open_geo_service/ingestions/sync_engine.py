@@ -506,10 +506,21 @@ def run_sync(
         artifact.artifact_id,
         sync_detail.action,
     )
+    message = _sync_completed_message(sync_detail.action)
+    # The store ends before the plan when the newest periods were listed with no values yet and
+    # held back (see "Empty periods at the end of a run are not stored" in docs/architecture.md).
+    period_type = str(source_dataset["period_type"])
+    stored_end = artifact.coverage.temporal.end
+    target_end = _display_period(sync_detail.target_end, period_type)
+    if stored_end is not None and _display_period(stored_end, period_type) != target_end:
+        message += (
+            f" The source lists periods up to {target_end}, but those after "
+            f"{_display_period(stored_end, period_type)} have no values yet; a later sync fetches them."
+        )
     return SyncResponse(
         sync_id=artifact.artifact_id,
         status="completed",
-        message=_sync_completed_message(sync_detail.action),
+        message=message,
         dataset=get_dataset_fn(managed_dataset_id_for(artifact)),
         sync_detail=sync_detail,
     )

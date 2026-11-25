@@ -1362,6 +1362,7 @@ def _create_streaming_artifact(
             on_update_planned(_previous_coverage_end(dataset, plan))
         materialization_scope = request_scope.model_copy(update={"start": plan.start, "end": plan.end})
 
+        held_back: list[str] = []
         ingest_branch = "main"
         rematerialize = plan.action == SyncAction.REMATERIALIZE and store_path.exists()
         if rematerialize or (plan.action != SyncAction.NO_OP and plan.has_committed_periods):
@@ -1419,8 +1420,10 @@ def _create_streaming_artifact(
                 replace=replacement_branch is not None,
             )
             ingest_completed = True
+            held_back = result.held_back
             wrote_this_run = result.periods_written > 0
-            amended_periods = result.periods_written > 1
+            # Held-back periods were committed and then reset away, which also leaves data to collect.
+            amended_periods = result.periods_written > 1 or bool(held_back)
             if result.periods_written == 0 and (replacement_branch is not None or not store_path.exists()):
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
@@ -1438,10 +1441,12 @@ def _create_streaming_artifact(
         # the raw user request. The latter remains on the record as operation provenance.
         # A brand-new store may legitimately clamp its end to source availability; an
         # update was already planned from the source's exact available period sequence.
+        # A run that held back empty periods at its end (see "Empty periods at the end of a run are
+        # not stored" in docs/architecture.md) ends before the plan, like a first ingest may.
         if coverage.temporal.start is not None:
             coverage_matches_plan = (
                 _temporal_coverage_matches_request_scope(coverage.temporal, materialization_scope)
-                if plan.has_committed_periods
+                if plan.has_committed_periods and not held_back
                 else _temporal_coverage_matches_streaming_request_scope(coverage.temporal, materialization_scope)
             )
             if not coverage_matches_plan:
