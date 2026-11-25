@@ -250,6 +250,42 @@ name `type` outright. Only `divisions` is shipped as a template.
 them is a breach, and share-alike attaches to a publicly served derived database.
 
 
+## IPC — acute food insecurity (feature collection and table)
+
+| Property           | Value                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| **IDs**            | `ipc_areas` (polygons), `ipc_food_security` (table)                                         |
+| **Identity**       | The area name, as IPC's tables give it                                                      |
+| **Coverage**       | This instance's country, where IPC or Cadre Harmonisé analyses it                           |
+| **Licence**        | CC0-1.0 (public domain)                                                                     |
+| **Source**         | [IPC's datasets on the Humanitarian Data Exchange](https://data.humdata.org/organization/ipc) |
+
+IPC publishes each country's analyses on HDX itself, as `<country>-acute-food-insecurity-country-data`,
+found by the instance's country code. `ipc_areas` holds the areas of the latest analysis, from its
+GeoJSON; `ipc_food_security` holds people per phase (1 to 5, `3+`, `all`, in `class`) per area for
+every current analysis, dated by the first month of its analysis period. Fetch `ipc_areas` first.
+IPC's tables name an area only by its name, so the name is the id, and a row of an earlier
+analysis for an area since renamed or redrawn is refused.
+
+## WFP — market food prices (feature collection and table)
+
+| Property           | Value                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| **IDs**            | `wfp_markets` (points), `wfp_food_prices` (table)                                           |
+| **Identity**       | WFP's `market_id`                                                                           |
+| **Coverage**       | This instance's country, where WFP monitors markets                                         |
+| **Licence**        | CC-BY-3.0-IGO — attribution                                                                 |
+| **Source**         | [WFP's datasets on the Humanitarian Data Exchange](https://data.humdata.org/organization/wfp) |
+
+WFP publishes each country's market prices on HDX itself, as `wfp-food-prices-for-<country>`:
+a markets file and a prices file, found by the instance's country code. `wfp_markets` holds the
+markets as points; `wfp_food_prices` holds monthly prices per market, commodity, price type and
+`measure` (KG, L) in the `market_prices` schema, in the local currency (the table's unit) and in
+US dollars (`usd_price`). Fetch `wfp_markets` first. Prices report on markets rather than admin
+areas, so no admin codes are involved; WFP's admin names are kept on the markets but not relied
+on, as they can be wrong (Sierra Leone's Bo market is listed in Bonthe district). Prices are in
+the currency WFP reports, e.g. Sierra Leone's in old leones (`SLL`).
+
 ## DHIS2 — organisation units (feature collection)
 
 The built-in `dhis2` provider fetches organisation units with their boundaries from a DHIS2

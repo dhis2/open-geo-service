@@ -1,0 +1,69 @@
+# Prices of commodities per market and month, reporting on a collection of markets. The WFP food
+# price template (plugins/tables/wfp.yaml) writes it. The quantity a price is for is `measure`,
+# not `unit`: a column named `unit` holds the table's one unit, which here is its currency, in
+# the `currency` column. See "Table schemas" in docs/managed_data_api_guide.md.
+- id: market_prices
+  name: Market prices per month
+  description: Prices of commodities per market and month, in the local currency and in US dollars.
+  columns:
+    - name: collection_id
+      type: string
+      nullable: false
+      description: Id of the feature collection of markets; joins to its GeoParquet.
+    - name: feature_id
+      type: string
+      required: true
+      nullable: false
+      description: Id of the market; joins to the feature collection.
+    - name: feature_name
+      type: string
+      description: Name of the market when the price was written.
+    - name: dataset_id
+      type: string
+      nullable: false
+      description: Id of this table dataset.
+    - name: period_start
+      type: date
+      required: true
+      nullable: false
+      description: First day of the month the price is for.
+    - name: commodity
+      type: string
+      required: true
+      nullable: false
+      description: The commodity priced.
+    - name: commodity_category
+      type: string
+      description: The commodity's category, e.g. cereals and tubers.
+    - name: price_type
+      type: string
+      required: true
+      nullable: false
+      description: Where in the chain the price is paid, e.g. Retail or Wholesale.
+    - name: measure
+      type: string
+      required: true
+      nullable: false
+      description: Quantity the price is for, e.g. KG or L.
+    - name: price
+      type: double
+      required: true
+      represents: value
+      description: The price, in the table's currency.
+    - name: currency
+      type: string
+      represents: unit
+      description: ISO 4217 code of the currency the price is in.
+    - name: usd_price
+      type: double
+      unit: USD
+      represents: value
+      description: The price in US dollars, at the exchange rate of its month.
+  key:
+    - collection_id
+    - feature_id
+    - dataset_id
+    - period_start
+    - commodity
+    - price_type
+    - measure

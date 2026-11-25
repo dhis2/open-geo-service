@@ -756,7 +756,7 @@ last, period the source has. Rows are checked against the schema and written onc
 so a refused row leaves the table as it was. `POST /sync/{dataset_id}` fetches the periods after
 the table's last one; a table a pipeline computes has no template and refuses sync with 409.
 
-Plugins built on `FieldsTablePlugin`, such as the built-in one, read columns the same way: each
+Plugins built on `FieldsTablePlugin`, such as the built-in ones, read columns the same way: each
 schema column from the source field of the same name, or of the name `columns` maps it to, while
 `constants` gives a column one value for every row (`period_start: 2020` gives a source without a
 period field its year). Values are read as their column's type, an empty one is missing, and a
@@ -765,6 +765,12 @@ period may be a date or a period id (`2026-01`, `2026-W01`, `2026`).
 - `open_geo_service.plugins.tables.csv_file.CsvTablePlugin` reads one CSV file, once per ingestion
   or sync, from `path`: a file path relative to the config file, or an http(s) URL. Most files on
   the Humanitarian Data Exchange (data.humdata.org) can be read this way.
+- `open_geo_service.plugins.tables.ipc.IpcAreasPlugin` reads the analyses IPC publishes for the
+  extent's country, shipped as `ipc_food_security`; see
+  [Built-in datasets](built_in_datasets.md#ipc--acute-food-insecurity-feature-collection-and-table).
+- `open_geo_service.plugins.tables.wfp.WfpPricesPlugin` reads the market prices WFP publishes for
+  the extent's country, shipped as `wfp_food_prices`; see
+  [Built-in datasets](built_in_datasets.md#wfp--market-food-prices-feature-collection-and-table).
 
 Rows name their features by id, and the store refuses an id the collection lacks. Use boundaries
 of the same edition as the table: HDX's 2020 Sierra Leone population counts code Kambia and Port
