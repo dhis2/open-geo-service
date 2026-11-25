@@ -248,11 +248,21 @@ def test_the_zarr_asset_follows_the_configured_address(data: Path, monkeypatch: 
     )
     monkeypatch.delenv("ROOT_PATH")
 
-    # Without one, nothing absolute on the instance is written: no Zarr asset, no host address.
+    # Without one, nothing absolute on the instance is written: no Zarr asset, no host address,
+    # and no render drawing the Zarr asset. The rewrite reads the records once, not per document.
     monkeypatch.delenv("GEOSERVICE_BASE_URL")
+    reads: list[None] = []
+    read = ingestion_services._latest_published_artifacts_by_dataset
+    monkeypatch.setattr(
+        ingestion_services, "_latest_published_artifacts_by_dataset", lambda: reads.append(None) or read()
+    )
     catalog_files.write_catalog()
+    assert len(reads) == 1
     written = json.loads(collection.read_text())
     assert "zarr" not in written["assets"] and written["assets"]["icechunk"]["href"] == "./rain.icechunk/"
+    for render in written.get("renders", {}).values():
+        assert set(render["assets"]) <= set(written["assets"]), render
+    assert "renders" in written or stac_services.RENDER_EXTENSION not in written["stac_extensions"]
     assert [provider.get("url") for provider in written["providers"] if "host" in provider["roles"]] == [None]
 
 
@@ -268,6 +278,12 @@ def test_stac_serves_the_files_and_the_data_of_published_datasets_only(
 
     served = client.get("/stac/vectors/districts/collection.json")
     assert served.content == (data / "catalog" / "vectors" / "districts" / "collection.json").read_bytes()
+    # A document and a store's `repo` change in place, so they are revalidated; a chunk never changes.
+    assert served.headers["cache-control"] == "no-cache"
+    assert client.get("/stac/rasters/rain/rain.icechunk/repo").headers["cache-control"] == "no-cache"
+    snapshot = next((data / "catalog" / "rasters" / "rain" / "rain.icechunk" / "snapshots").iterdir())
+    immutable = client.get(f"/stac/rasters/rain/rain.icechunk/snapshots/{snapshot.name}")
+    assert immutable.headers["cache-control"] == "max-age=31536000, immutable"
     assert client.head("/stac/README.md").headers["content-type"].startswith("text/markdown")
     data_file = next((data / "catalog" / "vectors" / "districts").glob("*.parquet"))
     ranged = client.get(f"/stac/vectors/districts/{data_file.name}", headers={"Range": "bytes=0-3"})

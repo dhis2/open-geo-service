@@ -1294,6 +1294,14 @@ def test_media_type_cache_is_keyed_by_artifact_not_store_path(
     client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
     assert len(detections) == 3, "a store overwritten under the same artifact id is described again"
 
+    # A publication or rollback moves the published snapshot without writing the record anew.
+    published = rewritten.model_copy(
+        update={"publication": rewritten.publication.model_copy(update={"snapshot_id": "SNAPSHOT2"})}
+    )
+    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[published]))
+    client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
+    assert len(detections) == 4, "a newly published snapshot is described again"
+
 
 def test_cf_extension_is_not_declared_when_no_cf_attrs_are_present(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
