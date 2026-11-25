@@ -553,8 +553,9 @@ def test_startup_recovery_retries_after_the_store_lock_is_released(
     finally:
         lock.release()
 
+    # Wait for the event, not the status: the watcher hands the event over after it saves the job.
     deadline = time.monotonic() + 5
-    while _record("job-1").status != OpenEOJobStatus.FINISHED and time.monotonic() < deadline:
+    while not received and time.monotonic() < deadline:
         time.sleep(0.01)
 
     assert received == [_assert_one_published_event("job-1")]
@@ -690,8 +691,9 @@ def test_failed_publication_completion_keeps_retrying_after_startup(
     assert _record("job-1").publication is not None
     failing.on = False
 
+    # Wait for the event, not the status: the watcher hands the event over after it saves the job.
     deadline = time.monotonic() + 5
-    while _record("job-1").status != OpenEOJobStatus.FINISHED and time.monotonic() < deadline:
+    while not received and time.monotonic() < deadline:
         time.sleep(0.01)
 
     assert received == [_assert_one_published_event("job-1")]
