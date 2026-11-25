@@ -48,7 +48,7 @@ curl -s -X POST http://127.0.0.1:9000/ingestions \
 
 Both sources serve the most recent days as ERA5-Land-T, computed from ECMWF's preliminary ERA5T, and replace them with final values about two months after the month in question. A month built from such days is preliminary too. Every dataset on this page therefore declares `sync.refresh_after: P4M`: a sync fetches a period again once, four months after it ends, which leaves margin over the source's usual delay. See [Preliminary periods](architecture.md#preliminary-periods). A managed dataset lists the periods still preliminary in `provisional_periods`.
 
-The monthly anomalies (`era5land_*_monthly_anomaly_1991_2020`) follow their monthly dataset, so a sync that replaces preliminary months recomputes them. The daily anomalies are computed once and keep the values they were computed from; run them again to pick up final values.
+The monthly anomalies (`era5land_*_monthly_anomaly_1991_2020`) follow their monthly dataset, so a sync that replaces preliminary months recomputes them. The daily anomalies are not kept current: they are computed when run and do not follow their daily dataset, since a refresh recomputes the whole series, decades of daily data on every daily sync. Run them again to pick up new or final values.
 
 A store ingested before this existed records no fetch times, so its preliminary days are taken as final. Ingest it again to have them replaced.
 
