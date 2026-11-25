@@ -83,7 +83,6 @@ def plan_table_sync(
         "sync_kind": SyncKind.TEMPORAL,
         "current_start": current_start,
         "current_end": current_end,
-        "target_end_source": "request" if target else "source",
     }
     if not periods:
         return SyncDetail(
@@ -92,13 +91,16 @@ def plan_table_sync(
             reason="up_to_date",
             message=f"The source has no periods after {current_end}.",
             target_end=target or current_end,
+            target_end_source="request" if target else "source",
         )
     return SyncDetail(
         **common,
         action=SyncAction.APPEND,
         reason="new_periods",
         message=f"Fetch {len(periods)} new periods, {periods[0]} to {periods[-1]}.",
-        target_end=target or periods[-1],
+        # What is fetched, which is short of a requested end the source does not reach yet.
+        target_end=periods[-1],
+        target_end_source="request" if target == periods[-1] else "source",
         delta_start=periods[0],
         delta_end=periods[-1],
         periods=periods,

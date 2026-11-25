@@ -71,9 +71,7 @@ class FieldsTablePlugin(BaseTablePlugin):
         if unknown := sorted((set(self.columns) | set(constants or {})) - set(declared)):
             raise ValueError(f"columns or constants name columns schema '{self.schema.id}' lacks: {unknown}")
         # Read as a field is, so `period_start: 2020` gives a source without a period field its year.
-        self.constants = {
-            name: _typed(str(value), declared[name], "constants") for name, value in (constants or {}).items()
-        }
+        self.constants = {name: _typed(value, declared[name], "constants") for name, value in (constants or {}).items()}
         self._by_period: dict[str, list[dict[str, Any]]] = {}
 
     def records(self, start: date | None, end: date | None) -> Iterable[tuple[str, Mapping[str, Any]]]:
@@ -89,36 +87,43 @@ class FieldsTablePlugin(BaseTablePlugin):
         first = normalize_period_string(start, self.period_type) if start else None
         last = normalize_period_string(end, self.period_type) if end else None
         bounds = [parse_period_string_to_datetime(period).date() if period else None for period in (first, last)]
-        self._by_period = self._grouped(self.records(bounds[0], _last_day(bounds[1], self.period_type)))
-        return [
-            period
-            for period in sorted(self._by_period)
-            if (first is None or period >= first) and (last is None or period <= last)
-        ]
+        records = self.records(bounds[0], _last_day(bounds[1], self.period_type))
+        self._by_period = self._grouped(records, first, last)
+        return sorted(self._by_period)
 
     def fetch_period(self, period_id: str) -> list[dict[str, Any]]:
         return self._by_period.get(period_id, [])
 
-    def _grouped(self, records: Iterable[tuple[str, Mapping[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+    def _grouped(
+        self, records: Iterable[tuple[str, Mapping[str, Any]]], first: str | None, last: str | None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """The rows of the periods from *first* to *last*, by period."""
+        period_name = self.schema.represented_by("period_start")
+        period_column = self.schema.column(period_name) if period_name else None
+        if period_column is None:
+            raise ValueError(f"schema '{self.schema.id}' has no period column to group rows by")
+        period_field = self.columns.get(period_column.name, period_column.name)
         read = [
             (column, self.columns.get(column.name, column.name))
             for column in self.schema.columns
-            if column.name not in self.constants
+            if column.name not in self.constants and column != period_column
         ]
-        period_column = str(self.schema.represented_by("period_start"))
         by_period: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for where, record in records:
             if missing := sorted(set(self.columns.values()) - set(record)):
                 raise ValueError(f"{where}: no fields {missing}")
-            row = dict(self.constants)
+            start = self.constants.get(period_column.name) or _typed(record.get(period_field), period_column, where)
+            if not isinstance(start, date):
+                raise ValueError(f"{where}: no period in '{period_field}'")
+            period = datetime_to_period_string(datetime(start.year, start.month, start.day), self.period_type)
+            # Read the rest only within the bounds, so a bad value in another period does not block these.
+            if (first is not None and period < first) or (last is not None and period > last):
+                continue
+            row = {**self.constants, period_column.name: start}
             for column, field in read:
                 if field in record:
                     row[column.name] = _typed(record[field], column, where)
-            period = row.get(period_column)
-            if not isinstance(period, date):
-                raise ValueError(f"{where}: no period in '{self.columns.get(period_column, period_column)}'")
-            moment = datetime(period.year, period.month, period.day)
-            by_period[datetime_to_period_string(moment, self.period_type)].append(row)
+            by_period[period].append(row)
         return dict(by_period)
 
 

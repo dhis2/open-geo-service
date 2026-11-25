@@ -838,7 +838,9 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
     assert listed["district_rainfall"]["itemType"] == "table"
     assert listed["district_rainfall"]["schema"] == "aggregation"
     assert "Rainfall by district" in client.get("/data-sources", params={"f": "html"}).text
-    assert "Feature collection" in client.get("/data-sources/district_rainfall", params={"f": "html"}).text
+    page = client.get("/data-sources/district_rainfall", params={"f": "html"}).text
+    assert "Feature collection" in page
+    assert 'name="overwrite"' not in page  # rows of a fetched period replace the stored ones; others stay
     assert client.get("/data-sources/district_rainfall").json()["has_data"] is False
 
     assert client.post("/ingestions", json={"dataset_id": "district_rainfall"}).status_code == 200
@@ -869,6 +871,8 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
     with (plugins_dir / "rainfall.csv").open("a", encoding="utf-8") as csv_file:
         csv_file.write("D1,2026-03-31,40,3\n")
     assert client.get("/sync/district_rainfall/plan").json()["delta_start"] == "2026-03"
+    plan = client.get("/sync/district_rainfall/plan", params={"end": "2026-12"}).json()
+    assert (plan["target_end"], plan["target_end_source"]) == ("2026-03", "source")
     synced = client.post("/sync/district_rainfall", json={}).json()
     assert (synced["status"], synced["dataset"]["extent"]["temporal"]["end"]) == ("completed", "2026-03")
 
@@ -877,6 +881,7 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
     refused = client.post("/ingestions", json={"dataset_id": "district_rainfall", "start": "2026-04"})
     assert refused.status_code == 400
     assert "CSV line 7: value 'lots' is not a double" in refused.json()["detail"]
+    assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "end": "2026-03"}).status_code == 200
 
     _write([_row("D1", 1.0)])
     assert client.post("/sync/precip_districts", json={}).status_code == 409
