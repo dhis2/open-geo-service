@@ -528,16 +528,17 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
 
 
 @pytest.mark.parametrize(
-    ("tokens", "error"),
+    ("tokens", "gate_reads", "error"),
     [
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_UNSET", "tier": "operator"}], "GEOSERVICE_TEST_UNSET is not set"),
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_SHORT", "tier": "operator"}], "shorter than 32"),
-        ([{"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "admin"}], "invalid"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_UNSET", "tier": "operator"}], False, "UNSET is not set"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_SHORT", "tier": "operator"}], False, "shorter than 32"),
+        ([{"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "admin"}], False, "invalid"),
         (
             [
                 {"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "operator"},
                 {"id": "a", "token_env": "GEOSERVICE_TEST_CLIENT_TOKEN", "tier": "operator"},
             ],
+            False,
             "id is used by an earlier token",
         ),
         (
@@ -545,21 +546,22 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
                 {"id": "a", "token_env": "GEOSERVICE_TEST_OPERATOR_TOKEN", "tier": "operator"},
                 {"id": "b", "token_env": "GEOSERVICE_TEST_SAME", "tier": "operator"},
             ],
+            False,
             "secret in GEOSERVICE_TEST_SAME is used by an earlier token",
         ),
-        # With gate_reads (set when no token is given), which would leave reads open while seeming private.
-        ([], "gate_reads needs at least one token"),
+        # Gating with no token would leave reads open while seeming private.
+        ([], True, "gate_reads needs at least one token"),
     ],
 )
 def test_an_unusable_token_refuses_startup(
-    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], error: str
+    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], gate_reads: bool, error: str
 ) -> None:
     monkeypatch.setenv("GEOSERVICE_TEST_OPERATOR_TOKEN", OPERATOR_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_SHORT", "short")
     monkeypatch.setenv("GEOSERVICE_TEST_SAME", OPERATOR_SECRET)
     monkeypatch.delenv("GEOSERVICE_TEST_UNSET", raising=False)
-    _configure(monkeypatch, tokens, gate_reads=not tokens)
+    _configure(monkeypatch, tokens, gate_reads=gate_reads)
 
     with pytest.raises(ValueError, match=error) as raised:
         configured_tokens()
