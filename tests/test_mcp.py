@@ -18,6 +18,10 @@ from open_geo_service.main import app
 from open_geo_service.mcp_server import tools
 from open_geo_service.openeo import execution
 from open_geo_service.stac import services as stac_services
+from tests.test_authentication import (
+    CLIENT_SECRET,
+    auth_on,  # noqa: F401  # pyright: ignore[reportUnusedImport]
+)
 from tests.test_openeo_vector_collections import (
     _rain_cube,  # pyright: ignore[reportPrivateUsage]
     _raster_record,  # pyright: ignore[reportPrivateUsage]
@@ -86,17 +90,21 @@ def mcp(mcp_enabled: None) -> TestClient:
 Rpc = Callable[..., dict[str, Any]]
 
 
-def _rpc(client: TestClient, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def _rpc(
+    client: TestClient, method: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None
+) -> dict[str, Any]:
     response = client.post(
-        "/mcp", headers=_HEADERS, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+        "/mcp",
+        headers={**_HEADERS, **(headers or {})},
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}},
     )
     assert response.status_code == 200, response.text
     return response.json()
 
 
-def _call(client: TestClient, tool: str, **arguments: Any) -> dict[str, Any]:
+def _call(client: TestClient, tool: str, headers: dict[str, str] | None = None, **arguments: Any) -> dict[str, Any]:
     """A tool's result: its structured content, or the error text when the tool failed."""
-    result = _rpc(client, "tools/call", {"name": tool, "arguments": arguments})["result"]
+    result = _rpc(client, "tools/call", {"name": tool, "arguments": arguments}, headers)["result"]
     if result.get("isError"):
         return {"error": result["content"][0]["text"]}
     return result["structuredContent"]
@@ -147,6 +155,17 @@ def test_a_read_only_instance_still_serves_mcp(read_only_mcp: None, rain: None) 
     areas = _call(client, "list_areas", collection_id="regions")
 
     assert [area["id"] for area in areas["areas"]] == ["EAST", "WEST"]
+
+
+def test_tools_act_with_the_callers_credential(auth_on: None, mcp: TestClient, rain: None) -> None:  # noqa: F811
+    """A computation runs POST /result, which needs the authenticated tier."""
+    anonymous = _call(mcp, "get_timeseries", dataset_id="rain", lon=0.5, lat=1.5)
+    signed = _call(
+        mcp, "get_timeseries", {"Authorization": f"Bearer {CLIENT_SECRET}"}, dataset_id="rain", lon=0.5, lat=1.5
+    )
+
+    assert "401" in anonymous["error"]
+    assert [row["value"] for row in signed["rows"]] == [1.0, 1.0]
 
 
 # --- the tools ------------------------------------------------------------------------------

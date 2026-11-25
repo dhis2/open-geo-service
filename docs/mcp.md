@@ -28,7 +28,7 @@ Give the client the instance's `/mcp` address:
 
 - **A cloud client** (claude.ai, ChatGPT) connects from the provider's servers, not from your computer, so it needs the instance at a public HTTPS address. An instance on a laptop needs a tunnel or a hosted deployment for these.
 
-The endpoint has no authentication, like the rest of the API.
+`/mcp` is public. With [authentication](instance_guide.md#authentication) on, each tool runs with the token the client sends, so `get_timeseries` and `get_zonal_statistics`, which compute through `POST /result`, need a token of the authenticated tier, and with reads gated, every tool needs one.
 
 ## What it offers
 

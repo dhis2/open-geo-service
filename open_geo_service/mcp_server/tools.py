@@ -142,13 +142,21 @@ class ZonalResult(_Provenance):
 
 @asynccontextmanager
 async def _ocs() -> AsyncGenerator[httpx.AsyncClient]:
-    """A client for this instance's API, reached in-process at the address the call came in on."""
+    """A client for this instance's API, reached in-process at the address the call came in on.
+
+    It carries the caller's credential, so a tool may do what the caller may and no more.
+    """
     scope = current_scope.get()
     prefix = str(scope.get("root_path", "")).rstrip("/")
-    url = Request(scope).url
+    request = Request(scope)
+    url = request.url
+    authorization = request.headers.get("authorization")
     transport = httpx.ASGITransport(app=scope["app"], root_path=prefix)
     async with httpx.AsyncClient(
-        transport=transport, base_url=f"{url.scheme}://{url.netloc}{prefix}", timeout=None
+        transport=transport,
+        base_url=f"{url.scheme}://{url.netloc}{prefix}",
+        headers={"Authorization": authorization} if authorization else None,
+        timeout=None,
     ) as client:
         yield client
 
@@ -187,11 +195,11 @@ def _raster_variable(collection: dict[str, Any]) -> tuple[str, str | None]:
     return variable, (variables.get(variable) or {}).get("unit")
 
 
-def _summarise(collection: dict[str, Any], links: dict[str, str]) -> DatasetSummary:
+def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], links: dict[str, str]) -> DatasetSummary:
     summary = DatasetSummary(
         id=collection["id"],
         title=collection.get("title") or collection["id"],
-        kind="raster" if "zarr" in (collection.get("assets") or {}) else "areas",
+        kind=kind,
         description=collection.get("description"),
         dataset_url=links["dataset_url"],
         stac_url=links["stac_url"],
@@ -220,14 +228,19 @@ async def _catalogue(client: httpx.AsyncClient) -> list[DatasetSummary]:
     ids = [
         unquote(str(link["href"]).rsplit("/", 2)[-2]) for link in catalog.get("links", []) if link.get("rel") == "child"
     ]
-    # The records, not the STAC documents, know when each dataset was last updated.
-    records = await _get_json(client, "/datasets?f=json")
-    last_updated = {item["dataset_id"]: item.get("last_updated") for item in records.get("items", [])}
-    summaries = []
+    # The records, not the STAC documents, know what each dataset holds and when it was last
+    # updated. Table datasets are left out: no tool reads them yet.
+    records = {item["dataset_id"]: item for item in (await _get_json(client, "/datasets?f=json")).get("items", [])}
+    kinds: dict[str, Literal["raster", "areas"]] = {"coverage": "raster", "feature": "areas"}
+    summaries: list[DatasetSummary] = []
     for dataset_id in ids:
+        record = records.get(dataset_id, {})
+        kind = kinds.get(record.get("itemType", "coverage"))
+        if kind is None:
+            continue
         collection = await _get_json(client, collection_path(dataset_id))
-        summary = _summarise(collection, _links(client, dataset_id))
-        summary.last_updated = last_updated.get(dataset_id)
+        summary = _summarise(collection, kind, _links(client, dataset_id))
+        summary.last_updated = record.get("last_updated")
         summaries.append(summary)
     return summaries
 
