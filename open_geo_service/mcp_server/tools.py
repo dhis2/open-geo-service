@@ -118,7 +118,9 @@ class _Provenance(BaseModel):
     period_dimension: str | None = Field(
         description="The dimension `period` comes from: 't' for time, or e.g. 'month' for a climate normal."
     )
-    process_graph: dict[str, Any] = Field(description="The openEO process graph OGS executed, for reproduction.")
+    process_graph: dict[str, Any] = Field(
+        description="The openEO process graph the instance executed, for reproduction."
+    )
     dataset_url: str
     stac_url: str
     map_url: str = Field(description="The dataset in the instance's map viewer, to show the user.")
@@ -174,7 +176,7 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Any:
     if response.status_code == 404:
         raise ToolError(f"Not found: {path}. Use list_datasets to see what this instance holds.")
     if not response.is_success:
-        raise ToolError(f"OGS refused {path} ({response.status_code}): {_error_detail(response)}")
+        raise ToolError(f"The instance refused {path} ({response.status_code}): {_error_detail(response)}")
     return response.json()
 
 
@@ -249,7 +251,9 @@ async def _areas(client: httpx.AsyncClient, collection_id: str) -> list[Area]:
     record = await _get_json(client, f"/features/{collection_id}")
     response = await client.get(f"/features/{collection_id}/data.parquet")
     if not response.is_success:
-        raise ToolError(f"OGS refused the areas of {collection_id} ({response.status_code}): {_error_detail(response)}")
+        raise ToolError(
+            f"The instance refused the areas of {collection_id} ({response.status_code}): {_error_detail(response)}"
+        )
     table = pq.read_table(io.BytesIO(response.content))
     id_property = record["id_property"]
     names = table.column_names
@@ -287,7 +291,7 @@ async def _execute_table(
     """Run a process graph that saves CSV; return the period column's name and the rows."""
     response = await client.post("/result", json={"process": {"process_graph": graph}})
     if not response.is_success:
-        raise ToolError(f"OGS could not compute this ({response.status_code}): {_error_detail(response)}")
+        raise ToolError(f"The instance could not compute this ({response.status_code}): {_error_detail(response)}")
     reader = csv.DictReader(io.StringIO(response.text))
     columns = reader.fieldnames or []
     value_column = variable if variable in columns else columns[-1]
