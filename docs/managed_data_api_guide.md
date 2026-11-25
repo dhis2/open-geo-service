@@ -39,11 +39,9 @@ Operational note:
 - `GET /tables/{dataset_id}/rows`
 - `GET /tables/{dataset_id}/data.parquet`
 - `GET /stac/catalog.json`
-- `GET /stac/{dataset_id}/collection.json`
-- `GET /stac/README.md`
-- `GET /stac/AGENTS.md`
-- `GET /stac/{dataset_id}/README.md`
-- `GET /stac/{dataset_id}/AGENTS.md`
+- `GET /stac/{kind}/catalog.json`
+- `GET /stac/{kind}/{dataset_id}/collection.json`
+- `GET /stac/README.md`, `GET /stac/AGENTS.md`, and the same beside each sub-catalog and collection
 - `GET /zarr/{dataset_id}`
 - `GET /zarr/{dataset_id}/{relative_path}`
 - `GET /icechunk/{dataset_id}/{path}`
@@ -443,14 +441,20 @@ STAC examples:
 
 ```bash
 curl -s "http://127.0.0.1:9000/stac/catalog.json" | jq
-curl -s "http://127.0.0.1:9000/stac/chirps3_precipitation_daily/collection.json" | jq
+curl -s "http://127.0.0.1:9000/stac/rasters/catalog.json" | jq
+curl -s "http://127.0.0.1:9000/stac/rasters/chirps3_precipitation_daily/collection.json" | jq
 ```
+
+The root catalog links one sub-catalog per kind of dataset, `rasters`, `vectors` and `tables`, and
+each sub-catalog links its collections. A collection's id is its path in the catalog,
+`{kind}/{dataset_id}` (`rasters/chirps3_precipitation_daily`); in openEO `/collections` it is the
+dataset id alone.
 
 What this means:
 
 - `/stac` is the public STAC discovery surface for published datasets, raster and vector alike
 - `/collections` is the openEO collection listing, not a second STAC catalogue
-- dataset responses include `/stac/{dataset_id}/collection.json`
+- dataset responses include `/stac/{kind}/{dataset_id}/collection.json`
 
 ### Raster and feature collections are described differently
 

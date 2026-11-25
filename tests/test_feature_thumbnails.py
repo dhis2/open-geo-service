@@ -154,7 +154,7 @@ def test_the_thumbnail_is_served_and_advertised_in_stac(client: TestClient, monk
     assert served.status_code == 200
     assert served.headers["content-type"] == "image/png"
 
-    asset = client.get("/stac/districts/collection.json").json()["assets"]["thumbnail"]
+    asset = client.get("/stac/vectors/districts/collection.json").json()["assets"]["thumbnail"]
     assert asset["href"] == "http://testserver/datasets/districts/thumbnail.png"
     assert asset["roles"] == ["thumbnail"]
 
@@ -167,4 +167,4 @@ def test_a_collection_without_a_thumbnail_does_not_advertise_one(
     monkeypatch.setattr(ingestion_services, "_artifact_storage_exists", lambda _: True)
 
     assert not layout.thumbnail(layout.Kind.VECTOR, "districts").exists()
-    assert "thumbnail" not in client.get("/stac/districts/collection.json").json()["assets"]
+    assert "thumbnail" not in client.get("/stac/vectors/districts/collection.json").json()["assets"]

@@ -2322,11 +2322,12 @@ def _result_assets(record: OpenEOJobRecord) -> dict[str, Any]:
         try:
             from open_geo_service.ingestions import services as _ingestion_services
             from open_geo_service.ingestions.schemas import ArtifactFormat
+            from open_geo_service.stac.services import collection_path
 
             artifact = _ingestion_services.latest_published_raster_artifacts_by_dataset().get(dataset_id)
             if artifact is not None:
                 assets["stac"] = {
-                    "href": f"/stac/{dataset_id}/collection.json",
+                    "href": collection_path(layout.Kind.RASTER, dataset_id),
                     "type": "application/json",
                     "title": "STAC collection",
                     "roles": ["metadata"],

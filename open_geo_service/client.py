@@ -34,6 +34,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -59,9 +60,25 @@ def _default_base_url() -> str:
 
 
 def _id_from_href(href: str) -> str:
-    """Extract the dataset id from a STAC child href: the directory holding `collection.json`."""
+    """The id of a STAC child href: `{kind}/{id}` for a collection, `{kind}` for a sub-catalog."""
     segments = urlparse(href).path.rstrip("/").split("/")
-    return segments[-2] if segments[-1] == "collection.json" and len(segments) > 1 else segments[-1]
+    if segments[-1] == "collection.json":
+        return "/".join(segments[-3:-1])
+    return segments[-2] if segments[-1] == "catalog.json" else segments[-1]
+
+
+def _collection_url(base_url: str, dataset_id: str) -> str:
+    """The STAC collection of *dataset_id*: `{kind}/{id}`, or a raster's bare id."""
+    collection_id = dataset_id if "/" in dataset_id else f"rasters/{dataset_id}"
+    return f"{base_url}/stac/{collection_id}/collection.json"
+
+
+def _catalogued_collections(get: Callable[[str], Any], base_url: str) -> list[dict]:
+    """The child links of every sub-catalog of the root catalog: one per published collection."""
+    links: list[dict] = []
+    for subcatalog in _child_links(get(f"{base_url}/stac/catalog.json"), base_url):
+        links += _child_links(get(subcatalog["href"]), base_url)
+    return links
 
 
 def _child_links(catalog: Any, source: str) -> list[dict]:
@@ -188,19 +205,25 @@ class GeoService:
     def datasets(self) -> list[dict]:
         """Return all published datasets from the STAC catalog.
 
-        Each entry is a STAC child link dict with at least ``id``, ``title``, and ``href``.
+        Each entry is a STAC child link dict with at least ``id``, ``title``, and ``href``. The
+        ``id`` is the collection's path in the catalog, such as ``rasters/chirps3_precipitation_daily``.
         """
-        response = self._http.get(f"{self.base_url}/stac/catalog.json")
-        _raise_for_status(response)
-        return _child_links(response.json(), self.base_url)
+
+        def get(url: str) -> Any:
+            response = self._http.get(url)
+            _raise_for_status(response)
+            return response.json()
+
+        return _catalogued_collections(get, self.base_url)
 
     def open_dataset(self, dataset_id: str) -> xr.Dataset:
         """Open a published dataset as an xarray Dataset.
 
         Fetches the STAC collection for ``dataset_id``, reads the Zarr asset metadata,
-        and returns the opened (lazy) dataset. Requires the ``xarray`` extra.
+        and returns the opened (lazy) dataset. Requires the ``xarray`` extra. ``dataset_id``
+        is a raster's id, alone or as its collection id (``rasters/{id}``).
         """
-        response = self._http.get(f"{self.base_url}/stac/{dataset_id}/collection.json")
+        response = self._http.get(_collection_url(self.base_url, dataset_id))
         _raise_for_status(response)
         href, open_kwargs = _zarr_asset(response.json(), dataset_id, self.base_url)
         return _open_zarr(href, open_kwargs)
@@ -253,14 +276,18 @@ class GeoService:
 def list_datasets(base_url: str | None = None) -> list[dict]:
     """Return all published datasets from the STAC catalog (one-shot, no persistent connection).
 
-    Each entry is a STAC child link dict with at least ``id``, ``title``, and ``href``.
-    ``base_url`` defaults to the ``GEOSERVICE_BASE_URL`` environment variable,
-    falling back to ``http://127.0.0.1:9000``.
+    Each entry is a STAC child link dict with at least ``id``, ``title``, and ``href``, as
+    :meth:`GeoService.datasets` returns. ``base_url`` defaults to the ``GEOSERVICE_BASE_URL``
+    environment variable, falling back to ``http://127.0.0.1:9000``.
     """
     url = (base_url or _default_base_url()).rstrip("/")
-    response = httpx.get(f"{url}/stac/catalog.json", timeout=_DEFAULT_TIMEOUT)
-    _raise_for_status(response)
-    return _child_links(response.json(), url)
+
+    def get(target: str) -> Any:
+        response = httpx.get(target, timeout=_DEFAULT_TIMEOUT)
+        _raise_for_status(response)
+        return response.json()
+
+    return _catalogued_collections(get, url)
 
 
 def open_dataset(dataset_id: str, *, base_url: str | None = None) -> xr.Dataset:
@@ -272,7 +299,7 @@ def open_dataset(dataset_id: str, *, base_url: str | None = None) -> xr.Dataset:
     ``http://127.0.0.1:9000``.
     """
     url = (base_url or _default_base_url()).rstrip("/")
-    response = httpx.get(f"{url}/stac/{dataset_id}/collection.json", timeout=_DEFAULT_TIMEOUT)
+    response = httpx.get(_collection_url(url, dataset_id), timeout=_DEFAULT_TIMEOUT)
     _raise_for_status(response)
     href, open_kwargs = _zarr_asset(response.json(), dataset_id, url)
     return _open_zarr(href, open_kwargs)

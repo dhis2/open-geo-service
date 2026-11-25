@@ -141,7 +141,7 @@ Entry links point back into the canonical `/zarr/{dataset_id}/...` namespace.
 The branch exposes a dedicated STAC surface under:
 
 - `/stac/catalog.json`
-- `/stac/{dataset_id}/collection.json`
+- `/stac/{kind}/{dataset_id}/collection.json`
 
 Published Zarr-backed managed datasets appear there as one STAC Collection per dataset. The `zarr` asset points to the canonical native `/zarr/{dataset_id}` route.
 
@@ -163,7 +163,7 @@ Current STAC details:
 Published datasets are exposed as STAC collections:
 
 - `/stac/catalog.json`
-- `/stac/{dataset_id}/collection.json`
+- `/stac/{kind}/{dataset_id}/collection.json`
 
 Dataset responses on the native FastAPI side include publication state and a link to the STAC collection. (The previous OGC API surface has been removed.)
 
@@ -222,12 +222,12 @@ Implemented sync behavior:
 
 1. publication derives a stable managed dataset id
 2. STAC collection documents are derived dynamically from the published artifact state
-3. the dataset becomes available immediately under `/stac/{dataset_id}/collection.json`
+3. the dataset becomes available immediately under `/stac/{kind}/{dataset_id}/collection.json`
 
 ### Raw data access
 
 1. `/datasets/{dataset_id}` exposes native metadata and version summary
-2. `/stac/{dataset_id}/collection.json` exposes standards-friendly discovery metadata for direct Zarr-opening clients
+2. `/stac/{kind}/{dataset_id}/collection.json` exposes standards-friendly discovery metadata for direct Zarr-opening clients
 3. `/zarr/{dataset_id}` exposes the raw Zarr store layout when the latest version is Zarr-backed
 
 ### Sync
@@ -258,7 +258,7 @@ Implemented sync behavior:
 ### Standards-facing
 
 - `GET /stac/catalog.json`
-- `GET /stac/{dataset_id}/collection.json`
+- `GET /stac/{kind}/{dataset_id}/collection.json`
 
 ## What Is Still Deferred
 

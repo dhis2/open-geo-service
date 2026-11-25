@@ -525,7 +525,7 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     assert set(catalog["auth:schemes"]) == {"basic", "bearer"}
     assert AUTHENTICATION_EXTENSION in catalog["stac_extensions"]
     assert all(link["auth:refs"] == ["basic", "bearer"] for link in catalog["links"])
-    collection = client.get("/stac/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
+    collection = client.get("/stac/rasters/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
     assert collection["assets"]["zarr"]["auth:refs"] == ["basic", "bearer"]
     assert not any("auth:refs" in link for link in collection["links"][:2])
     assert "auth:refs" not in raster["assets"]["zarr"]

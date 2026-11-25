@@ -107,10 +107,10 @@ def test_a_raster_collection_answers_head(client: TestClient, monkeypatch: pytes
     monkeypatch.setattr(
         stac_services,
         "build_collection",
-        lambda dataset_id, request: {"type": "Collection", "id": dataset_id, "links": []},
+        lambda kind, dataset_id, request: {"type": "Collection", "id": f"{kind}/{dataset_id}", "links": []},
     )
 
-    response = client.head("/stac/chirps3_precipitation_daily/collection.json")
+    response = client.head("/stac/rasters/chirps3_precipitation_daily/collection.json")
 
     assert response.status_code == 200
     assert int(response.headers["content-length"]) > 0
@@ -129,12 +129,20 @@ def test_stac_catalog_lists_child_collections(client: TestClient, monkeypatch: p
 
     assert response.status_code == 200
     payload = response.json()
-    child_links = [link for link in payload["links"] if link["rel"] == "child"]
-    assert len(child_links) == 2
-    assert child_links[0]["href"].endswith("/stac/chirps3_precipitation_daily/collection.json")
+    # The root lists one sub-catalog per kind with a published collection, and it lists the collections.
+    assert [link["href"] for link in payload["links"] if link["rel"] == "child"] == [
+        "http://testserver/stac/rasters/catalog.json"
+    ]
+    rasters = client.get("/stac/rasters/catalog.json").json()
+    assert rasters["id"] == "rasters"
+    assert [link["href"] for link in rasters["links"] if link["rel"] == "child"] == [
+        "http://testserver/stac/rasters/chirps3_precipitation_daily/collection.json",
+        "http://testserver/stac/rasters/era5_temperature_daily/collection.json",
+    ]
+    assert client.get("/stac/vectors/catalog.json").status_code == 404, "no vector collection is published"
     # The latest of its collections' `updated`: a catalog whose collections are all mirrors is
     # itself a mirror, and Portolan requires a mirror's sync time on it (PORTO-CORE-057).
-    assert payload["updated"] == "2026-02-03T04:05:00Z"
+    assert payload["updated"] == rasters["updated"] == "2026-02-03T04:05:00Z"
 
     monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", dict)
     assert "updated" not in client.get("/stac/catalog.json").json(), "nothing synced, nothing to date"
@@ -315,13 +323,13 @@ def test_stac_collection_compatibility_route_builds_collection(
     monkeypatch.setattr(
         stac_services,
         "build_collection",
-        lambda dataset_id, request: {"type": "Collection", "id": dataset_id, "links": []},
+        lambda kind, dataset_id, request: {"type": "Collection", "id": f"{kind}/{dataset_id}", "links": []},
     )
 
-    response = client.get("/stac/chirps3_precipitation_daily/collection.json")
+    response = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
 
     assert response.status_code == 200
-    assert response.json()["id"] == "chirps3_precipitation_daily"
+    assert response.json()["id"] == "rasters/chirps3_precipitation_daily"
 
 
 def test_collections_logs_skipped_dataset_failures(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,7 +342,7 @@ def test_collections_logs_skipped_dataset_failures(client: TestClient, monkeypat
         lambda: {"broken_dataset": _artifact(artifact_id="a1", dataset_id="broken_dataset")},
     )
 
-    def _raise(dataset_id: str, artifact: object, request: object) -> dict[str, object]:
+    def _raise(dataset_id: str, artifact: object, request: object, **_: object) -> dict[str, object]:
         raise stac_services.HTTPException(status_code=503, detail="store unavailable")
 
     monkeypatch.setattr(stac_services, "build_collection_for_artifact", _raise)
@@ -548,7 +556,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
     )
     assert response.status_code in (200, 201), response.text
 
-    collection = client.get(f"/stac/{dataset_id}/collection.json").json()
+    collection = client.get(f"/stac/rasters/{dataset_id}/collection.json").json()
 
     # Every asset says what it is for, as Portolan asks (PORTO-CORE-088).
     assets = collection["assets"]
@@ -563,7 +571,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
     monkeypatch.setattr(ingestion_services, "measure_statistics", measure_statistics)
     assert ingestion_services.measure_missing_statistics() == 1
 
-    collection = client.get(f"/stac/{dataset_id}/collection.json").json()
+    collection = client.get(f"/stac/rasters/{dataset_id}/collection.json").json()
 
     bands = collection["assets"]["zarr"]["bands"]
     assert bands[0]["statistics"] == {"minimum": 0.0, "maximum": 6.0, "mean": pytest.approx(12.0 / 7)}
@@ -689,12 +697,14 @@ def test_openeo_listing_does_not_follow_the_stac_gate(client: TestClient, monkey
     monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {})
 
     openeo_listing = client.get("/collections")
-    stac_catalog = client.get("/stac/catalog.json")
+    stac_catalog = client.get("/stac/rasters/catalog.json")
     openeo_detail = client.get("/collections/districts")
-    stac_detail = client.get("/stac/districts/collection.json")
+    stac_detail = client.get("/stac/rasters/districts/collection.json")
 
     assert [c["id"] for c in openeo_listing.json()["collections"]] == ["chirps3_precipitation_daily"]
-    assert any(link["href"].endswith("/stac/districts/collection.json") for link in stac_catalog.json()["links"])
+    assert any(
+        link["href"].endswith("/stac/rasters/districts/collection.json") for link in stac_catalog.json()["links"]
+    )
     assert openeo_detail.status_code == 404
     assert stac_detail.status_code == 200
 
@@ -897,7 +907,7 @@ def test_collection_preserves_template_links_when_xstac_mutates_template(
     links = {link["rel"]: link["href"] for link in payload["links"]}
     assert links["self"].endswith("/collections/chirps3_precipitation_daily")
     assert links["root"].endswith("/stac/catalog.json")
-    assert links["parent"].endswith("/stac/catalog.json")
+    assert links["parent"].endswith("/stac/rasters/catalog.json")
     assert links["alternate"].endswith("/datasets/chirps3_precipitation_daily")
 
 
@@ -1228,7 +1238,7 @@ def test_collection_advertises_the_detected_media_type(client: TestClient, monke
         lambda *_a, **_k: "application/vnd.zarr; version=3; profile=multiscales",
     )
 
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
 
     assert payload["assets"]["zarr"]["type"] == "application/vnd.zarr; version=3; profile=multiscales"
 
@@ -1241,7 +1251,7 @@ def test_collection_keeps_the_plain_media_type_for_a_flat_store(
     _stub_collection_build(monkeypatch, artifact)
     monkeypatch.setattr(stac_services, "zarr_media_type", lambda *_a, **_k: "application/vnd.zarr; version=3")
 
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
 
     assert payload["assets"]["zarr"]["type"] == "application/vnd.zarr; version=3"
 
@@ -1263,8 +1273,8 @@ def test_media_type_detection_is_cached_per_request(client: TestClient, monkeypa
     _stub_collection_build(monkeypatch, artifact)
     monkeypatch.setattr(stac_services, "zarr_media_type", counting_media_type)
 
-    client.get("/stac/chirps3_precipitation_daily/collection.json")
-    client.get("/stac/chirps3_precipitation_daily/collection.json")
+    client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
+    client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
 
     assert reads == 1
 
@@ -1299,7 +1309,7 @@ def test_media_type_cache_is_keyed_by_artifact_not_store_path(
         "list_artifacts",
         lambda: SimpleNamespace(items=[_artifact(artifact_id="before", path=same_path)]),
     )
-    first = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    first = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
 
     # Same store path, new artifact record — as a re-ingest produces.
     monkeypatch.setattr(
@@ -1307,7 +1317,7 @@ def test_media_type_cache_is_keyed_by_artifact_not_store_path(
         "list_artifacts",
         lambda: SimpleNamespace(items=[_artifact(artifact_id="after", path=same_path)]),
     )
-    second = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    second = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
 
     assert first["assets"]["zarr"]["type"] == "application/vnd.zarr; version=3"
     assert second["assets"]["zarr"]["type"] == "application/vnd.zarr; version=3; profile=multiscales"
@@ -1321,7 +1331,7 @@ def test_cf_extension_is_not_declared_when_no_cf_attrs_are_present(
     artifact = _artifact(artifact_id="nocf")
     _stub_collection_build(monkeypatch, artifact)
 
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
 
     assert not any(key.startswith("cf:") for key in payload["cube:variables"]["precip"])
     assert stac_services.CF_EXTENSION not in payload["stac_extensions"]
@@ -1341,7 +1351,7 @@ def _stub_with_template(monkeypatch: pytest.MonkeyPatch, artifact: ArtifactRecor
 
 def test_collection_publishes_an_spdx_licence(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_with_template(monkeypatch, _artifact(artifact_id="lic1"), {"period_type": "daily", "license": "CC-BY-4.0"})
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     assert payload["license"] == "CC-BY-4.0"
 
 
@@ -1361,7 +1371,7 @@ def test_collection_publishes_other_and_a_licence_link_for_a_bespoke_licence(
             },
         },
     )
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     assert payload["license"] == "other"
     links = [link for link in payload["links"] if link.get("rel") == "license"]
     assert len(links) == 1
@@ -1372,7 +1382,7 @@ def test_collection_publishes_other_and_a_licence_link_for_a_bespoke_licence(
 def test_an_undeclared_licence_publishes_other_and_no_link(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never `various`, which is not a STAC value and reads as "nothing worth mentioning"."""
     _stub_with_template(monkeypatch, _artifact(artifact_id="lic3"), {"period_type": "daily"})
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     assert payload["license"] == "other"
     assert not [link for link in payload["links"] if link.get("rel") == "license"]
 
@@ -1380,7 +1390,7 @@ def test_an_undeclared_licence_publishes_other_and_no_link(client: TestClient, m
 def test_an_spdx_licence_needs_no_link(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """An SPDX identifier is self-describing; a link would be noise."""
     _stub_with_template(monkeypatch, _artifact(artifact_id="lic4"), {"period_type": "daily", "license": "CC0-1.0"})
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     assert not [link for link in payload["links"] if link.get("rel") == "license"]
 
 
@@ -1395,7 +1405,7 @@ def test_providers_are_published(client: TestClient, monkeypatch: pytest.MonkeyP
             "providers": [{"name": "WorldPop", "url": "https://hub.worldpop.org/", "roles": ["licensor"]}],
         },
     )
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     *declared, processor, host = payload["providers"]
     assert declared == [{"name": "WorldPop", "url": "https://hub.worldpop.org/", "roles": ["licensor"]}]
     # This instance processed the data (it clipped the source to its extent) but did not produce it.
@@ -1417,7 +1427,7 @@ def test_malformed_providers_are_dropped_rather_than_published(
             "providers": ["not a mapping", {"url": "https://x"}, {"name": "  "}, {"name": "Real"}],
         },
     )
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     # A provider declared without roles made the data, so it is published as the producer.
     assert payload["providers"][:-2] == [{"name": "Real", "roles": ["producer"]}]
 
@@ -1433,7 +1443,7 @@ def test_a_template_host_is_not_relabelled_as_producer(client: TestClient, monke
             "providers": [{"name": "Maker"}, {"name": "Mirror", "roles": ["host"]}],
         },
     )
-    payload = client.get("/stac/chirps3_precipitation_daily/collection.json").json()
+    payload = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json").json()
     assert payload["providers"][:-2] == [{"name": "Maker", "roles": ["producer"]}, {"name": "Mirror"}]
     assert [p.get("roles") for p in payload["providers"]].count(["host"]) == 1
 
@@ -1580,7 +1590,7 @@ def test_a_workflow_output_links_the_sources_of_its_inputs(client: TestClient, m
     monkeypatch.setattr(stac_services, "_zarr_asset_metadata", lambda _: {})
     monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {"consolidated": True})
 
-    payload = client.get("/stac/precip_anomaly/collection.json").json()
+    payload = client.get("/stac/rasters/precip_anomaly/collection.json").json()
 
     assert [link["href"] for link in payload["links"] if link["rel"] == "via"] == [source_page]
     assert [provider["roles"] for provider in payload["providers"]][-2:] == [["processor"], ["host"]]

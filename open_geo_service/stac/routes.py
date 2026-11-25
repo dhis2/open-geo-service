@@ -1,16 +1,18 @@
 """Routes for the STAC catalogue.
 
 Laid out as a static catalog, so a client that follows links reads it as files: the root
-`catalog.json` with `README.md` and `AGENTS.md` beside it, and one directory per collection holding
-`collection.json` with its own `README.md` and `AGENTS.md`. Each
+`catalog.json`, a sub-catalog `{kind}/catalog.json` per kind of dataset, and one directory per
+collection, `{kind}/{id}/`, holding `collection.json`. Each catalog and collection has its
+`README.md` and `AGENTS.md` beside it. Each
 document has one URL, because its `describedby` and `agents` links are relative to it. Every route
 answers HEAD, as a static host does and a link checker expects; HEAD is kept out of the OpenAPI
 schema so each operation is listed once.
 """
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from open_geo_service.shared import layout
 from open_geo_service.stac import documents
 from open_geo_service.stac import services as stac_services
 from open_geo_service.stac.schemas import StacCatalogResponse
@@ -29,11 +31,31 @@ def get_stac_catalog_json(request: Request) -> dict[str, object]:
     return stac_services.build_catalog(request)
 
 
-@router.get("/{dataset_id}/collection.json")
-@router.head("/{dataset_id}/collection.json", include_in_schema=False)
-def get_stac_collection(dataset_id: str, request: Request) -> dict[str, object]:
+def _kind(kind: str) -> layout.Kind:
+    """The kind a path names, or 404, as a static host answers a folder that is not there."""
+    try:
+        return layout.Kind(kind)
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"No sub-catalog '{kind}'") from None
+
+
+@router.get("/{kind}/catalog.json", response_model=StacCatalogResponse, response_model_exclude_none=True)
+@router.head(
+    "/{kind}/catalog.json",
+    response_model=StacCatalogResponse,
+    response_model_exclude_none=True,
+    include_in_schema=False,
+)
+def get_stac_subcatalog(kind: str, request: Request) -> dict[str, object]:
+    """Return the sub-catalog of one kind of dataset: `rasters`, `vectors` or `tables`."""
+    return stac_services.build_subcatalog(_kind(kind), request)
+
+
+@router.get("/{kind}/{dataset_id}/collection.json")
+@router.head("/{kind}/{dataset_id}/collection.json", include_in_schema=False)
+def get_stac_collection(kind: str, dataset_id: str, request: Request) -> dict[str, object]:
     """Return one STAC collection document."""
-    return stac_services.build_collection(dataset_id, request)
+    return stac_services.build_collection(_kind(kind), dataset_id, request)
 
 
 def _markdown(text: str) -> PlainTextResponse:
@@ -54,15 +76,29 @@ def get_catalog_agents(request: Request) -> PlainTextResponse:
     return _markdown(documents.catalog_agents(request))
 
 
-@router.get("/{dataset_id}/README.md", response_class=PlainTextResponse)
-@router.head("/{dataset_id}/README.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_collection_readme(dataset_id: str, request: Request) -> PlainTextResponse:
+@router.get("/{kind}/README.md", response_class=PlainTextResponse)
+@router.head("/{kind}/README.md", response_class=PlainTextResponse, include_in_schema=False)
+def get_subcatalog_readme(kind: str, request: Request) -> PlainTextResponse:
+    """What one sub-catalog holds."""
+    return _markdown(documents.subcatalog_readme(_kind(kind), request))
+
+
+@router.get("/{kind}/AGENTS.md", response_class=PlainTextResponse)
+@router.head("/{kind}/AGENTS.md", response_class=PlainTextResponse, include_in_schema=False)
+def get_subcatalog_agents(kind: str, request: Request) -> PlainTextResponse:
+    """How an agent reads one sub-catalog."""
+    return _markdown(documents.subcatalog_agents(_kind(kind), request))
+
+
+@router.get("/{kind}/{dataset_id}/README.md", response_class=PlainTextResponse)
+@router.head("/{kind}/{dataset_id}/README.md", response_class=PlainTextResponse, include_in_schema=False)
+def get_collection_readme(kind: str, dataset_id: str, request: Request) -> PlainTextResponse:
     """A collection's title, description, licence and provenance."""
-    return _markdown(documents.collection_readme(dataset_id, request))
+    return _markdown(documents.collection_readme(_kind(kind), dataset_id, request))
 
 
-@router.get("/{dataset_id}/AGENTS.md", response_class=PlainTextResponse)
-@router.head("/{dataset_id}/AGENTS.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_collection_agents(dataset_id: str, request: Request) -> PlainTextResponse:
+@router.get("/{kind}/{dataset_id}/AGENTS.md", response_class=PlainTextResponse)
+@router.head("/{kind}/{dataset_id}/AGENTS.md", response_class=PlainTextResponse, include_in_schema=False)
+def get_collection_agents(kind: str, dataset_id: str, request: Request) -> PlainTextResponse:
     """How an agent reads a collection's data."""
-    return _markdown(documents.collection_agents(dataset_id, request))
+    return _markdown(documents.collection_agents(_kind(kind), dataset_id, request))

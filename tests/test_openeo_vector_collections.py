@@ -130,7 +130,7 @@ def test_the_collection_document_describes_a_vector_cube(client: TestClient, reg
     # The openEO copy names itself, and its relative links are resolved against the STAC document.
     links = {link["rel"]: link["href"] for link in collection["links"]}
     assert links["self"].endswith("/collections/regions")
-    assert links["describedby"].endswith("/stac/regions/README.md")
+    assert links["describedby"].endswith("/stac/vectors/regions/README.md")
     assert all("/collection.json" not in link["href"] for link in collection["links"])
 
 

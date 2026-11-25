@@ -919,7 +919,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     def shown() -> tuple[dict[str, Any], str, dict[str, Any]]:
         detail = client.get(f"/datasets/{_DATASET}").json()["provenance"]
         page = client.get(f"/datasets/{_DATASET}", headers={"Accept": "text/html"}).text
-        return detail, page, client.get(f"/stac/{_DATASET}/collection.json").json()
+        return detail, page, client.get(f"/stac/rasters/{_DATASET}/collection.json").json()
 
     detail, page, collection = shown()
     # One input, though the graph read it twice; only ids leave the execution evidence.
@@ -953,8 +953,8 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     assert 'href="/jobs/job-1"' in page and f'href="/datasets/{source}"' in page
     assert "updated since" not in page
     assert [link["href"] for link in collection["links"] if link["rel"] == "derived_from"] == [
-        f"http://testserver/stac/{source}/collection.json",
-        "http://testserver/stac/districts/collection.json",
+        f"http://testserver/stac/rasters/{source}/collection.json",
+        "http://testserver/stac/vectors/districts/collection.json",
     ]
     # The openEO copy links the same inputs at their openEO collections, so following
     # provenance from openEO stays in openEO.
@@ -971,7 +971,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # the relative README and AGENTS among them, answers HEAD; `proj:code` is declared at v2.0.0;
     # and the Portolan profile is declared.
     assert [provider["roles"] for provider in collection["providers"]][-2:] == [["processor"], ["host"]]
-    collection_url = f"http://testserver/stac/{_DATASET}/collection.json"
+    collection_url = f"http://testserver/stac/rasters/{_DATASET}/collection.json"
     for link in collection["links"]:
         href = urljoin(collection_url, link["href"])
         if href.startswith("http://testserver/"):
@@ -982,9 +982,9 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # The input's producer made the data and this instance hosts it, so the collection is a
     # Portolan mirror, which records when it was last updated.
     assert collection["updated"].endswith("Z")
-    readme = client.get(f"/stac/{_DATASET}/README.md").text
+    readme = client.get(f"/stac/rasters/{_DATASET}/README.md").text
     assert "(processor)" in readme and "(host)" in readme
-    agents = client.get(f"/stac/{_DATASET}/AGENTS.md").text
+    agents = client.get(f"/stac/rasters/{_DATASET}/AGENTS.md").text
     assert f'xr.open_zarr("http://testserver/zarr/{_DATASET}"' in agents
     assert client.get(f"/datasets/{source}").json()["provenance"] is None
 

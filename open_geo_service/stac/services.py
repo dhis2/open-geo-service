@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import urllib.parse
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -59,9 +60,27 @@ MARKDOWN_MEDIA_TYPE = "text/markdown"
 CATALOG_PATH = "/stac/catalog.json"
 
 
-def collection_path(dataset_id: str) -> str:
+def collection_id(kind: layout.Kind, dataset_id: str) -> str:
+    """A collection's STAC id: its path from the catalog root, `{kind}/{id}`, as Portolan nests it."""
+    return layout.dataset_key(kind, dataset_id)
+
+
+def collection_path(kind: layout.Kind, dataset_id: str) -> str:
     """Where a collection's STAC document is served: `collection.json` in its own directory."""
-    return f"/stac/{path_segment(dataset_id)}/collection.json"
+    return f"/stac/{kind.value}/{path_segment(dataset_id)}/collection.json"
+
+
+def subcatalog_path(kind: layout.Kind) -> str:
+    """Where the sub-catalog of one kind of dataset is served."""
+    return f"/stac/{kind.value}/catalog.json"
+
+
+SUBCATALOGS: dict[layout.Kind, tuple[str, str]] = {
+    layout.Kind.RASTER: ("Rasters", "Gridded datasets, each a GeoZarr store."),
+    layout.Kind.VECTOR: ("Vector datasets", "Feature collections, each a GeoParquet file with PMTiles vector tiles."),
+    layout.Kind.TABLE: ("Tables", "Values per feature and period, each a Parquet file."),
+}
+"""The title and description of each kind's sub-catalog."""
 
 
 def file_size(path: Path) -> dict[str, object]:
@@ -205,12 +224,14 @@ def build_catalog(request: Request) -> dict[str, object]:
         {"rel": "agents", "href": "./AGENTS.md", "type": MARKDOWN_MEDIA_TYPE},
     ]
     artifacts = _eligible_artifacts_by_dataset()
-    for dataset_id, artifact in artifacts.items():
+    # One sub-catalog per kind that has a published collection, as Portolan groups a catalog's
+    # children (PORTO-CORE-078); an empty one would be a catalog with nothing in it.
+    for kind in published_kinds(artifacts):
         links.append(
             {
                 "rel": "child",
-                "href": absolute_url(request, collection_path(dataset_id)),
-                "title": artifact.dataset_name,
+                "href": absolute_url(request, subcatalog_path(kind)),
+                "title": SUBCATALOGS[kind][0],
                 "type": "application/json",
             }
         )
@@ -222,15 +243,69 @@ def build_catalog(request: Request) -> dict[str, object]:
         # The instance's own name, as in the web interface; "Open Geo Service" when unset.
         "title": _get_catalog_title(),
         "description": CATALOG_DESCRIPTION,
-        # Changed by every collection's sync, so the latest of theirs. A catalog whose collections
-        # are all mirrors is a mirror too, and Portolan requires it there (PORTO-CORE-057).
-        **({"updated": _stac_datetime(max(a.created_at for a in artifacts.values()))} if artifacts else {}),
+        **_updated(artifacts.values()),
         "links": links,
     }
     return _declare_authentication(catalog, request)
 
 
-def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
+def build_subcatalog(kind: layout.Kind, request: Request) -> dict[str, object]:
+    """Build the sub-catalog of one kind of dataset, or 404 when no collection of that kind is published."""
+    artifacts = {
+        dataset_id: artifact
+        for dataset_id, artifact in _eligible_artifacts_by_dataset().items()
+        if layout.kind_of(artifact.format) is kind
+    }
+    if not artifacts:
+        raise HTTPException(status_code=404, detail=f"No published collections in '{kind.value}'")
+    catalog_href = absolute_url(request, CATALOG_PATH)
+    links = [
+        {"rel": "self", "href": self_url(request), "type": "application/json"},
+        {"rel": "root", "href": catalog_href, "type": "application/json"},
+        {"rel": "parent", "href": catalog_href, "type": "application/json"},
+        *_document_links(),
+    ]
+    for dataset_id, artifact in artifacts.items():
+        links.append(
+            {
+                "rel": "child",
+                "href": absolute_url(request, collection_path(kind, dataset_id)),
+                "title": artifact.dataset_name,
+                "type": "application/json",
+            }
+        )
+    title, description = SUBCATALOGS[kind]
+    catalog: dict[str, Any] = {
+        "stac_version": STAC_VERSION,
+        "stac_extensions": [PORTOLAN_SCHEMA],
+        "type": "Catalog",
+        # A nested catalog's id is its path from the root, as a nested collection's is.
+        "id": kind.value,
+        "title": title,
+        "description": description,
+        **_updated(artifacts.values()),
+        "links": links,
+    }
+    return _declare_authentication(catalog, request)
+
+
+def published_kinds(artifacts: dict[str, ArtifactRecord]) -> list[layout.Kind]:
+    """The kinds with at least one of *artifacts*, in the order of `layout.Kind`."""
+    present = {layout.kind_of(artifact.format) for artifact in artifacts.values()}
+    return [kind for kind in layout.Kind if kind in present]
+
+
+def _updated(artifacts: Iterable[ArtifactRecord]) -> dict[str, str]:
+    """A catalog's `updated`: the latest of its collections'.
+
+    A catalog whose collections are all mirrors is a mirror too, and Portolan requires it there
+    (PORTO-CORE-057).
+    """
+    times = [artifact.created_at for artifact in artifacts]
+    return {"updated": _stac_datetime(max(times))} if times else {}
+
+
+def build_collection(kind: layout.Kind, dataset_id: str, request: Request) -> dict[str, object]:
     """Build one STAC collection document, in the representation its format calls for.
 
     One catalogue, two representations. A raster is a datacube — `cube:dimensions`,
@@ -240,17 +315,27 @@ def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
     below that, which is why this dispatches to two builders rather than threading conditionals
     through one. A feature collection declares no datacube or Zarr extension at all.
     """
-    artifact = _eligible_artifacts_by_dataset().get(dataset_id)
-    if artifact is None:
-        raise HTTPException(status_code=404, detail=f"STAC collection '{dataset_id}' not found")
+    artifact = published_artifact(kind, dataset_id)
     return build_collection_for_artifact(dataset_id, artifact, request)
 
 
-def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
+def published_artifact(kind: layout.Kind, dataset_id: str) -> ArtifactRecord:
+    """The published record of *dataset_id*, or 404 unless it is one of *kind*."""
+    artifact = _eligible_artifacts_by_dataset().get(dataset_id)
+    if artifact is None or layout.kind_of(artifact.format) is not kind:
+        raise HTTPException(status_code=404, detail=f"STAC collection '{kind.value}/{dataset_id}' not found")
+    return artifact
+
+
+def build_collection_for_artifact(
+    dataset_id: str, artifact: ArtifactRecord, request: Request, *, bare_id: bool = False
+) -> dict[str, object]:
     """Build the collection document from a record the caller already holds.
 
     For a caller that selected the record itself, as openEO does: looking it up again could
     return a newer record after a concurrent refresh, and the document would then mix the two.
+    The id is the collection's path in the catalog, `{kind}/{id}`; *bare_id* gives the dataset id
+    alone, for openEO, whose `/collections/{id}` has no room for the kind.
     """
     if artifact.format == ArtifactFormat.GEOPARQUET:
         collection = _build_feature_collection(dataset_id, artifact, request)
@@ -258,7 +343,24 @@ def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, req
         collection = _build_table_collection(dataset_id, artifact, request)
     else:
         collection = _build_raster_collection(dataset_id, artifact, request)
+    collection["id"] = dataset_id if bare_id else collection_id(layout.kind_of(artifact.format), dataset_id)
     return _declare_authentication(collection, request)
+
+
+def _derived_from(artifact: ArtifactRecord, request: Request) -> list[dict[str, str]]:
+    """A `derived_from` link to each published collection *artifact* was computed from.
+
+    An input that is not published has no collection to link to, so it is left out.
+    """
+    published = _eligible_artifacts_by_dataset()
+    links: list[dict[str, str]] = []
+    for recorded in ingestion_services.recorded_inputs(artifact):
+        input_id = str(recorded["collection_id"])
+        source = published.get(input_id)
+        if source is not None:
+            href = absolute_url(request, collection_path(layout.kind_of(source.format), input_id))
+            links.append({"rel": "derived_from", "href": href, "type": "application/json", "title": input_id})
+    return links
 
 
 # Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
@@ -301,7 +403,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
 def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
     """Build the STAC collection for a Zarr- or Icechunk-backed datacube."""
     source_dataset = registry_datasets.get_dataset(artifact.dataset_id) or {}
-    collection_href = absolute_url(request, collection_path(dataset_id))
+    collection_href = absolute_url(request, collection_path(layout.Kind.RASTER, dataset_id))
     catalog_href = absolute_url(request, CATALOG_PATH)
     dataset_href = absolute_url(request, f"/datasets/{path_segment(dataset_id)}")
     zarr_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
@@ -316,6 +418,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         artifact=artifact,
         collection_href=collection_href,
         catalog_href=catalog_href,
+        parent_href=absolute_url(request, subcatalog_path(layout.Kind.RASTER)),
         dataset_href=dataset_href,
         zarr_href=zarr_href,
         source_dataset=source_dataset,
@@ -326,7 +429,6 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     period_type = source_dataset.get("period_type")
 
     collection_payload = _build_collection_with_xstac(artifact=artifact, template=template, period_type=period_type)
-    collection_payload["id"] = dataset_id
     collection_payload["type"] = "Collection"
     collection_payload["stac_version"] = STAC_VERSION
     collection_payload["description"] = template.description
@@ -350,16 +452,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
                 "title": licence.name or licence.identifier or "Licence",
             }
         )
-    for recorded in ingestion_services.recorded_inputs(artifact):
-        input_id = str(recorded["collection_id"])
-        template_links.append(
-            {
-                "rel": "derived_from",
-                "href": absolute_url(request, collection_path(input_id)),
-                "type": "application/json",
-                "title": input_id,
-            }
-        )
+    template_links.extend(_derived_from(artifact, request))
     # As for a feature collection: the original source this collection mirrors, and when the copy
     # was last synced from it. A workflow output names the sources of the data it was made from.
     for source_url in _source_pages(artifact.dataset_id, source_dataset):
@@ -626,11 +719,7 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     if columns:
         collection.extra_fields["table:columns"] = columns
 
-    catalog_href = absolute_url(request, CATALOG_PATH)
-    collection.clear_links()
-    collection.set_self_href(absolute_url(request, collection_path(dataset_id)))
-    collection.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    collection.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    _add_structural_links(collection, layout.Kind.TABLE, dataset_id, request)
     collection.add_link(
         pystac.Link(
             rel="alternate",
@@ -642,15 +731,9 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     # One link per licence: values computed from several sources are bound by each.
     for href, title in sources.license_links():
         collection.add_link(pystac.Link(rel="license", target=href, media_type="text/html", title=title))
-    for recorded in ingestion_services.recorded_inputs(artifact):
-        input_id = str(recorded["collection_id"])
+    for link in _derived_from(artifact, request):
         collection.add_link(
-            pystac.Link(
-                rel="derived_from",
-                target=absolute_url(request, collection_path(input_id)),
-                media_type="application/json",
-                title=input_id,
-            )
+            pystac.Link(rel=link["rel"], target=link["href"], media_type=link["type"], title=link["title"])
         )
     for source_url in _source_pages(dataset_id, {}):
         collection.add_link(pystac.Link(rel="via", target=source_url, media_type="text/html", title="Source"))
@@ -788,13 +871,7 @@ def _add_feature_collection_links(
     names that one collection, so a `{version}` in `source_stac` is filled with the release this
     collection was read from, and the link is left out when there is no version to fill it.
     """
-    catalog_href = absolute_url(request, CATALOG_PATH)
-    collection.clear_links()
-    # Through `set_self_href`, not `add_link`: pystac emits the self link from that attribute,
-    # and a rel="self" link added by hand is dropped by `to_dict`. STAC Browser navigates by it.
-    collection.set_self_href(absolute_url(request, collection_path(dataset_id)))
-    collection.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    collection.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    _add_structural_links(collection, layout.Kind.VECTOR, dataset_id, request)
     collection.add_link(
         pystac.Link(
             rel="alternate",
@@ -830,6 +907,20 @@ def _add_feature_collection_links(
         collection.add_link(
             pystac.Link(rel=link["rel"], target=link["href"], media_type=link["type"], title=link["title"])
         )
+
+
+def _add_structural_links(collection: pystac.Collection, kind: layout.Kind, dataset_id: str, request: Request) -> None:
+    """Replace the collection's links with `self`, `root` and its sub-catalog as `parent`."""
+    collection.clear_links()
+    # Through `set_self_href`, not `add_link`: pystac emits the self link from that attribute,
+    # and a rel="self" link added by hand is dropped by `to_dict`. STAC Browser navigates by it.
+    collection.set_self_href(absolute_url(request, collection_path(kind, dataset_id)))
+    collection.add_link(
+        pystac.Link(rel="root", target=absolute_url(request, CATALOG_PATH), media_type="application/json")
+    )
+    collection.add_link(
+        pystac.Link(rel="parent", target=absolute_url(request, subcatalog_path(kind)), media_type="application/json")
+    )
 
 
 def _document_links() -> list[dict[str, str]]:
@@ -951,6 +1042,7 @@ def _build_collection_template(
     artifact: ArtifactRecord,
     collection_href: str,
     catalog_href: str,
+    parent_href: str,
     dataset_href: str,
     zarr_href: str,
     source_dataset: dict[str, Any],
@@ -989,7 +1081,7 @@ def _build_collection_template(
     template.clear_links()
     template.add_link(pystac.Link(rel="self", target=collection_href, media_type="application/json"))
     template.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    template.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    template.add_link(pystac.Link(rel="parent", target=parent_href, media_type="application/json"))
     template.add_link(
         pystac.Link(rel="alternate", target=dataset_href, media_type="application/json", title="Dataset detail")
     )

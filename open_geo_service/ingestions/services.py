@@ -3341,9 +3341,10 @@ def _dataset_links(
     # Tracks `stac_eligible_artifacts_by_dataset` exactly, so `/datasets` never offers a
     # catalogue link the catalogue itself does not serve, nor withholds one it does.
     if published is not None and published.format in CATALOGUED_FORMATS:
-        links.append(
-            DatasetAccessLink(href=f"/stac/{_segment(dataset_id)}/collection.json", rel="stac", title="STAC collection")
-        )
+        from open_geo_service.stac.services import collection_path
+
+        href = collection_path(layout.kind_of(published.format), dataset_id)
+        links.append(DatasetAccessLink(href=href, rel="stac", title="STAC collection"))
     if published is not None and published.format == ArtifactFormat.GEOPARQUET:
         links.append(
             DatasetAccessLink(
