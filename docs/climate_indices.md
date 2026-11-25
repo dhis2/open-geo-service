@@ -2,19 +2,20 @@
 
 The Open Geo Service exposes the [xclim](https://xclim.readthedocs.io) climate indicators — 183 peer-reviewed, CF-compliant indices — as native openEO processes. Each appears automatically in `GET /processes` and is callable by name from any openEO process graph or client, with no additional configuration.
 
-Indicators that return more than one output (such as `cffwis` and `rain_season`) are left out, since a process returns one datacube. So are xclim's unit and variable conversions, its generic indicators, and the anuclim, cf and icclim collections, which repeat the core indicators under other names.
+Indicators that return more than one output (such as `cffwis` and `rain_season`) are left out, since a process returns one datacube. So are xclim's generic indicators, the anuclim, cf and icclim collections, which repeat the core indicators under other names, and most of its `convert` realm, whose humidity and vapour-pressure converters repeat the [earthkit-meteo processes](#derived-meteorological-variables-earthkit-meteo).
 
 ---
 
 ## What is available
 
-The indicators come from three xclim realms:
+The indicators come from three xclim realms, plus the water-budget converters SPEI needs:
 
 | Module | Domain | Examples |
 |---|---|---|
-| `atmos` | Atmospheric | SPI, dry and wet spells, TX days above, heat wave frequency, frost days, growing degree days, … |
+| `atmos` | Atmospheric | SPI, SPEI, dry and wet spells, TX days above, heat wave frequency, frost days, growing degree days, … |
 | `land` | Land surface | Snow water equivalent, soil freeze/thaw, … |
 | `seaIce` | Sea ice | Ice extent, concentration trends |
+| `convert` | Conversions | `potential_evapotranspiration`, `water_budget`, `water_budget_from_tas` |
 
 Browse the full list from any connected client:
 
@@ -30,9 +31,60 @@ Or call `GET /processes` directly and search by keyword. In the [openEO Web Edit
 
 ---
 
+## Precipitation totals and rates
+
+Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. [SPI](#standardized-precipitation-index-spi) takes them as they are. Two things need a **rate** instead:
+
+- **xclim's other precipitation indicators** (SPEI's `water_budget`, dry and wet spells and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
+- **Comparisons across periods of different length.** January's total covers 31 days and February's 28 or 29, so a February total looks drier than the same daily rainfall in January. As a rate in mm/d, months compare directly with each other and with daily data.
+
+Convert in the process graph with `amount2rate`, between `load_collection` and whatever needs the rate. In the openEO Python client:
+
+```python
+precip = conn.load_collection("chirps3_precipitation_monthly", temporal_extent=["2020-01-01", "2023-12-31"])
+rate = precip.process("amount2rate", arguments={"data": precip})  # mm/d
+```
+
+As a process graph:
+
+```json
+{
+  "process_graph": {
+    "load": {
+      "process_id": "load_collection",
+      "arguments": {
+        "id": "chirps3_precipitation_monthly",
+        "temporal_extent": ["2020-01-01", "2023-12-31"]
+      }
+    },
+    "rate": {
+      "process_id": "amount2rate",
+      "arguments": { "data": { "from_node": "load" } },
+      "result": true
+    }
+  }
+}
+```
+
+`amount2rate` divides each step by its own length, so a 29-day February is handled correctly, and `out_units` selects another unit (`mm/d` by default). `rate2amount` goes the other way, from a rate to the total over each step (`mm` by default), for example to turn a computed rate back into monthly totals. For daily data the numbers do not change: a day's total in mm is its rate in mm/d.
+
+### Why totals
+
+Totals are what users expect, what reporting products and the Climate App use, and how [WMO-No. 1203](https://www.ncei.noaa.gov/pub/data/normals/WMO/Guidelines%20for%20the%20Calculation%20of%20Climate%20Normals.WMO%20No1203_en.pdf) treats precipitation: a sum parameter, where the monthly value is the month's total and the monthly normal is the mean of the monthly totals. One stored copy serves both needs, since rates come from `amount2rate`.
+
+### Limitations
+
+- **At least 3 regular time steps.** The length of a step is inferred from the time axis, which needs at least 3 steps with none missing. A shorter or gappy cube is refused; widen `temporal_extent`.
+- **Climatologies are not converted.** A normal has a `dayofyear` or `month` axis rather than dates, so it is refused. A rate normal is about the monthly normal total divided by the days in the month, with February counted as 28.25 days as in WMO-No. 1203.
+- **SPI from a rate** over several months (`window` > 1) averages the monthly rates rather than summing the totals, so each month counts equally whatever its length. Pass the stored totals to `spi` instead to get the accumulation SPI.
+
+---
+
 ## Standardized Precipitation Index (SPI)
 
-SPI is the primary drought monitoring index. The `window` parameter selects the accumulation timescale:
+SPI is the primary drought monitoring index. It takes the stored precipitation totals directly, daily or monthly: they are summed to monthly totals, and `window` accumulates those, so SPI-3 is fitted to 3-month totals as [WMO-No. 1090](https://uncclearn.org/resources/library/standardized-precipitation-index-user-guide) defines it. Load whole months, since a partial month at either end sums to too little. A rate, such as the output of `amount2rate`, is accepted too.
+
+The `window` parameter selects the accumulation timescale:
 
 | Process call | Timescale |
 |---|---|
@@ -49,7 +101,7 @@ import openeo
 conn = openeo.connect("http://your-instance:9000")
 
 precip = conn.load_collection(
-    "chirps_rainfall_daily",
+    "chirps3_precipitation_daily",
     temporal_extent=["2000-01-01", "2023-12-31"],
 )
 
@@ -58,6 +110,7 @@ spi3 = precip.process(
     arguments={
         "pr": precip,
         "window": 3,
+        "freq": "MS",
         "cal_start": "2000-01-01",
         "cal_end": "2020-12-31",
     },
@@ -75,7 +128,7 @@ job.start_and_wait()
     "load": {
       "process_id": "load_collection",
       "arguments": {
-        "id": "chirps_rainfall_daily",
+        "id": "chirps3_precipitation_daily",
         "temporal_extent": ["2000-01-01", "2023-12-31"]
       }
     },
@@ -84,6 +137,7 @@ job.start_and_wait()
       "arguments": {
         "pr": { "from_node": "load" },
         "window": 3,
+        "freq": "MS",
         "cal_start": "2000-01-01",
         "cal_end": "2020-12-31"
       },
@@ -97,13 +151,80 @@ job.start_and_wait()
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `pr` | datacube | — | Daily precipitation (kg m⁻² s⁻¹ or mm/day) |
+| `pr` | datacube | — | Precipitation as stored, daily or monthly totals in mm, or a rate such as mm/d |
 | `window` | integer | `1` | Accumulation window in months (1=SPI-1, 3=SPI-3, 6=SPI-6) |
 | `cal_start` | string | start of record | Calibration period start (YYYY-MM-DD) |
 | `cal_end` | string | end of record | Calibration period end (YYYY-MM-DD) |
-| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input |
+| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input. Totals need `"MS"` |
 
 SPI values are standardised: `0` = climatological median, `±1` = moderate anomaly, `±2` = extreme anomaly.
+
+---
+
+## Standardized Precipitation Evapotranspiration Index (SPEI)
+
+SPEI is SPI applied to the water budget, precipitation minus potential evapotranspiration, so it also captures drought driven by heat. Build the budget from a precipitation rate and an evapotranspiration estimate, here Hargreaves (1985) from daily minimum and maximum temperature:
+
+```python
+extent = ["2000-01-01", "2023-12-31"]
+precip = conn.load_collection("era5land_precipitation_daily", temporal_extent=extent)
+tasmin = conn.load_collection("era5land_temperature_daily_min", temporal_extent=extent)
+tasmax = conn.load_collection("era5land_temperature_daily_max", temporal_extent=extent)
+
+rate = precip.process("amount2rate", arguments={"data": precip})
+pet = tasmin.process(
+    "potential_evapotranspiration",
+    arguments={"tasmin": tasmin, "tasmax": tasmax, "method": "hargreaves85"},
+)
+wb = rate.process("water_budget", arguments={"pr": rate, "evspsblpot": pet})
+spei3 = wb.process("spei", arguments={"wb": wb, "freq": "MS", "window": 3})
+```
+
+As a process graph:
+
+```json
+{
+  "process_graph": {
+    "precip": {
+      "process_id": "load_collection",
+      "arguments": { "id": "era5land_precipitation_daily", "temporal_extent": ["2000-01-01", "2023-12-31"] }
+    },
+    "tasmin": {
+      "process_id": "load_collection",
+      "arguments": { "id": "era5land_temperature_daily_min", "temporal_extent": ["2000-01-01", "2023-12-31"] }
+    },
+    "tasmax": {
+      "process_id": "load_collection",
+      "arguments": { "id": "era5land_temperature_daily_max", "temporal_extent": ["2000-01-01", "2023-12-31"] }
+    },
+    "rate": {
+      "process_id": "amount2rate",
+      "arguments": { "data": { "from_node": "precip" } }
+    },
+    "pet": {
+      "process_id": "potential_evapotranspiration",
+      "arguments": {
+        "tasmin": { "from_node": "tasmin" },
+        "tasmax": { "from_node": "tasmax" },
+        "method": "hargreaves85"
+      }
+    },
+    "wb": {
+      "process_id": "water_budget",
+      "arguments": { "pr": { "from_node": "rate" }, "evspsblpot": { "from_node": "pet" } }
+    },
+    "spei": {
+      "process_id": "spei",
+      "arguments": { "wb": { "from_node": "wb" }, "freq": "MS", "window": 3 },
+      "result": true
+    }
+  }
+}
+```
+
+The cubes must share a grid, which the three ERA5-Land datasets do; to combine sources such as CHIRPS3 precipitation with ERA5-Land temperature, resample one onto the other first (`resample_cube_spatial`). The evapotranspiration methods need the latitude of each cell, which is read from the cube's `y` coordinate when its CRS is geographic, as it is for every built-in dataset.
+
+`water_budget_from_tas` computes the budget in one step from precipitation and temperature, choosing the evapotranspiration method with its `method` argument.
 
 ---
 
@@ -111,12 +232,16 @@ SPI values are standardised: `0` = climatological median, `±1` = moderate anoma
 
 ### Consecutive dry / wet days
 
+These take a precipitation rate too:
+
 ```python
+rate = precip.process("amount2rate", arguments={"data": precip})
+
 # Annual maximum consecutive dry days (CDD)
-precip.process("dry_spell_max_length", arguments={"pr": precip, "thresh": "1 mm", "window": 1, "freq": "YS"})
+rate.process("dry_spell_max_length", arguments={"pr": rate, "thresh": "1 mm", "window": 1, "freq": "YS"})
 
 # Monthly maximum consecutive wet days (CWD)
-precip.process("wet_spell_max_length", arguments={"pr": precip, "thresh": "1 mm", "window": 1, "freq": "MS"})
+rate.process("wet_spell_max_length", arguments={"pr": rate, "thresh": "1 mm", "window": 1, "freq": "MS"})
 ```
 
 ### Days above temperature threshold

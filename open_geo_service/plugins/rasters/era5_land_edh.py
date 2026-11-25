@@ -70,12 +70,9 @@ class ERA5LandEDHDailyPlugin(BaseDatasetPlugin):
         return daily_period_ids(start=start, end=end, cutoff=cutoff)
 
     def fetch_period(self, period_id: str, bbox: list[float], **kwargs: Any) -> xr.Dataset:
+        # A daily accumulated value is the day's total, an amount in the source's units.
         start = np.datetime64(period_id, "D").astype("datetime64[ns]")
-        daily = self._fetch_time_range(start, start + np.timedelta64(1, "D"), bbox)
-        if self._fetch_accumulated():
-            # A daily accumulated value is the day's total, an amount per day.
-            return amount_as_rate(daily, self.variable, "d")
-        return daily
+        return self._fetch_time_range(start, start + np.timedelta64(1, "D"), bbox)
 
     def _fetch_time_range(self, start: np.datetime64, end: np.datetime64, bbox: list[float]) -> xr.Dataset:
         ds = self._zarr.slice_time(
