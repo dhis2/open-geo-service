@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -238,11 +238,7 @@ def _validate_feature_template(template: object, *, source: str) -> None:
     # raster template id (`_validate_dataset_template`) and a stored collection id
     # (`store.validate_collection_id`); checked here too so the error names the template file
     # rather than surfacing only much later, at the first refresh.
-    if not is_segment_safe_id(template_id):
-        raise ValueError(
-            f"Feature template id '{template_id}' in {source} cannot be used in a URL; it must "
-            "start with a letter or digit and carry only letters, digits, '.', '_' or '-'"
-        )
+    require_segment_safe_id(template_id, "feature template id", where=source)
 
     name = template.get("name")
     if not isinstance(name, str) or not name.strip():

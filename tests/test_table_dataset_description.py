@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.features import templates as feature_templates
 from open_geo_service.ingestions.schemas import ArtifactProvenance
-from open_geo_service.tables import store
+from open_geo_service.tables import schemas, store
 from tests.test_table_datasets import _row, stores  # noqa: F401  # pyright: ignore[reportUnusedImport]  (autouse)
 
 PRECIP = {
@@ -159,7 +159,7 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     assert collection["extent"]["temporal"]["interval"] == [["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]]
     assert collection["table:row_count"] == 4
     columns = {column["name"]: column for column in collection["table:columns"]}
-    assert list(columns) == store.SCHEMA.names
+    assert list(columns) == store.schema_of(record).names
     assert all(column["description"] and column["type"] for column in columns.values())
     assert columns["value"]["unit"] == "mm"
     assert columns["period_start"]["type"] == "date32[day]"
@@ -210,8 +210,8 @@ def test_the_readme_documents_the_columns_and_joins_the_table_to_its_features(cl
     assert "Monthly periods from 2026-01 to 2026-02." in readme
     assert "| `value` | double |" in readme
     assert "JOIN 'http://testserver/features/districts/data.parquet' AS f" in readme
-    assert "ON t.collection_id = 'districts'" in readme
-    assert 'CAST(f."orgUnitCode" AS VARCHAR) = t.feature_id' in readme
+    assert """ON t."collection_id" = 'districts'""" in readme
+    assert 'CAST(f."orgUnitCode" AS VARCHAR) = t."feature_id"' in readme
 
     agents = client.get("/stac/precip_districts/AGENTS.md").text
     assert "http://testserver/tables/precip_districts/data.parquet" in agents
@@ -336,3 +336,106 @@ def test_a_dry_run_refuses_rows_computed_from_other_datasets() -> None:
     report = plugin.send(rendered.content, "tables", dry_run=True, context=context)  # type: ignore[arg-type]
     assert report.outcome == "rejected" and report.ignored == 2
     assert report.message is not None and "was computed from ['districts', 'precip']" in report.message
+
+
+STATION_SCHEMA = """
+- id: station_daily
+  name: Daily station observations
+  columns:
+    - {name: station, type: string, required: true, nullable: false, description: Id of the station.}
+    - {name: day, type: date, required: true, nullable: false, represents: period_start, description: Day observed.}
+    - {name: rainfall, type: double, unit: mm, represents: value, description: Rainfall over the day.}
+    - {name: gauges, type: int32, description: Gauges read.}
+  key: [station, day]
+- id: district_daily
+  name: Daily district values, by a feature column named as the latest values name a period
+  columns:
+    - {name: collection_id, type: string, nullable: false}
+    - {name: _newest, type: string, required: true, nullable: false, represents: feature_id}
+    - {name: day, type: date, required: true, nullable: false, represents: period_start}
+    - {name: value, type: double}
+  key: [collection_id, _newest, day]
+"""
+
+
+def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_provide(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A schema in the instance's plugins_dir: a period and a value, but no feature, so no collection to join."""
+    from open_geo_service import config as api_config
+
+    folder = tmp_path / "plugins" / "tables" / "schemas"
+    folder.mkdir(parents=True)
+    (folder / "stations.yaml").write_text(STATION_SCHEMA, encoding="utf-8")
+    config = api_config.get_config()
+    monkeypatch.setattr(api_config, "get_config", lambda: {**config, "plugins_dir": str(tmp_path / "plugins")})
+
+    def write(rows: list[dict[str, Any]], **arguments: Any) -> Any:
+        return store.write_rows(dataset_id="stations", rows=rows, dataset_name="Station rainfall", **arguments)
+
+    record = write(
+        [{"station": "S1", "day": "2026-01-02", "rainfall": 4.0}, {"station": "S1", "day": "2026-01-01"}],
+        schema="station_daily",
+        period_type="daily",
+    )
+    assert record.table_schema is not None and record.table_schema["id"] == "station_daily"
+    with pytest.raises(ValueError, match=r"unknown columns \['feature_id', 'period_start', 'reducer', 'value'\]"):
+        write([_row("D1", 1.0)])
+    with pytest.raises(ValueError, match="has schema 'station_daily'; it cannot take rows of schema 'aggregation'"):
+        write([{"station": "S1", "day": "2026-01-03"}], schema="aggregation")
+    with pytest.raises(ValueError, match="has no feature column"):
+        write([{"station": "S1", "day": "2026-01-03"}], collection_id="districts")
+    with pytest.raises(ValueError, match="row 0: gauges 2147483648 is outside the int32 range"):
+        write([{"station": "S1", "day": "2026-01-03", "gauges": 2**31}])
+
+    rows = client.get("/tables/stations/rows").json()["items"]
+    assert [(row["station"], row["period"], row["day"], row["period_end"], row["rainfall"]) for row in rows] == [
+        ("S1", "2026-01-01", "2026-01-01", "2026-01-01", None),
+        ("S1", "2026-01-02", "2026-01-02", "2026-01-02", 4.0),
+    ]
+    header = client.get("/tables/stations/rows", params={"format": "csv"}).text.splitlines()[0]
+    assert header == "station,period,day,period_end,rainfall,gauges,written_at"
+    assert client.get("/tables/stations/rows", params={"feature": "S1"}).status_code == 400
+    assert client.get("/tables/stations/rows", params={"reducer": "mean"}).status_code == 400
+
+    collection = client.get("/stac/stations/collection.json").json()
+    assert collection["description"] == "Station rainfall: values per daily period."
+    columns = ["station", "day", "rainfall", "gauges", "written_at"]
+    assert [column["name"] for column in collection["table:columns"]] == columns
+    assert collection["table:columns"][2]["unit"] == "mm"
+    assert collection["extent"]["temporal"]["interval"] == [["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"]]
+    assert collection["extent"]["spatial"]["bbox"] == [[-180.0, -90.0, 180.0, 90.0]]
+
+    readme = client.get("/stac/stations/README.md").text
+    assert "Daily periods from 2026-01-01 to 2026-01-02." in readme and "Joining" not in readme
+    assert "| `rainfall` | double | mm | Rainfall over the day. |" in readme
+    agents = client.get("/stac/stations/AGENTS.md").text
+    assert "one per key: `station`, `day`" in agents and "GeoParquet" not in agents
+    page = client.get("/datasets/stations", params={"f": "html"}).text
+    assert "Station rainfall" in page and "Latest value of each feature" not in page
+    assert "2 rows in all" in page and "no rows yet" not in page
+
+    # The dataset reads its rows by the schema it was written with. A changed schema file may
+    # rename or redescribe it; changing how it reads rows needs a new id.
+    schema_file = folder / "stations.yaml"
+    schema_file.write_text(STATION_SCHEMA.replace("Rainfall over", "Rain over"), encoding="utf-8")
+    schemas.reset_schema_caches()
+    write([{"station": "S1", "day": "2026-01-03", "rainfall": 1.0}])
+    assert "| `rainfall` | double | mm | Rain over the day. |" in client.get("/stac/stations/README.md").text
+    schema_file.write_text(STATION_SCHEMA.replace("name: rainfall", "name: precipitation"), encoding="utf-8")
+    schemas.reset_schema_caches()
+    with pytest.raises(ValueError, match="'station_daily' has changed its columns or key since table dataset"):
+        write([{"station": "S1", "day": "2026-01-04", "precipitation": 1.0}])
+    rows = client.get("/tables/stations/rows").json()["items"]
+    assert [row["rainfall"] for row in rows] == [None, 4.0, 1.0]
+
+    # A feature column named as the latest values name a period does not confuse them.
+    store.write_rows(
+        dataset_id="district_days",
+        collection_id="districts",
+        rows=[{"_newest": "D1", "day": "2026-01-01", "value": 4.0}],
+        schema="district_daily",
+        period_type="daily",
+    )
+    page = client.get("/datasets/district_days", params={"f": "html"}).text
+    assert "Latest value of each feature, 2026-01-01</h3>" in page and '<td class="numeric">4</td>' in page

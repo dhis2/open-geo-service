@@ -143,7 +143,8 @@ def list_datasets(request: Request, response: Response) -> DatasetListResponse |
     same terms as a single dataset: only a client ranking `text/html` above JSON, with `?f=html`
     and `?f=json` deciding outright.
     """
-    from open_geo_service.system.templates import prefers_html, render_datasets_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_datasets_page
 
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
@@ -166,7 +167,8 @@ def get_dataset(dataset_id: str, request: Request, response: Response) -> Datase
     page links to; `?f=html` and `?f=json` choose explicitly.
     """
     record = services.get_dataset_or_404(dataset_id)
-    from open_geo_service.system.templates import prefers_html, render_dataset_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_dataset_page
 
     # Two representations share this URL, so a cache keyed on the URL alone would serve one
     # client the other's. Set on both arms: the JSON arm is a model FastAPI serialises, so the
@@ -245,7 +247,7 @@ def serve_icechunk_store_file(dataset_id: str, file_path: str) -> FileResponse:
         import icechunk, zarr
 
         repo = icechunk.Repository.open(icechunk.http_storage("http://<host>/icechunk/<dataset_id>/"))
-        ds = zarr.open(repo.readonly_session("main").store, zarr_format=3)
+        ds = zarr.open(repo.readonly_session("published").store, zarr_format=3)
     """
     return services.serve_icechunk_file(dataset_id, file_path)
 

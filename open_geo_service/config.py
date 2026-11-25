@@ -111,7 +111,8 @@ def _block_uses_interpolation(text: str, key: str) -> bool:
             # Stop only at the next ordinary top-level mapping key.
             if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:", candidate):
                 break
-            if "${" in candidate:
+            # A commented-out line is never interpolated into the YAML that is parsed.
+            if "${" in candidate and not candidate.lstrip().startswith("#"):
                 return True
             index += 1
         break
@@ -267,6 +268,18 @@ def get_utc_offset() -> datetime.timedelta:
     as it correctly handles half- and quarter-hour offsets rather than truncating.
     """
     return datetime.timedelta(hours=get_utc_offset_hours())
+
+
+def get_snapshot_retention() -> datetime.timedelta:
+    """How long a raster store keeps the versions it replaced, from ``snapshot_retention_days`` (default 30).
+
+    Within it a dataset can be rolled back, and a reader still on an older version keeps reading.
+    ``0`` keeps only the current version of each branch.
+    """
+    raw = get_config().get("snapshot_retention_days", 30)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"snapshot_retention_days in GEOSERVICE_CONFIG must be a whole number >= 0, got {raw!r}")
+    return datetime.timedelta(days=raw)
 
 
 def is_read_only() -> bool:

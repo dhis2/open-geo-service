@@ -41,7 +41,7 @@ CHIRPS (Climate Hazards Group InfraRed Precipitation with Station data) v3 is a 
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_daily_prelim`                                               |
 | **Variable**           | `precip`                                                                           |
-| **Units**              | mm/d                                                                               |
+| **Units**              | mm                                                                                 |
 | **Period**             | Daily                                                                              |
 | **Spatial coverage**   | Global land, 50°S–50°N                                                             |
 | **Spatial resolution** | ~5 km                                                                              |
@@ -69,7 +69,7 @@ DHIS2 then holds the best value available for each day. It does not show which v
 | ---------------------- | -------------------------------------------------- |
 | **Dataset ID**         | `chirps3_precipitation_monthly`                    |
 | **Variable**           | `precip`                                           |
-| **Units**              | mm/d                                               |
+| **Units**              | mm                                                 |
 | **Period**             | Monthly                                            |
 | **Spatial coverage**   | Global land, 50°S–50°N                             |
 | **Spatial resolution** | ~5 km                                              |
@@ -80,9 +80,7 @@ The monthly CHIRPS product, published as one global raster per calendar month. P
 
 **Sync behaviour** — as for the daily dataset, the latest published month is discovered by probing the CHIRPS server rather than assuming a fixed lag. The monthly final product typically trails the calendar by a month or two.
 
-**Transforms** — the source raster is a monthly **total** in mm; it is divided by the number of days in the month and stored as a mean daily rate (`mm/d`). Unlike the daily dataset, where mm and mm/day are the same number, this is a real conversion.
-
-That choice keeps every monthly precipitation dataset on the same units, which matters because `chirps3_precipitation_monthly_normal_1991_2020` is also `mm/d` and is the natural partner for a monthly anomaly — storing the raw total under the same label would make that comparison wrong by a factor of about 30. It is also the form xclim's drought indices expect.
+**Transforms** — none applied; the month's total is stored as received in mm. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ---
 
@@ -208,7 +206,7 @@ CDSE_S3_SECRET_KEY=<your-secret-key>
 | **Item type**        | Feature collection (GeoParquet), not a raster                           |
 | **Identity**         | `id_property: id` — Overture's own division id                          |
 | **Spatial coverage** | Global; extracted for this instance's configured extent                 |
-| **Version**          | The pinned Overture release, e.g. `2026-09-23.0`                        |
+| **Version**          | The Overture release read, e.g. `2026-11-18.0`                          |
 | **Licence**          | ODbL-1.0 — attribution **and** share-alike                              |
 | **Source**           | [Overture Maps divisions](https://docs.overturemaps.org/guides/divisions/) |
 
@@ -230,20 +228,18 @@ country's divisions come back too. Add `country` to `filters` when that matters.
   id_property: id
   provider: overture
   params:
-    release: 2026-09-23.0
     theme: divisions
     filters: { subtype: county, country: SL }
 ```
 
 **Refreshing** — Overture publishes monthly and the release id *is* the recorded version, so
 comparing what an instance holds against the latest release answers "is this stale" without
-reading the data. Bumping `release` selects which release the **next** provider run extracts; it
-does not itself trigger one. A feature collection is not on the raster sync path — `POST
-/sync/{id}` refuses it — so refreshing means re-running the provider: **Fetch** on its template
-page, or `POST /features/{id}/refresh` (add `Prefer: respond-async` to run it as a background
-job). The release is pinned
-rather than resolved to `latest`, so an upgrade is a visible configuration change and an extract
-is reproducible.
+reading the data. Each provider run reads the latest release. A feature collection is not on the
+raster sync path — `POST /sync/{id}` refuses it — so refreshing means re-running the provider:
+**Fetch** on its template page, or `POST /features/{id}/refresh` (add `Prefer: respond-async` to
+run it as a background job). A template may name a `release`, but Overture keeps only its latest
+few, about two months of them, so a named release stops working once Overture removes it and is
+then refused with the releases there are.
 
 **Other themes** — the provider is generic: `theme` selects the family (`divisions`, `buildings`,
 `places`, `transportation`, `addresses`, `base`) and resolves to the type worth extracting, or

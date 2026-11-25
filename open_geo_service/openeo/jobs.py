@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-import portalocker
 from fastapi import HTTPException
 
 from open_geo_service import __version__
@@ -72,11 +71,12 @@ from open_geo_service.shared.compute import get_job_slots, max_concurrent_jobs
 from open_geo_service.shared.display import display_midpoint, display_range, range_spec
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
 from open_geo_service.shared.netcdf import write_netcdf
-from open_geo_service.shared.persistence import execution_lease
+from open_geo_service.shared.persistence import atomic_json, execution_lease, index_lock
 from open_geo_service.shared.statistics import measure_statistics, statistics_of
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.shared.thumbnails import write_dataset_thumbnail
 from open_geo_service.shared.time import utc_now
+from open_geo_service.shared.urls import require_segment_safe_id
 from open_geo_service.shared.vectors import (
     FEATURE_ID_COORD,
     dimension_holds_shapes,
@@ -85,6 +85,7 @@ from open_geo_service.shared.vectors import (
     vector_dim,
 )
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
+from open_geo_service.streaming.store import COMPLETE_VERSION
 
 _T = TypeVar("_T")
 
@@ -107,47 +108,33 @@ def _jobs_index() -> Path:
     """Return the openEO jobs index path, derived from ``_JOBS_DIR`` at call time.
 
     Derived at call time rather than import time so a test that monkeypatches ``_JOBS_DIR``
-    isolates the whole store. The previous module-level constant froze ``jobs.json`` at import;
-    ``_ensure_store`` then mkdir'd the patched ``tmp_path`` while ``write_text`` still targeted
-    the real XDG path, whose parent does not exist on a fresh runner (CLIM-849 CI failure).
+    isolates the whole store.
     """
     return _JOBS_DIR / "jobs.json"
 
 
-def _ensure_store() -> None:
-    _JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    if not _jobs_index().exists():
-        _jobs_index().write_text("[]\n", encoding="utf-8")
-
-
 def _load_raw_records() -> list[dict[str, object]]:
-    _ensure_store()
-    with open(_jobs_index(), encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_SH)
-        try:
+    """The stored records; none before the first write.
+
+    No lock: the index is replaced whole, and taking the lock would create files a read-only
+    server may not write.
+    """
+    try:
+        with open(_jobs_index(), encoding="utf-8") as fh:
             payload = json.load(fh)
-        finally:
-            portalocker.unlock(fh)
+    except FileNotFoundError:
+        return []
     if not isinstance(payload, list):
         raise ValueError("openeo jobs.json must contain a list")
     return payload
 
 
 def _mutate_store(mutation: Callable[[list[dict[str, object]]], _T]) -> _T:
-    _ensure_store()
-    with open(_jobs_index(), "r+", encoding="utf-8") as fh:
-        portalocker.lock(fh, portalocker.LOCK_EX)
-        try:
-            payload = json.load(fh)
-            records: list[dict[str, object]] = payload if isinstance(payload, list) else []
-            result = mutation(records)
-            fh.seek(0)
-            json.dump(records, fh, indent=2, default=str)
-            fh.write("\n")
-            fh.truncate()
-            return result
-        finally:
-            portalocker.unlock(fh)
+    with index_lock(_jobs_index()):
+        records = _load_raw_records()
+        result = mutation(records)
+        atomic_json(_jobs_index(), records)
+        return result
 
 
 def store_list_jobs() -> list[OpenEOJobRecord]:
@@ -1342,8 +1329,13 @@ class OpenEOJobService:
             result = result.data
         # Writing to a managed dataset updates the public catalogue, which needs the operator tier.
         # The route table cannot see this option inside the job body, so it is checked here.
-        if options.get("dataset_id") and owner is not None and owner.tier < Tier.OPERATOR:
+        # Key presence, not truthiness: an empty or non-string id must reach validation, not fall through.
+        managed = "dataset_id" in options
+        if managed and owner is not None and owner.tier < Tier.OPERATOR:
             raise HTTPException(403, "Publishing to a managed dataset ('dataset_id') needs an operator token")
+        # Every other path writes a job-local file, so an id there would be dropped without a word.
+        if managed and ("export" in options or fmt != "ZARR" or not isinstance(result, (xr.Dataset, xr.DataArray))):
+            raise ValueError("'dataset_id' writes a managed raster dataset: it needs a raster in Zarr, no 'export'")
 
         # Resolve a lazy dask_geopandas GeoDataFrame before any tabular path,
         # including named exports, so a lazy frame never reaches a renderer.
@@ -1366,7 +1358,7 @@ class OpenEOJobService:
 
         if isinstance(result, xr.Dataset):
             # Zarr format with dataset_id → write directly to managed Icechunk/Zarr store
-            if fmt == "ZARR" and options.get("dataset_id"):
+            if fmt == "ZARR" and managed:
                 _write_managed_zarr(result, options, job_id=job_id, provenance=provenance)
                 # Managed datasets are not served as job-local files; advertise the
                 # managed dataset via a marker that _result_assets expands into
@@ -1698,10 +1690,7 @@ def _write_managed_zarr(
     dataset_id = options["dataset_id"]
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"'dataset_id' option must be a non-empty string, got {type(dataset_id).__name__}")
-    if Path(dataset_id).name != dataset_id:
-        raise ValueError(
-            f"Invalid dataset_id '{dataset_id}': must be a plain name with no path separators or traversal segments"
-        )
+    require_segment_safe_id(dataset_id, "'dataset_id' option")
 
     from open_geo_service.data_registry.services import datasets as _reg
     from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
@@ -1849,6 +1838,8 @@ def _write_managed_zarr(
                 # The point of no return: a cancelled job stops here, before the commit, so
                 # the store keeps its previous state and nothing is published.
                 before_commit=enter_publication,
+                # One commit holds the whole result, so it is a version a rollback may publish.
+                metadata=COMPLETE_VERSION,
             )
         except ExecutionCancelled:
             if created_template is not None:
@@ -1873,6 +1864,8 @@ def _write_managed_zarr(
                 update["provenance"] = record.provenance.model_copy(update={"output_snapshot_id": snapshot_id})
             record = record.model_copy(update=update)
             ingestion_services.register_artifact_record(record, publish=_publish_raw)
+        # Each publication is a full rewrite, so versions past the retention setting go as a sync's do.
+        ingestion_services.expire_and_collect(store_path)
     finally:
         store_lock.release()
 

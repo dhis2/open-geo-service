@@ -1,10 +1,10 @@
 # Overture Maps administrative divisions, for a country with no usable DHIS2 hierarchy of its
 # own. The extract is per-instance: `bbox` defaults to this instance's declared
 # extent and `country` to its `extent.country_code`, so the template below needs neither a
-# coordinate list nor a country. The `release` is pinned deliberately rather than resolved to
-# "latest", so an upgrade is a visible config change — but bumping it only selects what the
-# NEXT provider run extracts; it does not trigger one. A feature collection is not on the
-# raster sync path, so refreshing means re-running the provider.
+# coordinate list nor a country. Each refresh reads Overture's latest release, which becomes the
+# collection's version. Overture keeps only its latest few releases, so a pinned `release`
+# stops working after about two months. A feature collection is not on the raster sync path,
+# so refreshing means re-running the provider.
 #
 # A bbox is a rectangle, not a border, so the window crosses into neighbouring countries: a
 # Sierra Leone extent also returns Coyah and Conakry in Guinea. The country default drops them.
@@ -24,7 +24,7 @@
   description: >-
     Administrative boundaries for this instance's extent, from Overture Maps. One
     administrative level, chosen by the `subtype` filter. Overture publishes monthly; the
-    pinned release is the collection's version.
+    release read is the collection's version.
   license: ODbL-1.0
   attribution: © OpenStreetMap contributors, © Overture Maps Foundation
   providers:
@@ -37,7 +37,6 @@
   id_property: id
   provider: overture
   params:
-    release: 2026-09-23.0
     theme: divisions
     filters:
       subtype: county
@@ -46,7 +45,7 @@
 # template in an instance's own `plugins/vectors/` can narrow the extract further without any
 # code change. The full vocabulary:
 #
-#   release:  Overture release id. Required, and pinned — it becomes the collection's version.
+#   release:  Overture release id. Defaults to the latest; one Overture no longer keeps is refused.
 #   theme:    divisions (default), buildings, places, transportation, addresses, base.
 #   type:     the exact Overture type, when a theme's default is not the one you want.
 #             divisions resolves to division_area (polygons); its siblings are division
@@ -66,7 +65,6 @@
 # A more selective example — two administrative levels, a named country, and fewer properties:
 #
 #   params:
-#     release: 2026-09-23.0
 #     theme: divisions
 #     country: SLE
 #     columns: [id, names, subtype]

@@ -408,8 +408,12 @@ for the instance in `geoservice.yaml`. On a read-only instance neither form is s
 
 ## The map viewer (`/map`)
 
-The map viewer renders **published** datasets directly in the browser: rasters from their
-GeoZarr stores, vector datasets from vector tiles. Only published datasets appear here.
+The map viewer renders **published** datasets directly in the browser; only published datasets
+appear here. Rasters are read from their Icechunk repositories (`/icechunk/{id}`) at the
+`published` branch, and vector datasets from vector tiles. The browser reads a raster's chunks
+itself, fetching only those in view. It keeps the files Icechunk names by id (chunks, manifests,
+snapshots and transactions) in its cache, and checks the `repo` file, which changes when a
+branch moves, on every open.
 
 - **Dataset selector** — pick any published dataset from the dropdown, grouped into raster and
   vector datasets when the instance has both.

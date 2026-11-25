@@ -223,7 +223,7 @@ Long-running jobs (ingestion, sync, aggregation) are executed asynchronously. Th
 | zarr-layer (MapLibre)                             | TypeScript library for rendering Zarr directly as a native MapLibre Custom Layer in the browser. GPU reprojection from the stored CRS to Spherical Mercator; uses multiscale levels per zoom. |
 | Docker                                            | Containerised deployment. Supports local, cloud-hosted, and country sovereign deployments.                                                                                                    |
 | dhis2-python-client                               | Planned DHIS2 Web API integration library for future data value push and related DHIS2 write workflows.                                                                                       |
-| STAC                                              | Complementary discovery and metadata catalogue layer. Each dataset exposed as a STAC Item with temporal, spatial, and access metadata.                                                        |
+| STAC                                              | Complementary discovery and metadata catalogue layer. Each published dataset is a STAC Collection with temporal, spatial, and access metadata.                                                |
 
 ---
 

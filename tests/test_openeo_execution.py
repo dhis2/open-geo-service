@@ -1873,11 +1873,34 @@ def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
     assert output_path.endswith(".zarr")
 
 
-@pytest.mark.parametrize("bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path"])
-def test_persist_result_rejects_dataset_id_with_path_separators(job_service: OpenEOJobService, bad_id: str) -> None:
+# Path separators, ids that name one file but not one URL segment (shared.urls),
+# and supplied ids that are empty or not text.
+@pytest.mark.parametrize(
+    "bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "", None, 0]
+)
+def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
+    job_service: OpenEOJobService, bad_id: object
+) -> None:
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": bad_id})
-    with pytest.raises(ValueError, match="Invalid dataset_id"):
+    with pytest.raises(ValueError, match="dataset_id"):
         job_service._persist_result("job-traversal", envelope)
+
+
+# Every path but a Zarr raster writes a job-local file, which would drop the id without a word.
+@pytest.mark.parametrize(
+    ("data", "fmt", "options"),
+    [
+        pytest.param(_small_dataset(), "GTiff", {}, id="not_zarr"),
+        pytest.param(_small_dataset(), "Zarr", {"export": "table"}, id="with_export"),
+        pytest.param(pd.DataFrame({"v": [1]}), "Zarr", {}, id="not_raster"),
+    ],
+)
+def test_persist_result_refuses_dataset_id_it_cannot_write(
+    job_service: OpenEOJobService, data: object, fmt: str, options: dict[str, Any]
+) -> None:
+    envelope = SaveResultEnvelope(data, fmt, {"dataset_id": "rain", **options})
+    with pytest.raises(ValueError, match="managed raster dataset"):
+        job_service._persist_result("job-dropped-id", envelope)
 
 
 def test_persist_result_rejects_unknown_dataset_id(
@@ -1902,7 +1925,7 @@ def test_persist_result_auto_registers_missing_template(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
@@ -1953,7 +1976,7 @@ def test_persist_result_reloads_template_after_concurrent_create(
     plugins_dir = tmp_path / "plugins"
     plugins_dir.mkdir()
     config_file = tmp_path / "geoservice.yaml"
-    config_file.write_text(f"plugins_dir: {plugins_dir}\n", encoding="utf-8")
+    config_file.write_text(f"plugins_dir: {plugins_dir}\ndata_dir: {tmp_path / 'data'}\n", encoding="utf-8")
 
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)

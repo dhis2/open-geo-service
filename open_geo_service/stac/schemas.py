@@ -6,7 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class StacLink(BaseModel):
-    """Minimal STAC link representation."""
+    """Minimal STAC link representation, keeping extension fields such as `auth:refs`."""
+
+    model_config = ConfigDict(extra="allow")
 
     rel: str
     href: str

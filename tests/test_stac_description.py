@@ -3,8 +3,7 @@
 Until this, a template could carry a `description` and nothing read it: the collection always
 published a generated sentence. That mattered for datasets whose values mislead without a
 caveat — Meta RWI ranks micro-regions within one country, MODIS LST is surface rather than 2 m
-air temperature, CHIRPS3 monthly is a mean daily rate — because the published collection is the
-only place an API consumer would look.
+air temperature — because the published collection is the only place an API consumer would look.
 """
 
 from typing import Any

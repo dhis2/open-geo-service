@@ -340,8 +340,13 @@ def append_pyramid_levels(
     t_dim: str | None = None,
     x_dim: str = "x",
     y_dim: str = "y",
+    branch: str = "main",
+    amend: bool = False,
 ) -> int | None:
-    """Extend every coarser level of a pyramid store to the periods level 0 has gained.
+    """Extend every coarser level of a pyramid store on *branch* to the periods level 0 has gained.
+
+    With *amend*, the levels join the branch's last commit instead of a commit of their own, so
+    a sync that wrote level 0 leaves one complete version.
 
     A streaming sync appends new periods to level 0 only, and rebuilding the pyramid to cover
     them rewrites every period ever stored (CLIM-1237). Each level is reduced from the level
@@ -369,7 +374,7 @@ def append_pyramid_levels(
     composable_method = "max" if native_resample else method
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    session = repo.writable_session("main")
+    session = repo.writable_session(branch)
     root = zarr.open_group(session.store, mode="r+")
     root_attrs = dict(root.attrs)
     if not attributes_declare_multiscales(root_attrs):
@@ -488,7 +493,7 @@ def append_pyramid_levels(
 
     if root_times is not None:
         _write_root_time_coordinate(session.store, xr.Dataset(coords={t_dim: base_times}), time_dim=t_dim)
-    session.commit(f"Appended {appended} period(s) to every pyramid level")
+    _commit(session, f"Appended {appended} period(s) to every pyramid level", amend=amend)
     logger.info("Appended %d period(s) to the pyramid levels of '%s'", appended, store_path.name)
     return appended
 
@@ -517,7 +522,9 @@ def needs_pyramid(ds: xr.Dataset) -> bool:
     return _needs_pyramid(ds, "x", "y")
 
 
-def ensure_time_coordinate_chunking(store_path: Path, time_dim: str) -> bool:
+def ensure_time_coordinate_chunking(
+    store_path: Path, time_dim: str, *, branch: str = "main", amend: bool = False
+) -> bool:
     """Re-chunk an existing Icechunk store's 1-D time coordinate to a bounded chunk size.
 
     Streaming ingests append one period at a time, which leaves the ``time_dim`` coordinate
@@ -533,7 +540,7 @@ def ensure_time_coordinate_chunking(store_path: Path, time_dim: str) -> bool:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    read_group = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    read_group = zarr.open_group(repo.readonly_session(branch).store, mode="r")
     if time_dim not in read_group:
         return False
     coord = read_group[time_dim]
@@ -550,7 +557,7 @@ def ensure_time_coordinate_chunking(store_path: Path, time_dim: str) -> bool:
     dtype = coord.dtype
     fill_value = coord.fill_value
 
-    session = repo.writable_session("main")
+    session = repo.writable_session(branch)
     write_group = zarr.open_group(session.store, mode="r+")
     del write_group[time_dim]
     new_coord = write_group.create_array(
@@ -564,7 +571,9 @@ def ensure_time_coordinate_chunking(store_path: Path, time_dim: str) -> bool:
     new_coord[:] = values
     for key, value in attrs.items():
         new_coord.attrs[key] = value
-    session.commit(f"Re-chunk '{time_dim}' coordinate to <= {target}/chunk for browser-friendly axis reads")
+    _commit(
+        session, f"Re-chunk '{time_dim}' coordinate to <= {target}/chunk for browser-friendly axis reads", amend=amend
+    )
     logger.info("Re-chunked '%s' coordinate of '%s' from 1 to %d values/chunk", time_dim, store_path.name, target)
     return True
 
@@ -580,6 +589,9 @@ def write_to_icechunk_store(
     pyramid_method: str = "mean",
     commit_message: str = "Materialized dataset",
     before_commit: Callable[[], None] | None = None,
+    branch: str = "main",
+    amend: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Write *ds* to an Icechunk store, building a multiscale pyramid when needed.
 
@@ -590,7 +602,9 @@ def write_to_icechunk_store(
     written, which callers may record as provenance. It is not a logical release version.
 
     Applies GeoZarr conventions throughout. Creates the store if it does not exist;
-    overwrites any existing content in the new commit.
+    overwrites any existing content in the new commit on *branch*. *ds* may be read lazily from
+    the same store: a readonly session keeps the version it opened, so the commit does not
+    change what it reads.
 
     Three CRS calls are required: ``proj.assign_crs`` sets the xproj CRS needed by
     topozarr, ``rio.write_crs`` populates ``spatial_ref`` attrs and encodes
@@ -664,7 +678,7 @@ def write_to_icechunk_store(
 
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.open_or_create(storage)
-    session = repo.writable_session("main")
+    session = repo.writable_session(branch)
 
     if _needs_pyramid(ds, x_dim, y_dim):
         zarr_conventions = list(geozarr_attrs.get("zarr_conventions", []))
@@ -787,4 +801,13 @@ def write_to_icechunk_store(
 
     if before_commit is not None:
         before_commit()
-    return str(session.commit(commit_message))
+    return str(_commit(session, commit_message, amend=amend, metadata=metadata))
+
+
+def _commit(session: Any, message: str, *, amend: bool, metadata: dict[str, Any] | None = None) -> str:
+    """Commit *session*, or with *amend* fold it into the branch's last commit.
+
+    A sync amends its normalization into the commit that wrote its periods, so every snapshot it
+    leaves in the history is a complete version, which a rollback may publish.
+    """
+    return str(session.amend(message, metadata=metadata) if amend else session.commit(message, metadata=metadata))

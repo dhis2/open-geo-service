@@ -115,9 +115,11 @@ The current CLI starts the server. Commands for ingestion, job inspection,
 and maintenance of read-only deployments are planned. Such commands must use the
 shared domain services and may call them directly while the HTTP server is stopped.
 
-Every writer of a managed Icechunk store (ingestion, sync, and openEO jobs publishing a
-managed dataset) holds a writer lock: a lock file beside the store, which also excludes
-writers in other processes. A synchronous ingestion or sync request encountering an active
+Every write of a managed Icechunk store (ingestion, sync, and openEO jobs publishing a
+managed dataset) holds the store's writer lock, so two writes of one store never overlap.
+Other processes are kept out by the writer lease (see
+[One writer per instance](instance_guide.md#one-writer-per-instance)), so the lock is held
+within the writer only. A synchronous ingestion or sync request encountering an active
 writer is refused with `409` before source data is fetched or written. An asynchronous request
 has already returned `202` by that point, so its job fails with the same explanation instead.
 An openEO job that reaches managed-dataset publication while the lock is held fails before
@@ -127,12 +129,14 @@ A native or openEO job also runs in at most one process at a time. If a process 
 shutting down is executing a job, startup recovery in the new process leaves that job alone instead of
 running it a second time, and watches it. If the old process finishes the job, nothing more
 happens; if it exits without finishing, the new process takes the job over within seconds, as
-it would have at startup. The operating system releases both locks when their process exits,
-so a crash never leaves a store or job locked.
+it would have at startup. The operating system releases the job's lease when its process
+exits, and a store's lock lives in the writer's memory, so a crash never leaves a store or job
+locked.
 
-Job, artifact and scheduler records are still whole-file JSON without transactions.
-Direct store mutation outside the shared services must therefore still require
-a stopped server or otherwise guarantee a single writer.
+Job, artifact and scheduler records are whole-file JSON without transactions. They rely on
+one writer per instance, which the writer lease enforces: every write to a store or a record
+takes or checks it, so a process that is not the writer is refused. See
+[One writer per instance](instance_guide.md#one-writer-per-instance).
 
 ---
 
@@ -310,7 +314,7 @@ When a new ingestion request arrives, the framework plans against the periods al
 - same bbox (from the configured extent)
 - the contiguous union of committed and requested source-valid periods
 
-If the union extends forward, only missing periods are appended. A non-adjacent request also fetches the intervening source-valid periods. If the union starts before existing coverage, or the committed coordinate is gapped or out of order, the framework rematerializes the union in a sibling store and publishes it only after successful validation and normalization. `request_scope` records what the caller asked for; artifact `coverage` records the cumulative realized store.
+If the union extends forward, only missing periods are appended. A non-adjacent request also fetches the intervening source-valid periods. If the union starts before existing coverage, or the committed coordinate is gapped or out of order, the framework rematerializes the union on a temporary branch of the same Icechunk repository and moves `main` to it only after successful validation and normalization, so readers never see a partial store. `request_scope` records what the caller asked for; artifact `coverage` records the cumulative realized store.
 
 The artifact store keeps the full history of records for sync deduplication and provenance. Old artifacts are not deleted automatically. For long-running instances, `records.json` grows over time. The long-term direction is a proper transactional store, but for the current scale (tens of artifacts per instance) a JSON file is adequate.
 
@@ -360,7 +364,7 @@ A source can list periods before their data is written. dynamical.org's CHIRPS3 
 The orchestrator therefore commits every period as usual, and checks each for values that are all missing (NaN, or the variable's `_FillValue`). Whether an empty period E is kept depends on what follows it in the run:
 
 1. **A later period L has data.** E and every empty period up to L are empty for a reason of their own, such as water or cloud over the whole extent, and are kept.
-2. **No later period has data.** The source has not filled them yet. When the run ends, the store's `main` branch is reset to the snapshot before E, as a failed sync is rolled back. The periods before E are kept, and a later sync fetches the rest again.
+2. **No later period has data.** The source has not filled them yet. When the run ends, the branch the run writes to is reset to the snapshot before E, as a failed sync is rolled back. The periods before E are kept, and a later sync fetches the rest again. Readers of a published dataset open the `published` branch, which moves only when the sync finishes, so they never see E.
 
 In case 2 the sync still succeeds, with a warning in its message and the log naming the periods held back: for a source such as dynamical.org this happens on every sync that lands in its update window, and the dataset still advances to the last period with data, so it is not a failure. A source that never fills a listed period shows as a dataset whose end stops advancing, with the same warning on every sync.
 

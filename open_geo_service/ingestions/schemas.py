@@ -144,6 +144,13 @@ class ArtifactPublication(BaseModel):
     status: PublicationStatus = PublicationStatus.UNPUBLISHED
     collection_id: str | None = None
     published_at: datetime | None = None
+    snapshot_id: str | None = Field(
+        default=None,
+        description=(
+            "For a published Icechunk raster, the snapshot of its `published` branch the record "
+            "describes. A writer started after a crash describes the branch again when they differ."
+        ),
+    )
 
 
 GEOSERVICE_AUTHORITY = "geoservice"
@@ -547,6 +554,13 @@ class ArtifactRecord(BaseModel):
         description=(
             "Units of a table dataset's values, from its rows. None for a raster or a feature "
             "collection, whose units come from its template."
+        ),
+    )
+    table_schema: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Declaration of the schema a table dataset's rows were written with (`tables.schemas`), so "
+            "an edited schema file cannot change how they read. None for a raster or a feature collection."
         ),
     )
     request_scope: ArtifactRequestScope

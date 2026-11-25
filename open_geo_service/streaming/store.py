@@ -37,7 +37,85 @@ def open_or_create_repo(store_path: Path) -> Any:
     return icechunk.Repository.create(storage)
 
 
-def committed_data_group(store_path: Path) -> str | None:
+# The branch readers open. Writers commit to `main`; publishing moves this one (docs/managed_data_api_guide.md).
+PUBLISHED_BRANCH = "published"
+
+
+# Snapshot metadata on a version a sync or job completed, which a rollback may publish. A sync
+# that fails part way leaves its periods on `main` for a retry without it.
+COMPLETE_VERSION = {"ogs_complete": True}
+
+
+def seal_version(store_path: Path, branch: str = "main") -> None:
+    """Mark the tip of *branch* as a complete version, in place: an empty amend that adds the mark."""
+    repo = open_or_create_repo(store_path)
+    tip = next(iter(repo.ancestry(branch=branch)))
+    repo.writable_session(branch).amend(tip.message, metadata=COMPLETE_VERSION, allow_empty=True)
+
+
+def read_snapshot(repo: Any) -> str:
+    """The snapshot readers see: the tip of `published`, or of `main` for a store not published yet."""
+    import icechunk
+
+    try:
+        return str(repo.lookup_branch(PUBLISHED_BRANCH))
+    except icechunk.RefNotFoundError:
+        return str(repo.lookup_branch("main"))
+
+
+def published_snapshot(repo: Any) -> str | None:
+    """The tip of `published`, or None when the store has not been published."""
+    import icechunk
+
+    try:
+        return str(repo.lookup_branch(PUBLISHED_BRANCH))
+    except icechunk.RefNotFoundError:
+        return None
+
+
+def publish_snapshot(store_path: Path, snapshot_id: str | None = None) -> str | None:
+    """Move `published` to *snapshot_id*, or to the tip of `main`; return where it was, or None.
+
+    Creates the branch the first time. The tip of `main` is marked complete first, if it is not.
+    An older *snapshot_id* rolls the store back; it must be a complete version (see
+    :data:`COMPLETE_VERSION`) in the history of `main` that retention has kept. The move is
+    conditional on the branch being where it was read, so a move this process did not expect
+    fails instead of being overwritten.
+    """
+    from open_geo_service import writer_lease
+
+    writer_lease.ensure_held()
+    repo = open_or_create_repo(store_path)
+    if snapshot_id is None:
+        if not next(iter(repo.ancestry(branch="main"))).metadata.get("ogs_complete"):
+            # Readers are served it from now on, so it is a version a rollback may return to.
+            seal_version(store_path)
+        target = str(repo.lookup_branch("main"))
+    elif any(
+        str(snapshot.id) == snapshot_id and snapshot.metadata.get("ogs_complete")
+        for snapshot in repo.ancestry(branch="main")
+    ):
+        target = snapshot_id
+    else:
+        raise ValueError(f"Snapshot '{snapshot_id}' is not a complete, kept version of {store_path.name}")
+    current = published_snapshot(repo)
+    if current is None:
+        repo.create_branch(PUBLISHED_BRANCH, target)
+    elif current != target:
+        repo.reset_branch(PUBLISHED_BRANCH, target, from_snapshot_id=current)
+    return current
+
+
+def expire_replaced_snapshots(repo: Any) -> set[str]:
+    """Expire the snapshots older than the retention setting; every branch keeps its tip."""
+    from datetime import UTC, datetime
+
+    from open_geo_service import config as api_config
+
+    return set(repo.expire_snapshots(older_than=datetime.now(UTC) - api_config.get_snapshot_retention()))
+
+
+def committed_data_group(store_path: Path, *, branch: str = "main") -> str | None:
     """Return the group holding the committed data variables: ``"0"``, or ``None`` for the root.
 
     A pyramided store keeps its data in level groups and leaves the root with only the time
@@ -55,7 +133,7 @@ def committed_data_group(store_path: Path) -> str | None:
         return None
     try:
         repo = open_or_create_repo(store_path)
-        store = repo.readonly_session("main").store
+        store = repo.readonly_session(branch).store
         ds = xr.open_zarr(store)
         try:
             if ds.data_vars:
@@ -71,17 +149,19 @@ def committed_data_group(store_path: Path) -> str | None:
         return None
 
 
-def _open_committed(store_path: Path) -> Any:
+def _open_committed(store_path: Path, branch: str) -> Any:
     """Open the committed store at whichever group actually holds the data."""
     import xarray as xr
 
     repo = open_or_create_repo(store_path)
-    store = repo.readonly_session("main").store
-    group = committed_data_group(store_path)
+    store = repo.readonly_session(branch).store
+    group = committed_data_group(store_path, branch=branch)
     return xr.open_zarr(store) if group is None else xr.open_zarr(store, group=group)
 
 
-def read_committed_period_ids_ordered(store_path: Path, period_type: str, *, time_dim: str = "t") -> list[str]:
+def read_committed_period_ids_ordered(
+    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = "main"
+) -> list[str]:
     """Return committed period ids in their stored coordinate order.
 
     Resume correctness is store-first: if the repository already contains a
@@ -103,7 +183,7 @@ def read_committed_period_ids_ordered(store_path: Path, period_type: str, *, tim
         # Level 0 rather than the root: the root time coordinate of a pyramided store is
         # rebuilt at the end of a sync, so mid-sync it lags the data and resume would
         # re-append periods that are already committed.
-        ds = _open_committed(store_path)
+        ds = _open_committed(store_path, branch)
         try:
             if time_dim not in ds.coords:
                 return []
@@ -128,12 +208,14 @@ def read_committed_period_ids_ordered(store_path: Path, period_type: str, *, tim
         return []
 
 
-def read_committed_period_ids(store_path: Path, period_type: str, *, time_dim: str = "t") -> set[str]:
+def read_committed_period_ids(
+    store_path: Path, period_type: str, *, time_dim: str = "t", branch: str = "main"
+) -> set[str]:
     """Return period ids already committed in the store, or an empty set."""
-    return set(read_committed_period_ids_ordered(store_path, period_type, time_dim=time_dim))
+    return set(read_committed_period_ids_ordered(store_path, period_type, time_dim=time_dim, branch=branch))
 
 
-def is_store_empty(store_path: Path) -> bool:
+def is_store_empty(store_path: Path, *, branch: str = "main") -> bool:
     """Return whether an Icechunk repository has no arrays, groups, or attrs.
 
     This is a conservative safety check for first-write detection. If the store
@@ -165,10 +247,10 @@ def is_store_empty(store_path: Path) -> bool:
         repo = open_or_create_repo(store_path)
         # Two is enough to answer "more than the initial snapshot?" — ancestry is lazy, so
         # this does not walk the history of a store with thousands of commits.
-        if len(list(itertools.islice(repo.ancestry(branch="main"), 2))) < 2:
+        if len(list(itertools.islice(repo.ancestry(branch=branch), 2))) < 2:
             logger.debug("%s has no commits beyond initialization; treating as empty", store_path)
             return True
-        session = repo.readonly_session("main")
+        session = repo.readonly_session(branch)
         try:
             root = zarr.open_group(session.store, mode="r")
         except GroupNotFoundError:
@@ -180,7 +262,7 @@ def is_store_empty(store_path: Path) -> bool:
         return False
 
 
-def read_committed_spatial_coords(store_path: Path, *, x_dim: str = "x", y_dim: str = "y") -> Any:
+def read_committed_spatial_coords(store_path: Path, *, x_dim: str = "x", y_dim: str = "y", branch: str = "main") -> Any:
     """The spatial coordinate arrays already committed to a store, or None.
 
     An append writes along the time axis only, leaving these as they are — so a period whose
@@ -196,7 +278,7 @@ def read_committed_spatial_coords(store_path: Path, *, x_dim: str = "x", y_dim: 
     if not store_path.exists():
         return None
     try:
-        ds = _open_committed(store_path)
+        ds = _open_committed(store_path, branch)
         try:
             if x_dim not in ds.coords or y_dim not in ds.coords:
                 return None

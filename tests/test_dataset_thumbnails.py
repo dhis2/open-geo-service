@@ -334,7 +334,7 @@ def test_the_store_is_closed_once_the_pixels_are_read(tmp_path: Path, monkeypatc
             closed.append(True)
             self._ds.close()
 
-    monkeypatch.setattr(accessor, "open_icechunk_dataset", lambda path: Tracked(real_open(path)))
+    monkeypatch.setattr(accessor, "open_icechunk_dataset", lambda path, **kw: Tracked(real_open(path, **kw)))
 
     assert write_dataset_thumbnail(_store(tmp_path, _daily_cube(2)), DATASET, now=GENERATED_AT) is not None
     assert closed == [True]
@@ -576,7 +576,7 @@ def test_a_multi_period_sync_never_reaches_the_renderer(tmp_path: Path, monkeypa
             )
 
     store_path = tmp_path / "streaming.zarr"
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     result = streaming_orchestrator.run_streaming_ingest_sync(
         plugin=_Plugin(),
