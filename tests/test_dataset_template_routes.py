@@ -90,7 +90,7 @@ def test_a_template_with_nothing_ingested_is_returned_with_null_coverage(
     assert body["coverage"]["temporal"] == {"start": None, "end": None}
     assert body["coverage"]["spatial_wgs84"] is None
     # The declaration itself still has to survive.
-    assert body["units"] == "mm/d"
+    assert body["units"] == "mm"
 
 
 def test_a_template_with_data_still_reports_derived_coverage(
