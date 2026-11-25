@@ -279,6 +279,11 @@ def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_an_old_data_folder_is_served_from_the_catalog_after_the_migration(old_data: Path, client: TestClient) -> None:
+    # As a run stopped after moving the store and before its pending-collection marker left it.
+    moved = old_data / "catalog" / "rasters" / "rain" / "rain.icechunk"
+    moved.parent.mkdir(parents=True)
+    (old_data / "rasters" / "rain.icechunk").rename(moved)
+
     assert migrate_layout.main([]) == 0
 
     assert sorted(p.name for p in old_data.iterdir()) == [

@@ -1288,6 +1288,12 @@ def test_media_type_cache_is_keyed_by_artifact_not_store_path(
     assert second["assets"]["zarr"]["type"] == "application/vnd.zarr; version=3; profile=multiscales"
     assert detections == [same_path, same_path]  # detected twice, despite the identical path
 
+    # An overwrite keeps the artifact id while the store changes; its record is written anew.
+    rewritten = _artifact(artifact_id="after", path=same_path, created_at=datetime(2026, 3, 1, tzinfo=UTC))
+    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[rewritten]))
+    client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
+    assert len(detections) == 3, "a store overwritten under the same artifact id is described again"
+
 
 def test_cf_extension_is_not_declared_when_no_cf_attrs_are_present(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

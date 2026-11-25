@@ -163,6 +163,8 @@ def _refresh_feature_collection_locked(
     # Last, and never raising: a collection that cannot be drawn is still registered.
     tiles.build_archive(written, dataset_id, store_crs)
     write_feature_thumbnail(written, dataset_id)
+    # The catalog was rewritten with the record, before the tiles and thumbnail it describes.
+    ingestion_services.rewrite_catalog()
     return record
 
 

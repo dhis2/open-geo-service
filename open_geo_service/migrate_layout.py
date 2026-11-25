@@ -356,7 +356,10 @@ def _plan_catalog_files(root: Path, kinds: dict[str, layout.Kind], plan: Catalog
             elif name.endswith(".icechunk.gc-pending") and kind is layout.Kind.RASTER:
                 dataset_id = name.removesuffix(".icechunk.gc-pending")
                 marker = root / "gc-pending" / dataset_id
-                if (folder / f"{dataset_id}.icechunk").is_dir() and not marker.exists():
+                # The store may already be in the catalog, moved by a run that stopped before its marker.
+                moved = root / layout.CATALOG / layout.dataset_key(kind, dataset_id) / f"{dataset_id}.icechunk"
+                store_kept = (folder / f"{dataset_id}.icechunk").is_dir() or moved.is_dir()
+                if store_kept and not marker.exists():
                     plan.moves.append((path, marker))
                 else:
                     plan.deletions.append(path)  # its store is gone, or the marker was already moved
