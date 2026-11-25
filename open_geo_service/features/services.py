@@ -25,6 +25,7 @@ from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord, 
 from open_geo_service.publications.services import managed_dataset_id_for
 from open_geo_service.shared.licences import parse_licence
 from open_geo_service.shared.thumbnails import write_feature_thumbnail
+from open_geo_service.shared.versions import make_current
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,8 @@ def _refresh_feature_collection_locked(
     The older files are not removed here and now, even once the new record is durable. A reader
     can resolve the *old* record and only then open its file — two steps, not one — so a reader
     caught in that gap when this refresh lands must still find the old file exactly as it was.
-    `prune_superseded_files` is what actually removes a superseded file, and it does so only
-    once that file has already survived one full refresh cycle plus a grace period; see its
-    docstring for why immediate deletion is not safe here.
+    `prune_superseded_files` removes a superseded file once the file that replaced it is older
+    than the grace period (`shared.versions`).
     """
     id_property = template.get("id_property")
     if not isinstance(id_property, str) or not id_property:
@@ -148,16 +148,15 @@ def _refresh_feature_collection_locked(
         # publication) before this handler ever runs. Restoring the record first removes that
         # exposure going forward; the file cleanup below must not reopen it going backward.
         #
-        # That is why `written` is routed through `prune_superseded_files` rather than
-        # unlinked directly. A caller that resolved the pre-rollback record a moment before
-        # this handler ran is holding a path to `written`, exactly the gap the grace period
-        # exists to protect — deleting it on the spot here would be the same race this whole
-        # scheme was built to close, just reached from the failure path instead of a normal
-        # refresh. Marking it instead defers the actual delete to a later prune call, once
-        # `written` has aged past `SUPERSEDED_FILE_GRACE_SECONDS`.
+        # That is why `written` is left to `prune_superseded_files` rather than unlinked: a
+        # caller that resolved the pre-rollback record may hold its path. The restored file
+        # becomes the newest again, so `written` goes one grace period after the rollback, and
+        # the restored file one grace period after whatever replaces it next.
         _restore_records(dataset_id, prior_records)
         restored = max(prior_records, key=lambda record: record.created_at) if prior_records else None
         restored_path = Path(str(restored.path)) if restored is not None else None
+        if restored_path is not None and restored_path.is_file():
+            make_current(restored_path)
         store.prune_superseded_files(dataset_id, keep=restored_path)
         raise
     # Only now, with the record durable and pointing at `written`, can the files it

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
+from open_geo_service.shared import versions
 from open_geo_service.tables import store
 
 FIRST = datetime(2026, 3, 1, tzinfo=UTC)
@@ -105,7 +106,7 @@ def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(c
 def test_a_revised_value_replaces_the_previous_one(
     client: TestClient, stores: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(feature_store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     _write([_row("D1", 10.0), _row("D2", 20.0)], written_at=FIRST)
     _write([_row("D1", 11.0)], written_at=LATER)
 
@@ -198,7 +199,7 @@ def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(stores: Pat
     first = _write([_row("D1", 1.0)], written_at=FIRST)
     second = _write([_row("D1", 2.0)], written_at=LATER)
     # The second file replaced the first a while ago; the third write removes the first only.
-    replaced = Path(second.asset_paths[0]).stat().st_mtime - feature_store.SUPERSEDED_FILE_GRACE_SECONDS - 1
+    replaced = Path(second.asset_paths[0]).stat().st_mtime - versions.SUPERSEDED_FILE_GRACE_SECONDS - 1
     os.utime(first.asset_paths[0], (replaced - 1, replaced - 1))
     os.utime(second.asset_paths[0], (replaced, replaced))
     third = _write([_row("D1", 3.0)], written_at=datetime(2026, 5, 1, tzinfo=UTC))

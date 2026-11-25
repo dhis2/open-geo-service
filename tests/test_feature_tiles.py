@@ -17,10 +17,10 @@ from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service.features import services as feature_services
-from open_geo_service.features import store, tiles
+from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
-from open_geo_service.shared import layout
+from open_geo_service.shared import layout, versions
 
 TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "code"}
 
@@ -204,9 +204,8 @@ def test_an_unpublished_collection_serves_no_tiles(client: TestClient) -> None:
 
 
 def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
-    _refresh()  # marks the first file superseded
     current = Path(str(_refresh().path))  # removes it, past a zero grace period
 
     assert not first.exists()
@@ -216,10 +215,9 @@ def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyP
 
 def test_an_archive_that_cannot_be_removed_is_tried_again_later(monkeypatch: pytest.MonkeyPatch) -> None:
     """The archive goes before its Parquet file, so a failure leaves the version discoverable."""
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
     archive = tiles.archive_path(first)
-    _refresh()  # marks the first file superseded
     archive.unlink()
     archive.mkdir()  # an archive that cannot be unlinked
     (archive / "held").touch()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +26,7 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
-from open_geo_service.shared import layout
+from open_geo_service.shared import layout, versions
 from open_geo_service.shared.features import validate_feature_ids
 
 DISTRICTS_TEMPLATE: dict[str, object] = {
@@ -66,7 +68,7 @@ def feature_store_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def _collection_files(dataset_id: str = "districts") -> list[Path]:
     """Every stored file belonging to this collection, current and superseded alike."""
-    return store.superseded_collection_files(dataset_id, keep=None)
+    return store.collection_files(dataset_id)
 
 
 def _current_file(dataset_id: str = "districts") -> Path:
@@ -299,153 +301,65 @@ def test_a_reader_that_resolved_the_old_record_can_still_open_its_file_after_a_r
     assert len(frame) == 2
 
 
-def test_a_superseded_file_is_removed_once_it_has_aged_past_the_grace_period(
+def _age(path: Path, seconds: float) -> None:
+    """Make *path* look written *seconds* ago."""
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+
+
+def test_a_replaced_file_stays_until_its_replacement_is_older_than_the_grace_period() -> None:
+    grown = _collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
+    first = Path(
+        str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection()).path)
+    )
+    second = Path(str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=grown).path))
+    assert first.is_file(), "a file survives the refresh that replaces it"
+
+    _age(first, 1000)
+    _age(second, versions.SUPERSEDED_FILE_GRACE_SECONDS - 10)
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    assert first.is_file(), "its replacement is younger than the grace period"
+
+    _age(second, versions.SUPERSEDED_FILE_GRACE_SECONDS + 10)
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    assert not first.exists()
+
+
+def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The grace period does end: a file only outlives its record for so long.
-
-    Grace is set to zero so a second prune call -- not the one that first marks the file, the
-    next one after it -- treats any already-marked file as old enough. This is deterministic:
-    no sleeping, no timing assumptions, just "has a marker been written on some earlier call".
-    """
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    """The restored file was current until the next successful refresh, not until the failed one."""
     first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    first_path = Path(str(first.path))
-
-    # First subsequent refresh: `first_path` is seen as superseded for the first time and only
-    # marked, never deleted on the same call that notices it.
-    feature_services.refresh_feature_collection(
-        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
-    )
-    assert first_path.is_file(), "never deleted on the same call that first marks it, whatever the grace period"
-
-    # Second subsequent refresh: the marker from the previous call is now old enough (grace=0).
+    _age(Path(str(first.path)), 1000)
+    with monkeypatch.context() as failing:
+        failing.setattr(ingestion_services, "publish_artifact_record", _raise_publication_failed)
+        with pytest.raises(RuntimeError, match="publication failed"):
+            feature_services.refresh_feature_collection(
+                template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
+            )
+    (failed,) = [path for path in _collection_files() if path != Path(str(first.path))]
+    # Time passes; the next refresh succeeds.
+    for path in _collection_files():
+        _age(path, 500 + time.time() - path.stat().st_mtime)
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert not first_path.exists()
-    assert not first_path.with_name(first_path.name + ".superseded").exists()
+    assert len(store.read_feature_collection(first)) == 2, "a reader holding the restored record can still read it"
+    assert not failed.exists()
 
 
-def test_an_unmarked_file_is_never_deleted_in_the_same_call_that_marks_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Even with grace at zero, marking and deleting never happen in the same prune call.
-
-    If they did, the fix would collapse back to the immediate-deletion bug this closes: the
-    marker exists only to force a file to survive at least one full refresh cycle before
-    deletion is even considered.
-    """
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
-    first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    first_path = Path(str(first.path))
-
-    feature_services.refresh_feature_collection(
-        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
-    )
-
-    assert first_path.is_file()
-
-
-def test_prune_removes_a_marker_orphaned_by_a_partial_earlier_delete() -> None:
-    """A marker whose file is already gone is swept up rather than left forever."""
-    root = layout.kind_root(layout.Kind.VECTOR)
-    root.mkdir(parents=True, exist_ok=True)
-    orphan = root / f"districts.{'a' * 32}.parquet.superseded"
-    orphan.touch()
-
-    store.prune_superseded_files("districts", keep=root / "districts.does-not-exist.parquet")
-
-    assert not orphan.exists()
-
-
-def test_a_marker_within_a_positive_grace_period_is_not_yet_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exercises the inequality at a genuine positive value, not only via grace forced to zero.
-
-    Every other grace-boundary test monkeypatches SUPERSEDED_FILE_GRACE_SECONDS to 0, which
-    makes `marker_age < 0` always false and never actually compares a positive marker_age
-    against a positive grace -- mutating that `<` to `<=` still passes every one of them. This
-    controls `time.time()` directly instead, so "marked, but still within grace" is taken at a
-    real, positive age, with no sleeping and the real default grace value left untouched.
-    """
-    # `store.time` is the stdlib `time` module itself, so patching its `time` attribute mutates
-    # that module globally -- capturing the real function first (not a reference to the module)
-    # is what keeps the fallback from calling the patched version of itself.
-    real_time_time = store.time.time
-    now: dict[str, float | None] = {"value": None}
-    monkeypatch.setattr(store.time, "time", lambda: now["value"] if now["value"] is not None else real_time_time())
-
-    first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    first_path = Path(str(first.path))
-
-    # Marks first_path as superseded for the first time; its marker's mtime is real wall-clock
-    # time, set by Path.touch() rather than by the patched time.time().
-    feature_services.refresh_feature_collection(
-        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
-    )
-    marker = first_path.with_name(first_path.name + ".superseded")
-    marked_at = marker.stat().st_mtime
-
-    # Force the *comparison* to see 10 real seconds elapsed -- well under the real 60s default.
-    now["value"] = marked_at + 10.0
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    assert first_path.is_file(), "10s < the real, unpatched 60s default grace period"
-
-    # Now push the same comparison past the real default and confirm it is finally removed.
-    now["value"] = marked_at + store.SUPERSEDED_FILE_GRACE_SECONDS + 1.0
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    assert not first_path.exists(), "past the real default grace period, the file is removed"
-
-
-def test_a_marker_exactly_at_the_grace_boundary_is_treated_as_due(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boundary itself, pinned in the direction the code actually implements.
-
-    `if marker_age < SUPERSEDED_FILE_GRACE_SECONDS: continue` treats "not yet due" as *strictly*
-    younger than the grace period, so a marker exactly that old is eligible for deletion, not
-    protected by one more cycle. A `<=` in place of `<` would pass every other test in this file
-    (a wall-clock tie is never hit by accident) but flips the outcome of exactly this check.
-    """
-    real_time_time = store.time.time
-    now: dict[str, float | None] = {"value": None}
-    monkeypatch.setattr(store.time, "time", lambda: now["value"] if now["value"] is not None else real_time_time())
-
-    first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    first_path = Path(str(first.path))
-
-    feature_services.refresh_feature_collection(
-        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
-    )
-    marker = first_path.with_name(first_path.name + ".superseded")
-    marked_at = marker.stat().st_mtime
-
-    now["value"] = marked_at + store.SUPERSEDED_FILE_GRACE_SECONDS
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    assert not first_path.exists(), "a marker exactly grace-seconds old is due for deletion, not protected"
+def _raise_publication_failed(_artifact_id: str) -> ArtifactRecord:
+    raise RuntimeError("publication failed")
 
 
 def test_a_reader_that_pauses_past_the_grace_period_can_still_lose_its_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The documented, accepted boundary of this design, pinned as a visible assertion.
-
-    `SUPERSEDED_FILE_GRACE_SECONDS`'s own docstring says this plainly: the grace period is a
-    heuristic window bounded by wall-clock time and refresh count, not a hard guarantee: a
-    reader that pauses longer than the grace period while two or more further refreshes run
-    its collection's prune calls can still have its file deleted out from under it. Nothing
-    short of reference counting -- which this module does not have -- closes this fully. This
-    test exists so that limit is an intentional, checked fact rather than a silent assumption.
-    """
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    """The accepted limit of a time-based grace period, pinned so it stays a checked fact."""
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     old_record = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    # First further refresh marks the old file as superseded; the second, with grace at zero,
-    # finds it already marked and deletes it -- the reader "paused" through both.
     feature_services.refresh_feature_collection(
         template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
     )
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     with pytest.raises(ValueError, match="the record and the store disagree"):
         store.read_feature_collection(old_record)
@@ -866,22 +780,15 @@ def test_a_failed_registration_leaves_the_previous_collection_in_place(
     assert len(stored) == 2, "the file must still be the one the surviving record describes"
     assert first.features is not None
     assert first.features.feature_count == len(stored)
-    # The abandoned write is marked as stale, not deleted on the spot: the cleanup path is
-    # shared with cases where a caller could have resolved a record naming it, and it must get
-    # the same grace period as any other superseded file (see the dedicated reader-race test
-    # below for the case where a record actually did exist).
-    assert len(_collection_files()) == 2, "the abandoned write is marked stale, not deleted immediately"
+    # The abandoned write gets the same grace period as any other superseded file, since a
+    # caller could have resolved a record naming it.
+    assert len(_collection_files()) == 2, "the abandoned write is not deleted immediately"
 
 
-def test_a_failed_first_registration_marks_rather_than_deletes_the_unregistered_file(
+def test_a_failed_first_registration_keeps_rather_than_deletes_the_unregistered_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no previous version to restore, the file is marked stale, not deleted on the spot.
-
-    Immediate deletion here would be the exact race the fix closes for the steady-state case,
-    just reached with no prior record to roll back to: `keep=None` still routes through the
-    same mark-then-delete scheme rather than an unconditional unlink.
-    """
+    """With no previous version to restore, the file is left for the next refresh to remove."""
 
     def refuse(**_: Any) -> None:
         raise RuntimeError("records.json is unwritable")
@@ -891,12 +798,10 @@ def test_a_failed_first_registration_marks_rather_than_deletes_the_unregistered_
         with pytest.raises(RuntimeError, match="unwritable"):
             feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert len(_collection_files()) == 1, "marked stale, not deleted immediately"
+    assert len(_collection_files()) == 1, "not deleted immediately"
 
-    # It is not left forever either: a later successful refresh's own prune call finds the
-    # marker already present and, once old enough, removes it. `refuse` is out of scope again
-    # here (the `with` block above restored it), so this refresh runs for real.
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    # Nor left forever: the next successful refresh removes it once the grace period is over.
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     assert len(_collection_files()) == 1, "the abandoned file is gone; only the successful write remains"
@@ -924,9 +829,9 @@ def test_publication_failure_restores_the_previous_file_and_record(monkeypatch: 
     assert len(gpd.read_parquet(_current_file())) == 2
     # The record that briefly named the "grown" file is durable before publication is attempted
     # (register_artifact_record upserts, then publishes), so a caller could have resolved it in
-    # that window and be holding its path. Marking rather than deleting is what keeps that
+    # that window and be holding its path. Keeping rather than deleting is what keeps that
     # caller's read from racing this rollback.
-    assert len(_collection_files()) == 2, "the rolled-back file is marked stale, not deleted immediately"
+    assert len(_collection_files()) == 2, "the rolled-back file is not deleted immediately"
 
 
 def test_a_reader_that_resolved_the_record_before_a_publication_failure_can_still_open_its_file() -> None:
@@ -959,7 +864,7 @@ def test_a_reader_that_resolved_the_record_before_a_publication_failure_can_stil
     assert len(frame) == 2
 
 
-def test_failed_first_publication_marks_rather_than_deletes_the_new_file(
+def test_failed_first_publication_keeps_rather_than_deletes_the_new_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_after_upsert(_artifact_id: str) -> ArtifactRecord:
@@ -971,7 +876,7 @@ def test_failed_first_publication_marks_rather_than_deletes_the_new_file(
         feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     assert ingestion_services._load_records() == []
-    assert len(_collection_files()) == 1, "marked stale, not deleted immediately"
+    assert len(_collection_files()) == 1, "not deleted immediately"
 
 
 def test_the_collection_lock_is_still_held_while_the_record_is_written(

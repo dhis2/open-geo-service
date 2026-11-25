@@ -27,7 +27,6 @@ import json
 import logging
 import math
 import os
-import time
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
@@ -52,6 +51,7 @@ from open_geo_service.shared import layout
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.versions import prune_superseded
 from open_geo_service.tables.schemas import DEFAULT_SCHEMA, WRITTEN_AT, TableSchema, declared_schema, get_schema
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ def write_rows(
             # No record names the file, so no reader sees it; remove it rather than leave it.
             written.unlink(missing_ok=True)
             raise
-        _prune_superseded(_dataset_root(dataset_id), keep=written)
+        prune_superseded(_dataset_root(dataset_id).glob("*.parquet"), keep=written)
         return registered
 
 
@@ -504,27 +504,6 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
 
 def _dataset_root(dataset_id: str) -> Path:
     return layout.dataset_dir(layout.Kind.TABLE, dataset_id)
-
-
-def _prune_superseded(folder: Path, *, keep: Path) -> None:
-    """Remove the files a newer file replaced more than `SUPERSEDED_FILE_GRACE_SECONDS` ago.
-
-    A reader resolves the record, then opens the file it names, so a file just replaced must stay
-    for a reader caught between the two. A file was replaced when the next newer one was written,
-    so the next file's mtime is when it stopped being the dataset; *keep* is never removed. A file
-    that cannot be removed is logged and tried again on the next write.
-    """
-    from open_geo_service.features.store import SUPERSEDED_FILE_GRACE_SECONDS
-
-    files = sorted(folder.glob("*.parquet"), key=lambda path: path.stat().st_mtime)
-    now = time.time()
-    for older, newer in zip(files, files[1:], strict=False):
-        if older == keep or now - newer.stat().st_mtime < SUPERSEDED_FILE_GRACE_SECONDS:
-            continue
-        try:
-            older.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not remove superseded table file '%s'", older, exc_info=True)
 
 
 def _remove_records(dataset_id: str) -> None:
