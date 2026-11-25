@@ -40,7 +40,8 @@ _RAIN_COLLECTION = {
     "renders": {"default": {"ogs:variable": "tp"}},
     "cube:variables": {"tp": {"unit": "mm/d"}},
     "cube:dimensions": {
-        "t": {"type": "temporal", "extent": ["2025-01-01T00:00:00Z", "2025-02-01T00:00:00Z"], "step": "P1M"},
+        # Named as ERA5 stores name it; not every store calls time `t`.
+        "time": {"type": "temporal", "extent": ["2025-01-01T00:00:00Z", "2025-02-01T00:00:00Z"], "step": "P1M"},
         "x": {"type": "spatial"},
         "y": {"type": "spatial"},
     },
@@ -177,6 +178,7 @@ def test_list_datasets_reports_rasters_and_area_collections(mcp: TestClient, rai
     assert datasets["rain"]["kind"] == "raster"
     assert datasets["rain"]["unit"] == "mm/d"
     assert datasets["rain"]["time_step"] == "P1M"
+    assert datasets["rain"]["time_start"] == "2025-01-01T00:00:00Z"
     assert datasets["rain"]["dataset_url"] == "http://testserver/datasets/rain"
     assert datasets["rain"]["map_url"] == "http://testserver/map?dataset=rain"
     assert datasets["regions"]["kind"] == "areas"
@@ -244,21 +246,33 @@ def test_an_unknown_dataset_is_a_tool_error_not_a_failure(mcp: TestClient, rain:
 
 
 def test_links_carry_the_mount_prefix(
-    mcp_enabled: None, rain: None, mounted_client_factory: Callable[..., TestClient]
+    mcp_enabled: None,
+    rain: None,
+    mounted_client_factory: Callable[..., TestClient],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tools reach the API at the address the call came in on, prefix included."""
+    """Tools reach the API at the address the call came in on, prefix included, and link to the
+    instance's public address."""
     client = mounted_client_factory("/ocs")
-    result = client.post(
-        "/mcp",
-        headers=_HEADERS,
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "get_timeseries", "arguments": {"dataset_id": "rain", "lon": 0.5, "lat": 0.5}},
-        },
-    ).json()["result"]["structuredContent"]
 
+    def timeseries() -> dict[str, Any]:
+        return client.post(
+            "/mcp",
+            headers=_HEADERS,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "get_timeseries", "arguments": {"dataset_id": "rain", "lon": 0.5, "lat": 0.5}},
+            },
+        ).json()["result"]["structuredContent"]
+
+    result = timeseries()
     assert result["dataset_url"] == "http://testserver/ocs/datasets/rain"
     assert result["map_url"] == "http://testserver/ocs/map?dataset=rain"
     assert [row["value"] for row in result["rows"]] == [1.0, 1.0]
+
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "https://geo.example.org/ocs")
+    proxied = timeseries()
+    assert proxied["map_url"] == "https://geo.example.org/ocs/map?dataset=rain"
+    assert [row["value"] for row in proxied["rows"]] == [1.0, 1.0]

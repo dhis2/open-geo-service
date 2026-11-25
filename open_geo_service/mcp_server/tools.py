@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from open_geo_service.mcp_server.endpoint import current_scope
+from open_geo_service.shared.urls import absolute_base
 from open_geo_service.stac.services import collection_path
 
 # A result is read by a model, so its size is bounded by what fits usefully in a context window
@@ -180,8 +181,11 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Any:
     return response.json()
 
 
-def _links(client: httpx.AsyncClient, dataset_id: str) -> dict[str, str]:
-    base = str(client.base_url).rstrip("/")
+def _links(dataset_id: str) -> dict[str, str]:
+    """Links to show the user: at the instance's public address, which may differ from the one
+    the call came in on behind a proxy.
+    """
+    base = absolute_base(Request(current_scope.get()))
     return {
         "dataset_url": f"{base}/datasets/{dataset_id}",
         "stac_url": f"{base}{collection_path(dataset_id)}",
@@ -217,7 +221,8 @@ def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], lin
         if dim.get("type") not in ("spatial", "bands", "geometry")
     }
     summary.dimensions = list(dimensions)
-    time = dimensions.get("t") or {}
+    # Stores keep their source's name for time: `t`, or `time` and `valid_time` for ERA5.
+    time = next((dim for dim in dimensions.values() if dim.get("type") == "temporal"), {})
     summary.time_start, summary.time_end = (time.get("extent") or [None, None])[:2]
     step = time.get("step")
     summary.time_step = step if isinstance(step, str) else None
@@ -241,7 +246,7 @@ async def _catalogue(client: httpx.AsyncClient) -> list[DatasetSummary]:
         if kind is None:
             continue
         collection = await _get_json(client, collection_path(dataset_id))
-        summary = _summarise(collection, kind, _links(client, dataset_id))
+        summary = _summarise(collection, kind, _links(dataset_id))
         summary.last_updated = record.get("last_updated")
         summaries.append(summary)
     return summaries
@@ -402,7 +407,7 @@ def build_server() -> MCPServer:
                 lat=lat,
                 rows=[TimeseriesRow(period=row["period"], value=_number(row["value"])) for row in rows],
                 process_graph=graph,
-                **_links(client, dataset_id),
+                **_links(dataset_id),
             )
 
     @server.tool(annotations=read_only)
@@ -467,7 +472,7 @@ def build_server() -> MCPServer:
                     for row in rows
                 ],
                 process_graph=graph,
-                **_links(client, dataset_id),
+                **_links(dataset_id),
             )
 
     return server
