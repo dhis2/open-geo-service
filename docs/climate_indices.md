@@ -154,7 +154,7 @@ xclim 1.0 deprecated five indicators in favour of more general spell indicators,
 | `cold_spell_days` | `cold_spell_total_length` | the same `thresh`, `window: 5` |
 | `maximum_consecutive_warm_days` | `hot_spell_max_length` | `thresh: "25 degC"` |
 
-`cdd` and `cwd` took the threshold as a rate (`1 mm/day`); their replacements take a daily amount and have no `condition` or `min_gap`. The `op` of `heat_wave_index` and `maximum_consecutive_warm_days` is `condition` in their replacements. Other arguments carry over. An indicator xclim deprecates later stays listed, marked deprecated, until it is reviewed and added to this table.
+`cdd` and `cwd` took the threshold as a rate (`1 mm/day`); their replacements take a daily amount and have no `condition` or `min_gap`. The `op` of `heat_wave_index` and `maximum_consecutive_warm_days` is `condition` in their replacements. Other arguments carry over. An xclim upgrade that deprecates another indicator is held back until the indicator is reviewed and added to this table.
 
 ---
 

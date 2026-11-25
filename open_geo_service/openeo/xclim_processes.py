@@ -18,8 +18,8 @@ _cache: list[Any] | None = None
 _REALMS = ("atmos", "land", "seaIce")
 
 # Deprecated indicators left out for their replacements; docs/climate_indices.md gives the
-# arguments that keep their values. Another indicator xclim deprecates stays registered, marked
-# deprecated, until it is added here, so the process list changes only by a change to this list.
+# arguments that keep their values. An xclim upgrade that deprecates another indicator fails
+# `test_every_deprecated_indicator_is_replaced` until it is reviewed and added here.
 REPLACED = {
     "cdd": "dry_spell_max_length",
     "cwd": "wet_spell_max_length",
@@ -157,11 +157,6 @@ def _collect() -> list[Any]:
             "parameters": params,
             "returns": {"schema": {"type": "object", "subtype": "datacube"}},
         }
-        if obj.version_deprecated:
-            since, alternative = obj.version_deprecated
-            meta["deprecated"] = True
-            if alternative:
-                meta["description"] = f"{obj.abstract}\n\nDeprecated since xclim {since}; use `{alternative}` instead."
         extra = {name for name, p in obj.parameters.items() if p.kind is InputKind.KWARGS}
         accepted: set[str] | None = None
         # Other keyword parameters, such as the fire-model options `dc` and `dmc` take as `params`

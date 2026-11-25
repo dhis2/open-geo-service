@@ -132,7 +132,10 @@ def test_spells_and_tx_appear_in_get_processes(client: TestClient) -> None:
     assert {"dry_spell_max_length", "wet_spell_max_length", "tx_days_above"} <= ids
     assert set(REPLACED.values()) <= ids
     assert not set(REPLACED) & ids
-    # A newly deprecated indicator fails here, so it leaves the process list only by review.
+
+
+def test_every_deprecated_indicator_is_replaced() -> None:
+    """An xclim upgrade that deprecates another indicator fails here until it is reviewed."""
     deprecated = {
         key: obj.version_deprecated[1]
         for key, obj in registry.items()
