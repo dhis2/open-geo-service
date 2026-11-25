@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from open_geo_service import storage
 from open_geo_service.shared.crs import canonical_crs_code
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def read_geo_metadata(path: Path | str) -> dict[str, Any] | None:
     import pyarrow.parquet as pq
 
     try:
-        metadata = pq.read_schema(str(path)).metadata or {}
+        metadata = pq.read_schema(str(path), filesystem=storage.parquet_filesystem()).metadata or {}
         raw = metadata.get(b"geo")
         if raw is None:
             return None
@@ -160,7 +161,7 @@ def table_columns(path: Path | str, *, geometry_column: str | None = None) -> li
     import pyarrow.parquet as pq
 
     try:
-        schema = pq.read_schema(str(path))
+        schema = pq.read_schema(str(path), filesystem=storage.parquet_filesystem())
     except (OSError, ValueError) as exc:
         logger.warning("Could not read the parquet schema of '%s': %s", path, exc)
         return []

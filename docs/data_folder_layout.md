@@ -41,6 +41,9 @@ data/
 - **Nothing GeoService keeps for itself lives under `catalog/`**: no locks, markers or
   half-written files. A file is written in `tmp/` and moved into place, so a reader of
   `catalog/` never sees a partial file.
+- **Every file is written through one object interface** (`storage.py`), flushed to disk before
+  the write returns. At its start the writer removes the vector and table files a write stopped
+  before their record left behind.
 - **The data folder is one filesystem.** Moving a file from `tmp/` into `catalog/` is atomic
   only within one filesystem, so do not mount `catalog/` or one of its folders separately.
 - **A new version of a vector or table dataset is a new file.** The record names the current

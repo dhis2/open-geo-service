@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from open_geo_service import writer_lease
+from open_geo_service import storage, writer_lease
 from open_geo_service.features import tiles
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord
 from open_geo_service.shared import layout
@@ -49,9 +49,44 @@ def write_catalog() -> None:
     writer_lease.ensure_held()
     # Built and written under one lock, so of two writes the later one reads the later records.
     with _writing:
-        root = layout.catalog_root()
-        operations = portolan.plan(catalog_documents(), portolan.managed_keys(root))
-        portolan.apply(operations, portolan.FolderSink(root, layout.staging_dir()))
+        sink = _CatalogSink(storage.objects())
+        operations = portolan.plan(catalog_documents(), portolan.managed_keys(sink.documents()))
+        portolan.apply(operations, sink)
+
+
+class _CatalogSink:
+    """Applies the writer's plan through the object interface, under `catalog/`, leaving unchanged documents."""
+
+    def __init__(self, objects: storage.Objects) -> None:
+        self._objects = objects
+        self._prefix = f"{layout.CATALOG}/"
+
+    def put(self, key: str, body: bytes) -> None:
+        try:
+            if self._objects.get(self._prefix + key) == body:
+                return
+        except FileNotFoundError:
+            pass
+        self._objects.put(self._prefix + key, body)
+
+    def delete(self, key: str) -> None:
+        self._objects.delete(self._prefix + key)
+
+    def documents(self) -> list[str]:
+        """The keys of the files in the catalog, its sub-catalogs and its dataset folders, relative to it.
+
+        A level at a time, so the chunks of an Icechunk store are never listed.
+        """
+        keys: list[str] = []
+        folders = [layout.CATALOG]
+        for _depth in range(3):
+            below: list[str] = []
+            for folder in folders:
+                files, subfolders = self._objects.level(folder)
+                keys += files
+                below += subfolders
+            folders = below
+        return [key.removeprefix(self._prefix) for key in keys]
 
 
 def write_catalog_after_change() -> None:

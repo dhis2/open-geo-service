@@ -3,9 +3,9 @@
 Every dataset has a folder of its own, `catalog/<kind>/<id>/`, holding its data and thumbnail;
 GeoService's own state (records, the writer lease, jobs, staging files, markers) sits beside
 `catalog/` at the data folder root. Every path to a dataset file is built here, as a key relative
-to the catalog root, and :func:`local` joins a key to the data folder. A storage backend for
-object storage replaces that one function (CLIM-555). The layout is described in
-`docs/data_folder_layout.md`.
+to the catalog root, and :func:`local` joins a key to the data folder. Files are written and
+read through `open_geo_service.storage`, whose keys are relative to the data folder. The layout
+is described in `docs/data_folder_layout.md`.
 """
 
 from __future__ import annotations

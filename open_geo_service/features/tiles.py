@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from open_geo_service import storage
 from open_geo_service.shared import layout
 from open_geo_service.shared.crs import canonical_crs_code
 
@@ -69,13 +70,14 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
                 import geopandas as gpd
 
                 source = Path(scratch) / "wgs84.parquet"
-                gpd.read_parquet(collection_path).to_crs("EPSG:4326").to_parquet(source)
+                frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
+                frame.to_crs("EPSG:4326").to_parquet(source)
             overview = Path(scratch) / "overview.parquet"
             report = tylertoo.overview(str(source), str(overview), max_zoom="auto")
             if max(level["zoom"] for level in report["levels"]) < MIN_MAX_ZOOM:
                 tylertoo.overview(str(source), str(overview), max_zoom=MIN_MAX_ZOOM)
             tylertoo.export_pmtiles(str(overview), str(staging), layer_name=TILE_LAYER)
-        staging.replace(target)
+        storage.write_file(target, staging)
     except Exception:
         logger.warning("Could not build vector tiles for feature collection '%s'", collection_id, exc_info=True)
         return None

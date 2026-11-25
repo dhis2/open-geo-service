@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
@@ -38,6 +37,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
+from open_geo_service import storage
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -166,7 +166,7 @@ def write_rows(
                     raise
         except BaseException:
             # No record names the file, so no reader sees it; remove it rather than leave it.
-            written.unlink(missing_ok=True)
+            storage.remove(written)
             raise
         prune_superseded(
             _dataset_root(dataset_id).glob("*.parquet"),
@@ -329,7 +329,9 @@ def read_rows(
     flt = None
     for condition in conditions:
         flt = condition if flt is None else flt & condition
-    dataset = pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet")
+    dataset = pds.dataset(
+        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
+    )
     return dataset.to_table(filter=flt).sort_by(_order(declared))
 
 
@@ -363,7 +365,7 @@ def summarize(record: ArtifactRecord) -> FileSummary:
     collection_ids: set[str] = set()
     periods: list[date] = []
     for path in record.asset_paths:
-        metadata = pq.ParquetFile(path).metadata
+        metadata = pq.ParquetFile(path, filesystem=storage.parquet_filesystem()).metadata
         row_count += metadata.num_rows
         if period_column:
             column = metadata.schema.names.index(period_column)
@@ -372,7 +374,12 @@ def summarize(record: ArtifactRecord) -> FileSummary:
                 if statistics is not None and statistics.has_min_max:
                     periods += [statistics.min, statistics.max]
         if collection_column:
-            ids = pq.read_table(path, columns=[collection_column], read_dictionary=[collection_column])
+            ids = pq.read_table(
+                path,
+                columns=[collection_column],
+                read_dictionary=[collection_column],
+                filesystem=storage.parquet_filesystem(),
+            )
             collection_ids.update(
                 str(value) for chunk in ids.column(collection_column).chunks for value in chunk.dictionary.to_pylist()
             )
@@ -410,7 +417,9 @@ def latest_values(record: ArtifactRecord, limit: int) -> LatestValues | None:
         return LatestValues(declared.arrow.empty_table(), 0, [])
     name = declared.represented_by("feature_name")
     by_name = [*([(name, "ascending")] if name else []), (feature, "ascending")]
-    dataset = pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet")
+    dataset = pds.dataset(
+        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
+    )
     keys = [collection, feature]
     # Aggregated under a name no declared column has, so no two columns below share a name.
     newest_input = "_newest"
@@ -455,7 +464,8 @@ def _read_file(record: ArtifactRecord | None, declared: TableSchema) -> pa.Table
     """The rows the dataset's file holds now, or None for a new dataset."""
     if record is None or not record.asset_paths:
         return None
-    return pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet").to_table()
+    files = storage.parquet_filesystem()
+    return pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet", filesystem=files).to_table()
 
 
 def _merged(
@@ -500,7 +510,7 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
     staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
-        os.replace(staging, path)
+        storage.write_file(path, staging)
     finally:
         staging.unlink(missing_ok=True)
     return path

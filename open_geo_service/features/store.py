@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from open_geo_service import writer_lease
+from open_geo_service import storage, writer_lease
 from open_geo_service.features import tiles
 from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.shared import geoparquet, layout
@@ -122,8 +122,8 @@ def prune_superseded_files(dataset_id: str, *, current: Path | None, replaced: I
 def _remove_version(path: Path) -> None:
     # The archive first, so that if it cannot be removed, the Parquet file is still here for the
     # next prune to find, and both are tried again.
-    tiles.archive_path(path).unlink(missing_ok=True)
-    path.unlink()
+    storage.remove(tiles.archive_path(path))
+    storage.remove(path)
 
 
 def _collection_root(dataset_id: str) -> Path:
@@ -233,7 +233,7 @@ def write_feature_collection(
             row_group_size=ROW_GROUP_SIZE,
             compression=geoparquet.PARQUET_COMPRESSION,
         )
-        staging.replace(path)
+        storage.write_file(path, staging)
     finally:
         staging.unlink(missing_ok=True)
     return path, len(frame), str(frame.geometry.name)
@@ -271,7 +271,7 @@ def read_feature_collection(
             "max_unqualified_read=None to read all of it deliberately"
         )
     window = transform_bbox(bbox, source=bbox_crs, target=detail.crs) if bbox is not None else None
-    frame: gpd.GeoDataFrame = gpd.read_parquet(path, bbox=window)
+    frame: gpd.GeoDataFrame = gpd.read_parquet(path, bbox=window, filesystem=storage.parquet_filesystem())
     return frame
 
 
@@ -284,11 +284,13 @@ def read_feature_columns(record: ArtifactRecord, columns: Sequence[str]) -> list
     import pyarrow.parquet as pq
 
     path = _stored_path(record)
-    present = set(pq.read_schema(path).names)
+    present = set(pq.read_schema(path, filesystem=storage.parquet_filesystem()).names)
     wanted = [column for column in dict.fromkeys(columns) if column in present]
     if not wanted:
         return []
-    rows: list[dict[str, Any]] = pq.read_table(path, columns=wanted).to_pylist()
+    rows: list[dict[str, Any]] = pq.read_table(
+        path, columns=wanted, filesystem=storage.parquet_filesystem()
+    ).to_pylist()
     return rows
 
 

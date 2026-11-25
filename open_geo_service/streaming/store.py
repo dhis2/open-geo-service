@@ -18,6 +18,7 @@ from typing import Any
 
 from geozarr_toolkit import create_geozarr_attrs
 
+from open_geo_service import storage
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
 from open_geo_service.stac.media_types import is_multiscales_convention
@@ -30,11 +31,11 @@ def open_or_create_repo(store_path: Path) -> Any:
     """Open an existing Icechunk repository or create one at ``store_path``."""
     import icechunk
 
-    storage = icechunk.local_filesystem_storage(str(store_path))
+    repo_storage = storage.icechunk_storage(str(store_path))
     if store_path.exists():
-        return icechunk.Repository.open(storage)
+        return icechunk.Repository.open(repo_storage)
     store_path.parent.mkdir(parents=True, exist_ok=True)
-    return icechunk.Repository.create(storage)
+    return icechunk.Repository.create(repo_storage)
 
 
 # The branch readers open. Writers commit to `main`; publishing moves this one (docs/managed_data_api_guide.md).

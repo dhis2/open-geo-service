@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.shared import layout, versions
@@ -173,7 +174,7 @@ def test_rows_are_filtered_by_collection_period_reducer_and_weights() -> None:
 def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.MonkeyPatch) -> None:
     record = _write([_row("D1", 10.0)], written_at=FIRST)
     seen: list[list[float | None]] = []
-    rename = store.os.replace
+    rename = storage.os.replace
 
     def read_then_rename(source: Any, target: Any) -> None:
         # The record index is replaced the same way; only the table's file is under test here.
@@ -183,7 +184,7 @@ def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.Mo
             seen.append(store.read_rows(record).column("value").to_pylist())
         rename(source, target)
 
-    monkeypatch.setattr(store.os, "replace", read_then_rename)
+    monkeypatch.setattr(storage.os, "replace", read_then_rename)
     updated = _write([_row("D1", 11.0)], written_at=LATER)
 
     assert seen == [[10.0]]
@@ -256,7 +257,7 @@ def test_a_failed_write_leaves_no_file(monkeypatch: pytest.MonkeyPatch, stores: 
     def fail(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(store.os, "replace", fail)
+    monkeypatch.setattr(storage.os, "replace", fail)
     with pytest.raises(OSError):
         _write([_row("D1", 10.0)])
     assert list((stores / "precip_districts").rglob("*")) == []

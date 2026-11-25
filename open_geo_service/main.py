@@ -215,12 +215,17 @@ async def _services() -> AsyncGenerator[None]:
             clean_up_interrupted_ingests,
             collect_pending_garbage_everywhere,
             reconcile_published_branches,
+            remove_files_no_record_names,
         )
 
         try:
             clean_up_interrupted_ingests()
         except Exception:
             logger.exception("Could not clean up interrupted ingests; continuing startup")
+        try:
+            remove_files_no_record_names()
+        except Exception:
+            logger.exception("Could not remove files left without a record; continuing startup")
         try:
             reconcile_published_branches()
         except Exception:

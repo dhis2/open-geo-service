@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
 from open_geo_service.shared import layout
 from open_geo_service.shared.classes import class_colors, classification_from_template
 from open_geo_service.shared.display import display_midpoint
@@ -425,7 +426,7 @@ def _publish_thumbnail(kind: layout.Kind, dataset_id: str, render: Callable[[Pat
     pending = layout.staging_dir() / f"{dataset_id}.{os.getpid()}.tmp.png"
     try:
         render(pending)
-        os.replace(pending, published)
+        storage.write_file(published, pending)
     finally:
         pending.unlink(missing_ok=True)
     return published
@@ -526,7 +527,7 @@ def write_feature_thumbnail(collection_path: str | Path, collection_id: str) -> 
     try:
         import geopandas as gpd
 
-        frame = gpd.read_parquet(collection_path)
+        frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
         frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty]
         if frame.empty:
             logger.warning("Feature collection '%s' has no geometry to draw; no thumbnail", collection_id)

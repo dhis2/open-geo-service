@@ -16,7 +16,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException
 
-from open_geo_service import __version__
+from open_geo_service import __version__, storage
 from open_geo_service import config as api_config
 from open_geo_service.auth.tokens import Principal, Tier, owner_principal
 from open_geo_service.exports.retention import result_lease
@@ -1470,7 +1470,7 @@ def store_head(store_path: Path) -> str | None:
 
     if not store_path.exists():
         return None
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     return str(repo.lookup_branch("main"))
 
 
@@ -1486,7 +1486,7 @@ def committed_snapshot(store_path: Path, commit_message: str, base_snapshot_id: 
 
     if not store_path.exists():
         return None
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     for snapshot in repo.ancestry(branch="main"):
         if base_snapshot_id is not None and snapshot.id == base_snapshot_id:
             return None

@@ -22,7 +22,7 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync as zarr_sync
 
 from open_geo_service import config as api_config
-from open_geo_service import writer_lease
+from open_geo_service import storage, writer_lease
 from open_geo_service.data_accessor.services.accessor import get_data_coverage_for_paths
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -67,7 +67,7 @@ from open_geo_service.shared import layout
 from open_geo_service.shared.compute import get_job_slots
 from open_geo_service.shared.crs import transform_bbox
 from open_geo_service.shared.licences import DatasetLicence, declared_providers
-from open_geo_service.shared.persistence import atomic_text, index_lock
+from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.raster_contract import TIME_ALIASES
 from open_geo_service.shared.statistics import measure_statistics
 from open_geo_service.shared.storage_size import stored_bytes
@@ -1804,6 +1804,38 @@ def clean_up_interrupted_ingests() -> int:
     return changed
 
 
+def remove_files_no_record_names() -> int:
+    """Remove the vector and table files a write left without a record; return how many.
+
+    A vector or table write puts its new file, then the record naming it. A write stopped in
+    between leaves a file no record names, newer than every file a record names in its folder.
+    Run by the writer at startup, when no write is in progress. An older file no record names is
+    a replaced version, which `shared.versions` removes once its grace period has passed.
+    """
+    objects = storage.objects()
+    named: set[str] = set()
+    for record in _load_records():
+        if record.format in (ArtifactFormat.GEOPARQUET, ArtifactFormat.PARQUET):
+            for raw in (record.path, *record.asset_paths):
+                if raw:
+                    named.add(storage.locate(Path(raw))[1])
+    named |= {key.removesuffix(".parquet") + ".pmtiles" for key in named if key.endswith(".parquet")}
+    removed = 0
+    for kind in (layout.Kind.VECTOR, layout.Kind.TABLE):
+        folders: dict[str, list[storage.Listed]] = {}
+        for listed in objects.scan(f"{layout.CATALOG}/{kind.value}"):
+            if listed.key.endswith((".parquet", ".pmtiles")):
+                folders.setdefault(listed.key.rpartition("/")[0], []).append(listed)
+        for files in folders.values():
+            current = [listed.modified for listed in files if listed.key in named]
+            for listed in files:
+                if listed.key not in named and (not current or listed.modified > max(current)):
+                    logger.info("Removing '%s', which a write left without a record", listed.key)
+                    objects.delete(listed.key)
+                    removed += 1
+    return removed
+
+
 def collect_pending_garbage_everywhere() -> int:
     """Run every collection that is due, skipping a store an ingest holds; returns how many ran.
 
@@ -2313,7 +2345,7 @@ def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
                 path = Path(store_path).resolve()
                 if not path.exists():
                     raise HTTPException(status_code=404, detail="Icechunk store path does not exist on disk")
-                repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(path)))
+                repo = icechunk.Repository.open(storage.icechunk_storage(str(path)))
                 _open_repositories[store_path] = repo
     try:
         snapshot_id = read_snapshot(repo)
@@ -2668,7 +2700,7 @@ def _load_records() -> list[ArtifactRecord]:
 def _save_records(records: list[ArtifactRecord]) -> None:
     global _records_write_count
     with index_lock(ARTIFACTS_INDEX_PATH):
-        atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
+        storage.write(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
         _records_write_count += 1
     _records_changed()
 
@@ -2863,7 +2895,7 @@ def _mutate_records(mutation: Callable[[list[ArtifactRecord]], MutationResult]) 
     with index_lock(ARTIFACTS_INDEX_PATH):
         records = _load_records()
         result = mutation(records)
-        atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
+        storage.write(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
         _records_write_count += 1
     _records_changed()
     return result
@@ -3233,7 +3265,7 @@ def dataset_provenance(record: ArtifactRecord) -> DatasetProvenance | None:
         dataset_id = str(recorded["collection_id"])
         current = current_artifacts.get(dataset_id)
         current_snapshot = (
-            read_snapshot(icechunk.Repository.open(icechunk.local_filesystem_storage(current.path)))
+            read_snapshot(icechunk.Repository.open(storage.icechunk_storage(current.path)))
             if current is not None
             and current.format == ArtifactFormat.ICECHUNK
             and current.path

@@ -13,6 +13,8 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
+from open_geo_service import storage
+
 logger = logging.getLogger(__name__)
 
 SUPERSEDED_FILE_GRACE_SECONDS = 60
@@ -28,7 +30,7 @@ def prune_superseded(
     *,
     current: Path | None,
     replaced: Iterable[Path] = (),
-    remove: Callable[[Path], None] = os.unlink,
+    remove: Callable[[Path], None] | None = None,
 ) -> None:
     """Call when *current* has just become the file the record names, replacing *replaced*.
 
@@ -40,6 +42,7 @@ def prune_superseded(
     record ever named them. *current*, *replaced* and the newest file are never removed. A file
     that cannot be removed is logged and tried again on the next write.
     """
+    removing = remove or storage.remove
     if current is not None:
         make_current(current)
     replaced_keys = {path.resolve() for path in replaced}
@@ -48,12 +51,12 @@ def prune_superseded(
     if replaced_times := [mtime for mtime, path in stamped if path.resolve() in replaced_keys]:
         never_current = [path for mtime, path in stamped if mtime > max(replaced_times) and path.resolve() not in kept]
         for path in never_current:
-            _remove(path, remove)
+            _remove(path, removing)
         stamped = [(mtime, path) for mtime, path in stamped if path not in never_current]
     now = time.time()
     for (_, older), (written, _) in zip(stamped, stamped[1:], strict=False):
         if older.resolve() not in kept and now - written >= SUPERSEDED_FILE_GRACE_SECONDS:
-            _remove(older, remove)
+            _remove(older, removing)
 
 
 def make_current(path: Path) -> None:

@@ -84,7 +84,7 @@ def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> 
     assert migrate_layout.main([]) == 0
 
     data, plugins = instance / "data", instance / "plugins"
-    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "catalog", "writer.lock"]
+    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "catalog", "tmp", "writer.lock"]
     assert sorted(p.relative_to(data / "catalog").as_posix() for p in (data / "catalog").glob("*/*/*")) == [
         "rasters/chirps/chirps.icechunk",
         f"vectors/districts/districts.{UUID}.parquet",
@@ -258,8 +258,9 @@ def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     write_one_of_each(data, monkeypatch)
     [record] = [record for record in ingestion_services._load_records() if record.dataset_id == "rain"]
     # The catalog's documents came with that layout; the files of the layout before it did not.
-    for key in portolan.managed_keys(data / "catalog"):
-        (data / "catalog" / key).unlink()
+    for path in (data / "catalog").rglob("*"):
+        if path.name in portolan.DOCUMENT_NAMES and path.is_file():
+            path.unlink()
     for kind, dataset_id in ((layout.Kind.RASTER, "rain"), (layout.Kind.VECTOR, "districts")):
         layout.thumbnail(kind, dataset_id).write_bytes(b"\x89PNG\r\n\x1a\n" + dataset_id.encode())
     jobs = [

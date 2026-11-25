@@ -10,6 +10,8 @@ import numpy as np
 import xarray as xr
 from pyproj import Transformer
 
+from open_geo_service import storage
+
 from ...data_manager.services.downloader import get_icechunk_path, get_zarr_path
 from ...data_manager.services.utils import get_time_dim, get_x_y_dims
 from ...shared.crs import dataset_crs
@@ -228,8 +230,8 @@ def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True, br
     path = Path(store_path)
     if not path.exists():
         raise FileNotFoundError(f"Icechunk store not found: {path}")
-    storage = icechunk.local_filesystem_storage(str(path))
-    repo = icechunk.Repository.open(storage)
+    repo_storage = storage.icechunk_storage(str(path))
+    repo = icechunk.Repository.open(repo_storage)
     if branch is None:
         from open_geo_service.streaming.store import read_snapshot
 

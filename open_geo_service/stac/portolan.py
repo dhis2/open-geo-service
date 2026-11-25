@@ -3,18 +3,16 @@
 A stand-in with the shape of portolan-core, the official writer, until it is released
 (CLIM-2008), so it imports nothing from GeoService. A document is a STAC dict or Markdown text,
 keyed by its path in the catalog (`rasters/chirps/collection.json`). The caller builds the
-documents; this decides the order they are written in, which earlier documents to delete, and
-writes each file whole.
+documents; this decides the order they are written in and which earlier documents to delete,
+and the caller's sink writes each file whole.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 DOCUMENT_NAMES = frozenset({"catalog.json", "collection.json", "README.md", "AGENTS.md"})
@@ -70,44 +68,11 @@ def apply(operations: Iterable[Operation], sink: Sink) -> None:
             sink.delete(operation.key)
 
 
-def managed_keys(root: Path) -> list[str]:
-    """The keys of the documents under *root*: the catalog's, each sub-catalog's and each collection's."""
-    if not root.is_dir():
-        return []
-    found = [path for depth in ("*", "*/*", "*/*/*") for path in root.glob(depth) if path.name in DOCUMENT_NAMES]
-    return sorted(path.relative_to(root).as_posix() for path in found if path.is_file())
-
-
-class FolderSink:
-    """A catalog in a local folder.
-
-    Each file is written in *staging*, a folder outside the catalog on the same filesystem, and
-    moved into place, so a reader sees the old file or the new one. An unchanged file is left as it is.
-    """
-
-    def __init__(self, root: Path, staging: Path) -> None:
-        self.root = root
-        self.staging = staging
-
-    def put(self, key: str, body: bytes) -> None:
-        target = self.root / key
-        try:
-            if target.read_bytes() == body:
-                return
-        except FileNotFoundError:
-            pass
-        target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(dir=self.staging, prefix=f"{target.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(descriptor, "wb") as file:
-                file.write(body)
-            os.chmod(temporary, 0o644)
-            os.replace(temporary, target)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-
-    def delete(self, key: str) -> None:
-        (self.root / key).unlink(missing_ok=True)
+def managed_keys(keys: Iterable[str]) -> list[str]:
+    """Of *keys*, those of the catalog's documents: its own, each sub-catalog's and each collection's."""
+    return sorted(
+        key for key in keys if PurePosixPath(key).name in DOCUMENT_NAMES and len(PurePosixPath(key).parts) <= 3
+    )
 
 
 def _encode(document: Document) -> bytes:

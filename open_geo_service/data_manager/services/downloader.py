@@ -14,6 +14,7 @@ from topozarr import CoarseningMethod
 from topozarr.coarsen import create_pyramid
 from xarray.backends.zarr import FillValueCoder
 
+from open_geo_service import storage
 from open_geo_service.shared import layout
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
@@ -366,7 +367,7 @@ def append_pyramid_levels(
     native_resample = method in _NATIVE_RESAMPLE_METHODS
     composable_method = "max" if native_resample else method
 
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     session = repo.writable_session(branch)
     root = zarr.open_group(session.store, mode="r+")
     root_attrs = dict(root.attrs)
@@ -530,7 +531,7 @@ def ensure_time_coordinate_chunking(
     """
     import icechunk
 
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     read_group = zarr.open_group(repo.readonly_session(branch).store, mode="r")
     if time_dim not in read_group:
         return False
@@ -667,8 +668,8 @@ def write_to_icechunk_store(
     ds = ds.rio.write_crs(crs)
     ds = ds.proj.assign_crs(spatial_ref=crs)
 
-    storage = icechunk.local_filesystem_storage(str(store_path))
-    repo = icechunk.Repository.open_or_create(storage)
+    repo_storage = storage.icechunk_storage(str(store_path))
+    repo = icechunk.Repository.open_or_create(repo_storage)
     session = repo.writable_session(branch)
 
     if _needs_pyramid(ds, x_dim, y_dim):

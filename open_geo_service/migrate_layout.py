@@ -37,9 +37,8 @@ from typing import Any
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]  # loads .env
 from open_geo_service import config as api_config
-from open_geo_service import writer_lease
+from open_geo_service import storage, writer_lease
 from open_geo_service.shared import layout
-from open_geo_service.shared.persistence import atomic_text
 from open_geo_service.shared.urls import ID_RULE, is_segment_safe_id
 
 DATA_RENAMES = (("downloads", "rasters"), ("features", "vectors"))
@@ -204,7 +203,7 @@ def apply(plan: Plan) -> None:
         path.write_text(text, encoding="utf-8")
     if plan.records is not None:
         index, records = plan.records
-        atomic_text(index, f"{json.dumps(records, indent=2)}\n")
+        storage.write(index, f"{json.dumps(records, indent=2)}\n".encode())
     for source, target in plan.renames:
         source.rename(target)
 
@@ -403,7 +402,7 @@ def apply_catalog(plan: CatalogPlan) -> None:
     if plan.invalid_ids:
         raise MigrationError(_invalid_ids_message(plan.invalid_ids))
     for index, items in filter(None, (plan.records, plan.jobs)):
-        atomic_text(index, f"{json.dumps(items, indent=2)}\n")
+        storage.write(index, f"{json.dumps(items, indent=2)}\n".encode())
     for path in plan.deletions:
         path.unlink(missing_ok=True)
     for source, target in plan.moves:
