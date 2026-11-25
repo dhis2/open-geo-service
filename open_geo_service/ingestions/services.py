@@ -84,9 +84,15 @@ from open_geo_service.shared.urls import path_segment as _segment
 from open_geo_service.streaming.orchestrator import run_static_ingest_sync, run_streaming_ingest_sync
 from open_geo_service.streaming.protocol import IngestionPlugin, StaticIngestionPlugin, close_ingestion_plugin
 from open_geo_service.streaming.store import (
+    PUBLISHED_BRANCH,
+    expire_replaced_snapshots,
     is_store_empty,
     open_or_create_repo,
+    publish_snapshot,
+    published_snapshot,
     read_committed_period_ids_ordered,
+    read_snapshot,
+    seal_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -1296,7 +1302,13 @@ def _create_streaming_artifact(
     rollback_branch: str | None = None
     rollback_snapshot: str | None = None
     replacement_branch: str | None = None
+    # Where `published` was before this ingest moved it, when it did.
+    published_before: str | None = None
     rewritten = False
+    # Whether this ingest committed periods, which normalization then amends into one version, and
+    # whether it amended earlier ones away, which leaves data for a collection.
+    wrote_this_run = False
+    amended_periods = False
     store_committed = False
     plugin_handed_to_orchestrator = False
     ingest_completed = False
@@ -1341,7 +1353,7 @@ def _create_streaming_artifact(
                         return publish_artifact_record(existing.artifact_id)
                     return existing
                 logger.warning(
-                    "Re-registering committed store '%s' because artifact coverage %s..%s is stale",
+                    "Re-registering committed store '%s' because coverage %s..%s is stale",
                     store_path,
                     temporal.start,
                     temporal.end,
@@ -1364,12 +1376,13 @@ def _create_streaming_artifact(
             repo = existing_repo
         if rematerialize:
             assert repo is not None
-            # A prepend or overwrite is built on its own branch, from the repository's empty first
-            # snapshot, and `main` moves to it only once it is fetched, validated and normalized.
-            # Fetching is the least reliable part of ingestion, and readers keep the current data
-            # until then.
+            # A prepend or overwrite is built on its own branch and replaces what it holds, and
+            # `main` moves to it only once it is fetched, validated and normalized. Fetching is the
+            # least reliable part of ingestion, and readers keep the current data until then. The
+            # branch starts from `main`, so the version it replaces stays in the history, kept for
+            # the retention period like any other.
             replacement_branch = f"{_INGEST_BRANCH_PREFIX}replacement-{uuid4().hex}"
-            repo.create_branch(replacement_branch, _first_snapshot(repo))
+            repo.create_branch(replacement_branch, rollback_snapshot)
             ingest_branch = replacement_branch
 
         if plan.action != SyncAction.NO_OP and timeless:
@@ -1384,6 +1397,7 @@ def _create_streaming_artifact(
                 branch=ingest_branch,
             )
             ingest_completed = True
+            wrote_this_run = True
         elif plan.action != SyncAction.NO_OP:
             assert plan.start is not None and plan.end is not None
             plugin_handed_to_orchestrator = True
@@ -1402,8 +1416,11 @@ def _create_streaming_artifact(
                 periods=plan.periods,
                 committed_periods=plan.committed_periods if replacement_branch is None else [],
                 branch=ingest_branch,
+                replace=replacement_branch is not None,
             )
             ingest_completed = True
+            wrote_this_run = result.periods_written > 0
+            amended_periods = result.periods_written > 1
             if result.periods_written == 0 and (replacement_branch is not None or not store_path.exists()):
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
@@ -1416,12 +1433,7 @@ def _create_streaming_artifact(
                 detail="Materialized artifact contains no data for the requested scope",
             )
 
-        _spatial_wgs84_data = coverage_data["coverage"].get("spatial_wgs84")
-        coverage = ArtifactCoverage(
-            temporal=CoverageTemporal(**coverage_data["coverage"]["temporal"]),
-            spatial=CoverageSpatial(**coverage_data["coverage"]["spatial"]),
-            spatial_wgs84=CoverageSpatial(**_spatial_wgs84_data) if _spatial_wgs84_data else None,
-        )
+        coverage = _artifact_coverage(coverage_data)
         # Temporal datasets validate against the cumulative materialization scope, not
         # the raw user request. The latter remains on the record as operation provenance.
         # A brand-new store may legitimately clamp its end to source availability; an
@@ -1442,16 +1454,27 @@ def _create_streaming_artifact(
                     ),
                 )
 
-        normalization = _maybe_build_pyramid(store_path, dataset, branch=ingest_branch)
+        normalization = _maybe_build_pyramid(store_path, dataset, branch=ingest_branch, amend=wrote_this_run)
         rewritten = normalization.rewritten
         if plan.action != SyncAction.NO_OP and plan.has_committed_periods and not normalization.completed:
             raise RuntimeError(f"Could not normalize '{dataset['id']}'; the dataset update was rolled back")
+        if wrote_this_run:
+            # Complete now, so a rollback may publish it; a run that fails before here leaves its
+            # periods on `main` unmarked, for a retry. Only the mark: the update stands without it.
+            try:
+                seal_version(store_path, ingest_branch)
+            except Exception:
+                logger.warning("Could not mark '%s' as a complete version", store_path, exc_info=True)
         if replacement_branch is not None:
             assert repo is not None
             # Readers move from the old version to the complete new one in one step. Nothing else
             # moves `main` meanwhile: the writer lease keeps other processes out and the store lock
             # other ingests, which is also what lets a failure reset it below.
             repo.reset_branch("main", repo.lookup_branch(replacement_branch))
+        if (store_path / "repo").exists() and published_snapshot(open_or_create_repo(store_path)) is not None:
+            # A published dataset's readers move to the new version before its record is written,
+            # as every publication does: the branch decides, the record follows.
+            published_before = publish_snapshot(store_path)
         # Once per sync run, here rather than per commit: a streaming ingest commits one
         # period at a time, so rendering on each would produce a few hundred PNGs during a
         # historical backfill and keep the last. After `main` has moved, so it renders the version
@@ -1477,12 +1500,14 @@ def _create_streaming_artifact(
             created_at=datetime.now(UTC),
             publication=ArtifactPublication(),
         )
-        stored_record = _upsert_artifact_record(
-            record,
-            overwrite=overwrite,
-        )
+        stored_record = _upsert_artifact_record(record, overwrite=overwrite)
         store_committed = True
-        if publish and stored_record.publication.status != PublicationStatus.PUBLISHED:
+        if published_before is not None:
+            # The branch moved above, so the record follows it.
+            return _record_publication(stored_record)
+        if stored_record.publication.status == PublicationStatus.PUBLISHED:
+            return stored_record
+        if publish:
             return publish_artifact_record(stored_record.artifact_id)
         return stored_record
     finally:
@@ -1494,6 +1519,18 @@ def _create_streaming_artifact(
                 except Exception:
                     logger.warning("Could not close ingestion plugin after planning failure", exc_info=True)
             rolled_back = False
+            if published_before is not None and not store_committed:
+                # Readers go back to the version the record still describes, also after a NO_OP
+                # that re-registered the store and so has no rollback of `main`.
+                try:
+                    open_or_create_repo(store_path).reset_branch(PUBLISHED_BRANCH, published_before)
+                except Exception:
+                    logger.error(
+                        "Could not move '%s' of '%s' back; the next writer start describes what it holds",
+                        PUBLISHED_BRANCH,
+                        store_path,
+                        exc_info=True,
+                    )
             if repo is not None and rollback_snapshot is not None:
                 rolled_back = not store_committed and ingest_completed
                 if rolled_back:
@@ -1507,13 +1544,22 @@ def _create_streaming_artifact(
                     if branch is None or (rollback_error is not None and branch == rollback_branch):
                         continue  # the rollback branch still names the version to restore by hand
                     _delete_branch(repo, branch, store_path)
-            if rollback_error is None and (rolled_back or replacement_branch is not None or rewritten):
-                # Still under the store lock, so nothing is mid-write. The version this ingest
-                # replaced, or the one it abandoned, is now reachable from no branch.
+            expired = rollback_error is None and repo is not None and _expire_replaced_versions(store_path)
+            collected = rollback_error is None and (
+                rolled_back or replacement_branch is not None or rewritten or expired or amended_periods
+            )
+            if collected:
+                # Still under the store lock, so nothing is mid-write. Only when something became
+                # unreachable: what this ingest replaced, abandoned or expired, or the periods it
+                # amended away. Once the retention window is full, a daily sync expires a
+                # snapshot a day, so this runs on most of them: 8 s on a 21 GB store of 415,000 files.
                 _collect_replaced_versions(store_path)
-            if not store_committed and not ingest_completed and replacement_branch is None and repo is not None:
-                # A forward append that failed part way keeps the periods it committed, so a
-                # retry can resume; the store has grown, so its recorded size must follow.
+            kept_partial_append = (
+                not store_committed and not ingest_completed and replacement_branch is None and repo is not None
+            )
+            if collected or kept_partial_append:
+                # What the store keeps changed after its size was recorded: cleanup dropped the version
+                # a rollback branch held, or a forward append that failed part way kept its periods.
                 _refresh_recorded_size(store_path)
             if rollback_error is not None:
                 raise RuntimeError(
@@ -1548,12 +1594,6 @@ def _keep_for_restore(repo: Any, branch: str | None, snapshot: str) -> str | Non
     if branch is not None:
         _delete_branch(repo, branch)
     return kept
-
-
-def _first_snapshot(repo: Any) -> str:
-    """The repository's first snapshot, which holds nothing and which Icechunk never expires."""
-    *_, first = repo.ancestry(branch="main")
-    return str(first.id)
 
 
 def _delete_branch(repo: Any, branch: str, store_path: Path | None = None) -> bool:
@@ -1599,21 +1639,44 @@ def clean_up_interrupted_ingest(store_path: Path) -> bool:
     return removed
 
 
-def _collect_replaced_versions(store_path: Path) -> None:
-    """Free the versions no branch reaches any more, keeping recent ones for readers that opened them.
+def _expire_replaced_versions(store_path: Path) -> bool:
+    """Drop versions older than `snapshot_retention_days` from the history; return whether any went.
 
-    A replaced or abandoned version is still in the history of `main` until its snapshots are
-    expired, and only then can a collection free its data. Expiry keeps every branch's tip.
-    Objects written within :data:`_GC_RETENTION` are kept, and a pending collection frees them
-    later. The window counts from when an object was written, not from when it was replaced, so a
-    version older than that is freed at once, also under a reader still on it; CLIM-1976 keeps
-    replaced versions for longer. Never raises.
+    Expiry keeps every branch's tip. Never raises: a failure is logged and leaves the history as
+    it was, and collection still runs.
+    """
+    try:
+        expired = expire_replaced_snapshots(open_or_create_repo(store_path))
+    except Exception:
+        logger.warning("Could not expire old snapshots in '%s'", store_path, exc_info=True)
+        return False
+    if expired:
+        logger.info("Expired %d snapshots older than the retention setting from '%s'", len(expired), store_path.name)
+    return bool(expired)
+
+
+def expire_and_collect(store_path: Path) -> None:
+    """Expire the versions past the retention setting and free what only they kept.
+
+    For a writer other than ingestion, such as an openEO publication, after it has committed.
+    Call with the store's write lock held. Never raises.
+    """
+    if _expire_replaced_versions(store_path):
+        _collect_replaced_versions(store_path)
+
+
+def _collect_replaced_versions(store_path: Path) -> None:
+    """Free the data no branch reaches any more.
+
+    A replaced version stays in the history of `main`, readable and a rollback target, for the
+    retention period (`snapshot_retention_days`); an abandoned or expired one is reachable from
+    no branch. Objects written within :data:`_GC_RETENTION` are kept for readers that opened
+    them, and a pending collection frees them later. Never raises.
     """
     try:
         repo = open_or_create_repo(store_path)
-        repo.expire_snapshots(older_than=datetime.now(UTC))
     except Exception:
-        logger.warning("Could not expire replaced snapshots in '%s'", store_path, exc_info=True)
+        logger.warning("Could not open '%s' to collect it", store_path, exc_info=True)
         return
     collect_unreachable_objects(repo, store_path)
     _mark_collection_pending(store_path)
@@ -1694,8 +1757,8 @@ def collect_pending_garbage(store_path: Path) -> bool:
 
     Call with the store's write lock held. Everything the marked rollback or replacement left
     unreachable was committed before the marker's time, so a collection at least
-    :data:`_GC_RETENTION` later frees all of it; the marker is then removed, and the recorded size,
-    which counted what was freed, is measured again. Returns True when a collection ran.
+    :data:`_GC_RETENTION` later frees all of it; the marker is then removed. The recorded size
+    counts only what a branch reaches, so it does not change. Returns True when a collection ran.
     """
     marker = _collection_marker(store_path)
     try:
@@ -1713,7 +1776,6 @@ def collect_pending_garbage(store_path: Path) -> bool:
     if not collect_unreachable_objects(open_or_create_repo(store_path), store_path):
         return False
     marker.unlink(missing_ok=True)
-    _refresh_recorded_size(store_path)
     return True
 
 
@@ -1771,8 +1833,12 @@ def _maybe_build_pyramid(
     dataset: dict[str, object],
     *,
     branch: str = "main",
+    amend: bool = False,
 ) -> _StoreNormalizationResult:
     """Apply GeoZarr conventions and a multiscale pyramid to what *branch* of the Icechunk store holds.
+
+    With *amend*, each change joins the branch's last commit, the one the ingest just wrote, so
+    the sync leaves a single, complete version.
 
     Streaming ingest writes a flat store with root GeoZarr attrs but no
     ``spatial_ref`` CRS coordinate or pyramid levels. This rewrites the store via
@@ -1803,7 +1869,10 @@ def _maybe_build_pyramid(
 
     try:
         appended = downloader.append_pyramid_levels(
-            store_path, pyramid_method=downloader.resampling_method_from_template(dataset), branch=branch
+            store_path,
+            pyramid_method=downloader.resampling_method_from_template(dataset),
+            branch=branch,
+            amend=amend,
         )
     except Exception:
         # One commit, so a failure leaves the store as the ingest committed it.
@@ -1835,7 +1904,7 @@ def _maybe_build_pyramid(
             # coordinate here (cheap; data variables untouched).
             if t_dim is not None:
                 try:
-                    downloader.ensure_time_coordinate_chunking(store_path, t_dim, branch=branch)
+                    downloader.ensure_time_coordinate_chunking(store_path, t_dim, branch=branch, amend=amend)
                 except Exception:
                     logger.warning("Time-coordinate re-chunk failed for '%s'", store_path.name, exc_info=True)
             logger.info(
@@ -1859,6 +1928,7 @@ def _maybe_build_pyramid(
                 pyramid_method=downloader.resampling_method_from_template(dataset),
                 commit_message="Applied GeoZarr conventions",
                 branch=branch,
+                amend=amend,
             )
         except Exception:
             _mark_collection_pending(store_path)
@@ -1916,24 +1986,136 @@ def register_artifact_record(record: ArtifactRecord, *, publish: bool, replace_s
     records for the same store. Other callers retain request-scope overwrite semantics.
     """
     stored = _upsert_artifact_record(record, overwrite=True, replace_store=replace_store)
-    if publish and stored.publication.status != PublicationStatus.PUBLISHED:
+    # A rewrite of a published store publishes the new version too: readers follow the branch.
+    if publish or stored.publication.status == PublicationStatus.PUBLISHED:
         return publish_artifact_record(stored.artifact_id)
     return stored
 
 
-def publish_artifact_record(artifact_id: str) -> ArtifactRecord:
-    """Publish an artifact and persist publication metadata."""
-    published = publish_artifact(get_artifact_or_404(artifact_id))
+def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) -> ArtifactRecord:
+    """Publish an artifact and persist publication metadata.
+
+    For an Icechunk raster the `published` branch decides and the record follows: the branch
+    moves first, to the tip of `main` or to *snapshot_id*, an older version kept by retention,
+    which rolls the dataset back. Readers outside GeoService see only the branch. Call while no
+    ingest of the same store runs.
+
+    A rollback also describes the version it publishes on the record: its coverage and
+    statistics. `main` keeps the newer versions; publishing it again, which the next sync does,
+    describes it again too.
+    """
+    record = get_artifact_or_404(artifact_id)
+    if record.format == ArtifactFormat.ICECHUNK and record.path:
+        store_path = Path(record.path)
+        if not (store_path / "repo").exists():
+            raise HTTPException(status_code=409, detail=f"Artifact '{artifact_id}' has no store at {store_path}")
+        rolled_back = snapshot_id is None and _rolled_back(store_path)
+        try:
+            publish_snapshot(store_path, snapshot_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if snapshot_id is not None or rolled_back:
+            record = _describing_published(record, store_path)
+    elif snapshot_id is not None:
+        raise HTTPException(status_code=409, detail=f"Artifact '{artifact_id}' has no versions to publish")
+    return _record_publication(record)
+
+
+def _rolled_back(store_path: Path) -> bool:
+    """Whether `published` holds an older version than a complete tip of `main`, as after a rollback.
+
+    A sync that failed part way also leaves `published` behind, but on a tip not marked complete.
+    Call holding the store lock: an ingest between sealing `main` and publishing it looks the same.
+    """
+    if not (store_path / "repo").exists():
+        return False
+    repo = open_or_create_repo(store_path)
+    published = published_snapshot(repo)
+    tip = next(iter(repo.ancestry(branch="main")))
+    return published is not None and published != str(tip.id) and bool(tip.metadata.get("ogs_complete"))
+
+
+def _describing_published(record: ArtifactRecord, store_path: Path) -> ArtifactRecord:
+    """*record* with the coverage and statistics of the version `published` holds."""
+    coverage = get_data_coverage_for_paths(
+        {"period_type": record.period_type}, icechunk_path=str(store_path), branch=PUBLISHED_BRANCH
+    )
+    statistics = measure_statistics(store_path, record.variable, branch=PUBLISHED_BRANCH) if record.variable else None
+    return record.model_copy(update={"coverage": _artifact_coverage(coverage), "statistics": statistics})
+
+
+def _artifact_coverage(coverage_data: dict[str, Any]) -> ArtifactCoverage:
+    """The coverage `get_data_coverage_for_paths` reports, as a record holds it."""
+    wgs84 = coverage_data["coverage"].get("spatial_wgs84")
+    return ArtifactCoverage(
+        temporal=CoverageTemporal(**coverage_data["coverage"]["temporal"]),
+        spatial=CoverageSpatial(**coverage_data["coverage"]["spatial"]),
+        spatial_wgs84=CoverageSpatial(**wgs84) if wgs84 else None,
+    )
+
+
+def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
+    """Mark *record* published, keeping its publication metadata if it already was.
+
+    For an Icechunk raster, also note the snapshot of `published` it now describes.
+    """
+    artifact_id = record.artifact_id
+    published = record if record.publication.status == PublicationStatus.PUBLISHED else publish_artifact(record)
+    if published.format == ArtifactFormat.ICECHUNK and published.path and (Path(published.path) / "repo").exists():
+        snapshot = published_snapshot(open_or_create_repo(Path(published.path)))
+        published = published.model_copy(
+            update={"publication": published.publication.model_copy(update={"snapshot_id": snapshot})}
+        )
 
     def mutate(records: list[ArtifactRecord]) -> ArtifactRecord:
-        for index, record in enumerate(records):
-            if record.artifact_id != artifact_id:
+        for index, stored in enumerate(records):
+            if stored.artifact_id != artifact_id:
                 continue
             records[index] = published
             return published
         raise HTTPException(status_code=404, detail=f"Artifact '{artifact_id}' not found")
 
     return _mutate_records(mutate)
+
+
+def reconcile_published_branches() -> int:
+    """Bring each raster store's `published` branch and its records into step; return how many changed.
+
+    Run by the writer at startup. Publication and sync move the branch before they write the
+    record, so a crash between the two leaves a newest record that is not marked published, or
+    that describes an earlier snapshot than the branch holds; the record then follows the branch.
+    A store with a published record and no branch predates the branch, and gets one at the tip
+    of `main`. There is no unpublishing, so nothing else leaves the two apart.
+    """
+    by_store: dict[str, list[ArtifactRecord]] = {}
+    for record in _load_records():
+        if record.format == ArtifactFormat.ICECHUNK and record.path:
+            by_store.setdefault(record.path, []).append(record)
+    changed = 0
+    for path, records in by_store.items():
+        store_path = Path(path)
+        if not (store_path / "repo").exists():
+            continue
+        try:
+            tip = published_snapshot(open_or_create_repo(store_path))
+            newest = max(records, key=lambda record: record.created_at)
+            published = newest.publication.status == PublicationStatus.PUBLISHED
+            if tip is None and any(r.publication.status == PublicationStatus.PUBLISHED for r in records):
+                publish_snapshot(store_path)
+                # Its tip may hold more than the record describes, such as periods a failed sync kept.
+                _record_publication(_describing_published(newest, store_path))
+            elif tip is not None and not published:
+                _record_publication(newest)
+            elif tip is not None and newest.publication.snapshot_id != tip:
+                _record_publication(_describing_published(newest, store_path))
+            else:
+                continue
+        except Exception:
+            logger.warning("Could not reconcile the publication of '%s'", store_path, exc_info=True)
+            continue
+        changed += 1
+        logger.warning("Brought the publication of '%s' and its record into step", store_path.name)
+    return changed
 
 
 def sync_dataset(
@@ -1954,6 +2136,16 @@ def sync_dataset(
     source_dataset = registry_datasets.get_dataset(latest_artifact.dataset_id)
     if source_dataset is None:
         raise HTTPException(status_code=404, detail=f"Source dataset '{latest_artifact.dataset_id}' not found")
+    if latest_artifact.format == ArtifactFormat.ICECHUNK and latest_artifact.path:
+        # After a rollback, the sync publishes `main` again, also when nothing new is due. An
+        # ingest holding the store publishes it itself.
+        lock = _acquire_store_lock(Path(latest_artifact.path))
+        if lock.acquire(blocking=False):
+            try:
+                if _rolled_back(Path(latest_artifact.path)):
+                    latest_artifact = publish_artifact_record(latest_artifact.artifact_id)
+            finally:
+                lock.release()
     extent = get_extent()
     resolved_country_code = extent.get("country_code") if extent else None
     try:
@@ -2091,7 +2283,7 @@ def _get_latest_published_icechunk_artifact(dataset_id: str) -> ArtifactRecord:
 
 
 def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
-    """Return a read-only session on the tip of a published artifact's `main` branch.
+    """Return a read-only session on the tip of a published artifact's `published` branch.
 
     The repository stays open between requests, so its snapshot and manifests stay in its cache,
     and the session is reopened only when the branch has moved. A chunk request then costs one
@@ -2119,7 +2311,7 @@ def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
                 repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(path)))
                 _open_repositories[store_path] = repo
     try:
-        snapshot_id = repo.lookup_branch("main")
+        snapshot_id = read_snapshot(repo)
     except icechunk.IcechunkError as exc:
         # Drop the repository, so a transient failure is not kept for the next request.
         with _open_stores_lock:
@@ -2560,8 +2752,8 @@ def _upsert_artifact_record(
 def _refresh_recorded_size(store_path: Path) -> None:
     """Re-measure *store_path* and record it on the newest record for that path, if there is one.
 
-    For a failed append that kept its committed periods, and after a collection freed a replaced
-    version. Best-effort: a size is a figure for display, so this logs rather than raising and
+    For a failed append that kept its committed periods, and after an ingest's cleanup changed
+    which versions a branch reaches. Best-effort: a size is a figure for display, so this logs rather than raising and
     never masks the failure that led here.
     """
     try:
@@ -2616,7 +2808,11 @@ def measure_missing_statistics(should_stop: Callable[[], bool] = lambda: False) 
         if not slots.acquire(should_stop):
             break
         try:
-            statistics = measure_statistics(record.path, record.variable)
+            # A published record describes `published`, which a rollback leaves behind `main`.
+            published = record.publication.status == PublicationStatus.PUBLISHED
+            statistics = measure_statistics(
+                record.path, record.variable, branch=PUBLISHED_BRANCH if published else "main"
+            )
         finally:
             slots.release()
         if statistics is not None and _fill_statistics(record, statistics):
@@ -3011,7 +3207,7 @@ def dataset_provenance(record: ArtifactRecord) -> DatasetProvenance | None:
     input without snapshots, such as a feature collection, keeps its artifact id when refreshed,
     so whether it changed cannot be told.
     """
-    from open_geo_service.openeo.jobs import store_head
+    import icechunk
 
     provenance = record.provenance
     if provenance is None:
@@ -3023,8 +3219,11 @@ def dataset_provenance(record: ArtifactRecord) -> DatasetProvenance | None:
         dataset_id = str(recorded["collection_id"])
         current = current_artifacts.get(dataset_id)
         current_snapshot = (
-            store_head(Path(current.path))
-            if current is not None and current.format == ArtifactFormat.ICECHUNK and current.path
+            read_snapshot(icechunk.Repository.open(icechunk.local_filesystem_storage(current.path)))
+            if current is not None
+            and current.format == ArtifactFormat.ICECHUNK
+            and current.path
+            and (Path(current.path) / "repo").exists()
             else None
         )
         changed: bool | None = None

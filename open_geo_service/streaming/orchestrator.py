@@ -163,8 +163,14 @@ async def run_streaming_ingest(
     periods: list[str] | None = None,
     committed_periods: list[str] | None = None,
     branch: str = "main",
+    replace: bool = False,
 ) -> StreamingIngestResult:
     """Stream one dataset into a flat Zarr v3 store one period at a time, committing each to *branch*.
+
+    A run is one snapshot: its first period is committed and each later one amends that commit,
+    so the history keeps one version per sync rather than one per period. Each period is still
+    durable when written. With *replace*, the first period replaces what *branch* holds instead
+    of appending to it.
 
     Resume policy:
     - committed store state is authoritative
@@ -203,7 +209,9 @@ async def run_streaming_ingest(
     if on_progress:
         on_progress(len(all_periods) - len(pending), len(all_periods), f"{len(pending)} periods pending")
 
-    if committed:
+    if replace:
+        is_first_write = True
+    elif committed:
         is_first_write = False
     elif is_store_empty(store_path, branch=branch):
         is_first_write = True
@@ -229,6 +237,8 @@ async def run_streaming_ingest(
     axes_checked = False
     # Group to append into: None for a flat store, "0" for a pyramided one.
     append_group: str | None = None
+    # The period this run committed first; every later one amends that commit.
+    run_start: str | None = None
     # CF attributes (units / standard_name / cell_methods) declared on the template,
     # stamped onto each written period so the store is CF-compliant on disk (#280).
     # The template is authoritative for the fields it declares, so we overwrite any
@@ -328,7 +338,11 @@ async def run_streaming_ingest(
                 # preserve GeoZarr metadata even if the underlying store layer only
                 # touches array content for the new period.
                 write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
-                session.commit(f"ingest: {period_id}")
+                if run_start is None:
+                    session.commit(f"ingest: {period_id}")
+                    run_start = period_id
+                else:
+                    session.amend(f"ingest: {run_start} to {period_id}")
             finally:
                 ds.close()
 
@@ -353,21 +367,6 @@ async def run_streaming_ingest(
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         close_ingestion_plugin(plugin)
 
-    # Prune intermediate ingest snapshots: each period commit created one snapshot;
-    # only the final HEAD state needs to be retained.  expire_snapshots marks older
-    # snapshots as expired without deleting chunk data — garbage_collect would be
-    # needed to reclaim manifest storage.  Every branch keeps its tip, so the branch written to,
-    # ``main`` and an ingest's rollback branch all survive.
-    from datetime import datetime, timezone
-
-    try:
-        final_repo = open_or_create_repo(store_path)
-        expired = final_repo.expire_snapshots(older_than=datetime.now(tz=timezone.utc))
-        if expired:
-            logger.info("Expired %d intermediate snapshots from %s", len(expired), store_path)
-    except Exception:
-        logger.warning("expire_snapshots failed for %s — store remains valid", store_path, exc_info=True)
-
     return StreamingIngestResult(store_path=store_path, period_type=period_type, periods_written=written)
 
 
@@ -387,6 +386,7 @@ def run_streaming_ingest_sync(
     periods: list[str] | None = None,
     committed_periods: list[str] | None = None,
     branch: str = "main",
+    replace: bool = False,
 ) -> StreamingIngestResult:
     """Synchronous wrapper for threaded job execution.
 
@@ -417,6 +417,7 @@ def run_streaming_ingest_sync(
             periods=periods,
             committed_periods=committed_periods,
             branch=branch,
+            replace=replace,
         )
     )
 

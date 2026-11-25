@@ -85,6 +85,7 @@ from open_geo_service.shared.vectors import (
     vector_dim,
 )
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
+from open_geo_service.streaming.store import COMPLETE_VERSION
 
 _T = TypeVar("_T")
 
@@ -1837,6 +1838,8 @@ def _write_managed_zarr(
                 # The point of no return: a cancelled job stops here, before the commit, so
                 # the store keeps its previous state and nothing is published.
                 before_commit=enter_publication,
+                # One commit holds the whole result, so it is a version a rollback may publish.
+                metadata=COMPLETE_VERSION,
             )
         except ExecutionCancelled:
             if created_template is not None:
@@ -1861,6 +1864,8 @@ def _write_managed_zarr(
                 update["provenance"] = record.provenance.model_copy(update={"output_snapshot_id": snapshot_id})
             record = record.model_copy(update=update)
             ingestion_services.register_artifact_record(record, publish=_publish_raw)
+        # Each publication is a full rewrite, so versions past the retention setting go as a sync's do.
+        ingestion_services.expire_and_collect(store_path)
     finally:
         store_lock.release()
 

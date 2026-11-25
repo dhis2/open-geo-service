@@ -194,6 +194,7 @@ async def _services() -> AsyncGenerator[None]:
     from open_geo_service.notifications import webhook
 
     webhook.webhook_url()  # a malformed notifications block refuses startup
+    api_config.get_snapshot_retention()  # so does a malformed retention, which would stop cleanup
     # After plugins load, so a recipe is checked against the workflows it will run.
     derivations.validate_recipes()
     maintenance: asyncio.Task[None] | None = None
@@ -206,12 +207,17 @@ async def _services() -> AsyncGenerator[None]:
         from open_geo_service.ingestions.services import (
             clean_up_interrupted_ingests,
             collect_pending_garbage_everywhere,
+            reconcile_published_branches,
         )
 
         try:
             clean_up_interrupted_ingests()
         except Exception:
             logger.exception("Could not clean up interrupted ingests; continuing startup")
+        try:
+            reconcile_published_branches()
+        except Exception:
+            logger.exception("Could not reconcile published branches; continuing startup")
         try:
             collect_pending_garbage_everywhere()
         except Exception:
