@@ -16,8 +16,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
+from open_geo_service.features import providers as feature_providers
 from open_geo_service.features import services as feature_services
 from open_geo_service.features import store, tiles
+from open_geo_service.features import templates as feature_templates
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
 
@@ -98,6 +100,53 @@ def test_a_refresh_builds_vector_tiles_beside_the_geoparquet() -> None:
     west, south, east, north = header["bounds"]
     assert west == pytest.approx(-13.3, abs=0.01) and east == pytest.approx(-10.5, abs=0.01)
     assert south == pytest.approx(7.5, abs=0.01) and north == pytest.approx(8.8, abs=0.01)
+
+
+@pytest.mark.parametrize(("geometry", "kept_at_zoom_2"), [("polygon", 400), ("point", 256)])
+def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient, geometry: str, kept_at_zoom_2: int
+) -> None:
+    """Zoomed out, tylertoo's feature budget would draw 256 of these 400 districts, leaving holes.
+
+    Each district is large enough to draw at every zoom. Points are still thinned by the budget.
+    """
+    grid = [_box(f"{i}_{j}", f"{i}_{j}", i / 2, j / 2, (i + 1) / 2, (j + 1) / 2) for i in range(20) for j in range(20)]
+    if geometry == "point":
+        for feature in grid:
+            west, south = feature["geometry"]["coordinates"][0][0]
+            feature["geometry"] = {"type": "Point", "coordinates": [west + 0.25, south + 0.25]}
+    configs = tmp_path / "feature_templates"
+    configs.mkdir()
+    (configs / "grid.yaml").write_text(
+        "- id: districts\n  name: Districts\n  id_property: code\n"
+        "  source_url: https://example.org\n  provider: grid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feature_templates, "CONFIGS_DIR", configs)
+    feature_templates.reset_feature_template_caches()
+    monkeypatch.setattr(
+        feature_providers,
+        "load_feature_providers",
+        lambda: {"grid": lambda **_: {"type": "FeatureCollection", "features": grid}},
+    )
+    import tylertoo
+
+    counts: dict[int, int] = {}
+    real_overview = tylertoo.overview
+
+    def counting_overview(*args: Any, **kwargs: Any) -> Any:
+        report = real_overview(*args, **kwargs)
+        counts.update({level["zoom"]: level["feature_count"] for level in report["levels"]})
+        return report
+
+    monkeypatch.setattr(tylertoo, "overview", counting_overview)
+
+    assert client.post("/features/districts/refresh").status_code == 200
+
+    assert counts[2] == kept_at_zoom_2
+    if geometry == "polygon":
+        assert set(counts.values()) == {400}
+    feature_templates.reset_feature_template_caches()
 
 
 def test_a_projected_collection_is_tiled_in_longitude_and_latitude() -> None:
