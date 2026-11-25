@@ -299,7 +299,17 @@ def _localized_markdown(text: str, key: str, base: str, files: dict[str, str], w
         return in_folder and posixpath.normpath(posixpath.join(here, target)) not in written
 
     lines = localized.split("\n")
-    return "\n".join(line for line in lines if not any(missing(t) for t in re.findall(r"\]\(([^)\s]+)\)", line)))
+    kept = "\n".join(line for line in lines if not any(missing(t) for t in re.findall(r"\]\(([^)\s]+)\)", line)))
+    if re.search(r"[\"'](?:\./|\.\./)", kept):
+        # A path in a code example is opened by the reader's code, which does not know where this file came from.
+        kept = kept.rstrip("\n") + f"\n\n{RELATIVE_PATHS_NOTE}\n"
+    return kept
+
+
+RELATIVE_PATHS_NOTE = (
+    "Paths in the examples are relative to this file: run them in its folder, "
+    "or join them to the URL this file was read from."
+)
 
 
 _MEDIA_TYPES = {

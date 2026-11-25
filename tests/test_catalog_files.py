@@ -197,6 +197,9 @@ def test_the_written_catalog_passes_rashid_and_links_only_inside_itself(data: Pa
     for path in catalog.rglob("*.md"):
         # The Zarr route, and this instance named as a provider, as in the JSON.
         assert PUBLIC not in path.read_text().replace(f"{PUBLIC}/zarr/", "").replace(f"({PUBLIC}/)", ""), path
+    # A table's example reads the file beside it, and says what its path is relative to.
+    agents = (catalog / "tables" / "rain_districts" / "AGENTS.md").read_text()
+    assert 'pd.read_parquet("./' in agents and catalog_files.RELATIVE_PATHS_NOTE in agents
 
 
 def test_a_write_is_in_the_files_before_it_returns_and_an_unpublished_folder_has_no_collection(
