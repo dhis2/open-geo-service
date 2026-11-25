@@ -24,20 +24,29 @@ from .test_catalog_files import _box, write_one_of_each
 def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    objects = storage.Objects(tmp_path / "data", staging=tmp_path / "data" / "tmp")
-    flushed: list[int] = []
-    fsync = os.fsync
-    monkeypatch.setattr(storage.os, "fsync", lambda descriptor: flushed.append(descriptor) or fsync(descriptor))
+    root = tmp_path / "data"
+    objects = storage.Objects(root, staging=root / "tmp")
+    files: list[int] = []
+    folders: list[Path] = []
+    fsync, flush_folder = os.fsync, storage._flush_folder
+    monkeypatch.setattr(storage.os, "fsync", lambda descriptor: files.append(descriptor) or fsync(descriptor))
+    monkeypatch.setattr(storage, "_flush_folder", lambda folder: folders.append(folder) or flush_folder(folder))
 
     objects.put("catalog/a/collection.json", b"{}")
 
-    # The file, then the folder holding its new entry, before the put returns.
-    assert len(flushed) == 2
     assert objects.get("catalog/a/collection.json") == b"{}"
-    assert list((tmp_path / "data" / "tmp").iterdir()) == [], "nothing staged is left behind"
-    objects.path("catalog/a/collection.json").chmod(0o640)
-    objects.put("catalog/a/collection.json", b"{ }")
-    assert stat.S_IMODE(objects.path("catalog/a/collection.json").stat().st_mode) == 0o640, "a replace keeps the mode"
+    assert list((root / "tmp").iterdir()) == [], "nothing staged is left behind"
+    if os.name != "nt":
+        # The file, then every folder from its own up to the root, before the put returns.
+        assert folders == [root / "catalog" / "a", root / "catalog", root]
+        assert len(files) == 1 + len(folders), "the file itself, and each folder"
+        objects.path("catalog/a/collection.json").chmod(0o640)
+        objects.put("catalog/a/collection.json", b"{ }")
+        assert stat.S_IMODE(objects.path("catalog/a/collection.json").stat().st_mode) == 0o640, (
+            "a replace keeps its mode"
+        )
+    else:
+        objects.put("catalog/a/collection.json", b"{ }")
     with pytest.raises(FileExistsError):
         objects.put("catalog/a/collection.json", b"[]", create=True)
     assert objects.get("catalog/a/collection.json") == b"{ }"

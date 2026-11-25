@@ -30,6 +30,7 @@ from obstore.store import LocalStore
 
 from open_geo_service import config as api_config
 from open_geo_service import writer_lease
+from open_geo_service.shared.persistence import replace_file
 
 # Read once at import: os.umask can only be read by setting it, which is not thread-safe later.
 _UMASK = os.umask(0)
@@ -140,13 +141,16 @@ class Objects:
             os.link(source, target)  # fails when the target exists, unlike a rename
             source.unlink()
         else:
-            os.replace(source, target)
-        if os.name != "nt":
-            descriptor = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            replace_file(source, target)  # retried while Windows refuses to replace a file being read
+        if os.name == "nt":
+            return  # a folder cannot be opened to flush it there
+        # Every folder up to the root, so one created for a new dataset survives a power cut too.
+        folder = target.parent
+        while True:
+            _flush_folder(folder)
+            if folder == self.root or folder.parent == folder:
+                break
+            folder = folder.parent
 
 
 def objects() -> Objects:
@@ -195,6 +199,15 @@ def icechunk_storage(store: str | Path) -> icechunk.Storage:
 def parquet_filesystem() -> pyarrow.fs.FileSystem:
     """The filesystem Parquet files are read from, with the same paths the records hold."""
     return pyarrow.fs.LocalFileSystem()
+
+
+def _flush_folder(folder: Path) -> None:
+    """Flush *folder*'s entries to disk, so a file renamed or created in it stays after a power cut."""
+    descriptor = os.open(folder, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _file_mode(path: Path) -> int:
