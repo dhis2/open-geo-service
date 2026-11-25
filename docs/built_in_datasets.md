@@ -14,6 +14,25 @@ See **[ERA5-Land datasets](era5_land_datasets.md)** for the full reference, incl
 
 ---
 
+## ERA5-Heat — thermal comfort index (UTCI, daily)
+
+| Property               | Value                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Dataset ID**         | `era5heat_utci_daily`                                                                                            |
+| **Variable**           | `utci`                                                                                                           |
+| **Units**              | °C                                                                                                               |
+| **Period**             | Daily                                                                                                            |
+| **Spatial coverage**   | Global                                                                                                           |
+| **Spatial resolution** | 0.25° (~28 km)                                                                                                   |
+| **Record start**       | 1940-01-02                                                                                                       |
+| **Source**             | [CDS ERA5-Heat (derived-utci-historical)](https://cds.climate.copernicus.eu/datasets/derived-utci-historical?tab=overview) |
+
+The Universal Thermal Climate Index: how hot or cold the outdoors feels to the body, from air temperature, humidity, wind and radiation. The daily mean is averaged from the hourly values of the UTC calendar day. `era5heat_utci_daily_max` and `era5heat_utci_daily_min` are the same, with the daily maximum and minimum. It reads from the Copernicus Climate Data Store and needs `CDS_API_KEY` in `.env`, as the [ERA5-Land daily datasets](era5_land_datasets.md#copernicus-climate-data-store-daily-datasets) do.
+
+**Sync behaviour** — new days are appended as the source publishes them, about five days behind. Recent days are the intermediate product, computed from ECMWF's preliminary ERA5T, and are replaced by the consolidated product from final ERA5 later. Each template declares `sync.refresh_after: P4M`, so a sync fetches a day again once, four months after it, when its final values are out. See [Preliminary periods](architecture.md#preliminary-periods). A store ingested before this existed takes its preliminary days as final; ingest it again to have them replaced.
+
+---
+
 ## CHIRPS v3 — daily precipitation
 
 | Property               | Value                                              |
