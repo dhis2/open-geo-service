@@ -14,6 +14,7 @@ from ...data_manager.services.downloader import get_icechunk_path, get_zarr_path
 from ...data_manager.services.utils import get_time_dim, get_x_y_dims
 from ...shared.crs import dataset_crs
 from ...shared.netcdf import write_netcdf
+from ...shared.provisional import FETCHED_AT
 from ...shared.time import numpy_datetime_to_period_string
 
 logger = logging.getLogger(__name__)
@@ -212,7 +213,9 @@ def _open_zarr_group(store: Any, group: str | None, *, chunks: Any) -> xr.Datase
     return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks)  # type: ignore[no-any-return]
 
 
-def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True, branch: str | None = None) -> xr.Dataset:
+def open_icechunk_dataset(
+    store_path: str | Path, *, merge_time: bool = True, branch: str | None = None, with_fetched_at: bool = False
+) -> xr.Dataset:
     """Open an Icechunk-backed dataset through a readonly session pinned to the version it opened.
 
     Opens what readers see (``published``, or ``main`` before the first publish) unless a writer
@@ -222,6 +225,10 @@ def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True, br
     ``READ_CHUNK_TARGET_BYTES``, so computations are sized for dask rather than for storage.
     ``merge_time=False`` keeps the stored chunks along time as well, for a rewrite whose
     layout follows the source's chunks (a pyramid build, see ``_maybe_build_pyramid``).
+
+    The ``fetched_at`` coordinate, which records when each period was fetched for the sync
+    planner, is dropped unless ``with_fetched_at`` asks for it: it is bookkeeping, and every
+    consumer (aggregation, openEO, exports, STAC) would otherwise carry it along (CLIM-931).
     """
     import icechunk
 
@@ -262,6 +269,8 @@ def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True, br
         ds = _open_zarr_group(session.store, group, chunks={})
     else:
         ds = _open_zarr_group(session.store, group, chunks="auto")
+    if not with_fetched_at and FETCHED_AT in ds.variables:
+        ds = ds.drop_vars(FETCHED_AT)
     if t_dim is not None:
         ds = ds.sortby(t_dim)
     from open_geo_service.shared.provenance import record_snapshot

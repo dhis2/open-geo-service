@@ -12,6 +12,7 @@ from xclim.core.indicator import registry
 from open_geo_service.openeo.plugin_processes import load_plugin_processes
 from open_geo_service.openeo.xclim_processes import _REALMS, REPLACED
 from open_geo_service.plugins.processes.climate_indices import spi
+from open_geo_service.plugins.processes.precipitation_conversion import amount2rate, rate2amount
 from open_geo_service.process import get_process_metadata
 
 
@@ -112,7 +113,100 @@ def test_spi_appears_in_get_processes_endpoint(client: TestClient) -> None:
     response = client.get("/processes")
     assert response.status_code == 200
     ids = {p["id"] for p in response.json()["processes"]}
-    assert "spi" in ids
+    assert {"spi", "amount2rate", "rate2amount"} <= ids
+    # Of xclim's `convert` realm, only the water-budget chain SPEI needs; its humidity converters
+    # would repeat the earthkit-meteo processes under other names.
+    assert {"potential_evapotranspiration", "water_budget", "water_budget_from_tas"} <= ids
+    assert not {"hurs_fromdewpoint", "huss_fromdewpoint", "e_sat"} & ids
+    assert "relative_humidity_from_dewpoint" in ids
+
+
+# ---------------------------------------------------------------------------
+# Precipitation totals and rates (CLIM-1638)
+# ---------------------------------------------------------------------------
+
+
+def _totals(times: pd.DatetimeIndex, values: np.ndarray) -> xr.DataArray:
+    """Precipitation totals in mm as a stored OGS cube: a `t` dimension and a geographic CRS."""
+    import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio
+
+    data = np.broadcast_to(values.astype("float32")[:, None, None], (len(times), 2, 2)).copy()
+    cube = xr.DataArray(
+        data,
+        dims=("t", "y", "x"),
+        coords={"t": times, "y": [9.0, 8.0], "x": [-12.0, -11.0]},
+        name="precip",
+        attrs={"units": "mm", "standard_name": "lwe_thickness_of_precipitation_amount", "cell_methods": "time: sum"},
+    )
+    return cube.rio.write_crs(4326)
+
+
+def test_amount2rate_divides_each_month_by_its_length() -> None:
+    times = pd.date_range("2023-12-01", periods=4, freq="MS")  # February 2024 has 29 days
+    totals = _totals(times, np.array([31.0, 62.0, 29.0, 93.0]))
+
+    rate = amount2rate(totals)
+
+    assert rate.dims == ("t", "y", "x")
+    assert rate.isel(y=0, x=0).values.tolist() == pytest.approx([1.0, 2.0, 1.0, 3.0])
+    assert rate.dtype == "float32"
+    assert rate.attrs["units"] == "mm d-1"
+    assert rate.attrs["standard_name"] == "lwe_precipitation_rate"
+    assert rate.attrs["cell_methods"] == "time: mean"
+    back = rate2amount(rate)
+    assert back.isel(y=0, x=0).values.tolist() == pytest.approx([31.0, 62.0, 29.0, 93.0])
+    assert back.attrs["units"] == "mm"
+    assert back.attrs["standard_name"] == "lwe_thickness_of_precipitation_amount"
+    assert back.attrs["cell_methods"] == "time: sum"
+
+
+@pytest.mark.parametrize("steps", [[0], [0, 1], [0, 1, 3]], ids=["one", "two", "gap"])
+def test_amount2rate_refuses_steps_it_cannot_measure(steps: list[int]) -> None:
+    """Without 3 regular steps xclim cannot infer a step's length; with a missing step it would
+    silently divide by the gap instead."""
+    totals = _totals(pd.date_range("2024-01-01", periods=4, freq="MS"), np.full(4, 30.0)).isel(t=steps)
+    with pytest.raises(ValueError, match="at least 3 regular time steps"):
+        amount2rate(totals)
+
+
+def test_amount2rate_refuses_a_climatology() -> None:
+    normal = _totals(pd.date_range("2024-01-01", periods=12, freq="MS"), np.full(12, 30.0))
+    normal = normal.rename({"t": "month"}).assign_coords(month=np.arange(1, 13))
+    with pytest.raises(ValueError, match="climatology"):
+        amount2rate(normal)
+
+
+def test_spi_of_totals_is_the_spi_of_accumulated_totals(daily_precip: xr.DataArray) -> None:
+    """SPI-3 is SPI-1 of 3-month totals (WMO-No. 1090), computed here without the wrapper's
+    own monthly sum or xclim's window. In float64, as float32 sums differ in the last digits."""
+    totals = _totals(pd.DatetimeIndex(daily_precip.time.values), daily_precip.values).astype("float64")
+    three_months = totals.resample(t="MS").sum().rolling(t=3).sum()
+    reference = spi(three_months.assign_attrs(units="mm month-1"), window=1)
+
+    xr.testing.assert_allclose(spi(totals, window=3), reference)
+    # A rate, from amount2rate or stored, still goes to xclim as it is.
+    assert spi(amount2rate(totals), window=3).sizes["t"] == 60
+    with pytest.raises(ValueError, match="freq must be 'MS'"):
+        spi(totals, freq="YS")
+
+
+def test_spei_from_precipitation_totals_and_temperature() -> None:
+    """The chain in docs/climate_indices.md, through the registered processes."""
+    procs = dict(load_plugin_processes())
+    times = pd.date_range("2000-01-01", periods=365 * 4, freq="D")
+    rng = np.random.default_rng(3)
+    season = 5 * np.sin(2 * np.pi * np.arange(len(times)) / 365)
+    tasmin = _totals(times, 20 + season).assign_attrs(units="degC", standard_name="air_temperature")
+    tasmax = (tasmin + 10).assign_attrs(tasmin.attrs)
+    totals = _totals(times, rng.gamma(0.8, 4.0, len(times)) * (1 + season / 5))
+
+    pet = procs["potential_evapotranspiration"](tasmin=tasmin, tasmax=tasmax, method="HG85")
+    wb = procs["water_budget"](pr=procs["amount2rate"](data=totals), evspsblpot=pet)
+    spei = procs["spei"](wb=wb, freq="MS", window=3)
+
+    assert spei.dims == ("t", "y", "x")
+    assert spei.sizes["t"] == 48
+    assert np.isfinite(spei.values).any()
 
 
 def test_spi_process_summary_in_catalog(client: TestClient) -> None:

@@ -964,8 +964,8 @@ def _collection_description(dataset_id: str, artifact: ArtifactRecord, source_da
     the collection always published a generated sentence, so a template author wrote a
     description, saw it accepted, and it went nowhere. That matters most for datasets whose
     values mislead without a caveat: Meta RWI ranks micro-regions *within one country*, MODIS
-    LST is surface rather than 2 m air temperature, CHIRPS3 monthly is a mean daily rate and
-    not a monthly total. Each is a trap that produces plausible-looking output when missed, and
+    LST is surface rather than 2 m air temperature. Each is a trap that produces plausible-looking
+    output when missed, and
     the published collection is the only place an API consumer would look.
 
     The generated fallback stays for templates without one, and notably for openEO
