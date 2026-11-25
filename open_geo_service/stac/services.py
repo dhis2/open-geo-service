@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import threading
+import urllib.parse
 from copy import deepcopy
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
+from open_geo_service.auth.tokens import reads_gated
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -46,7 +48,7 @@ from open_geo_service.shared.time import (
     period_type_to_iso_step,
     resolve_iso_period_step,
 )
-from open_geo_service.shared.urls import absolute_url, path_segment, self_url
+from open_geo_service.shared.urls import absolute_base, absolute_url, path_segment, self_url
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
 
 CATALOG_DESCRIPTION = (
@@ -113,6 +115,7 @@ WEB_MAP_LINKS_EXTENSION = "https://stac-extensions.github.io/web-map-links/v1.3.
 PROCESSING_EXTENSION = "https://stac-extensions.github.io/processing/v1.2.0/schema.json"
 FILE_EXTENSION = "https://stac-extensions.github.io/file/v2.1.0/schema.json"
 # The versioned profile URI is Portolan's only conformance signal; it defines no fields of its own.
+AUTHENTICATION_EXTENSION = "https://stac-extensions.github.io/authentication/v1.2.0/schema.json"
 PORTOLAN_SCHEMA = "https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"
 DEFAULT_STAC_LICENSE = "various"
 _UNBOUNDED_TEMPORAL_EXTENT: list[list[datetime | None]] = [[None, None]]
@@ -182,6 +185,14 @@ def _get_catalog_id() -> str:
     return api_config.get_id()
 
 
+THUMBNAIL_DESCRIPTION = "A small preview image of the data, for listings and search results."
+
+
+def _stac_datetime(value: datetime) -> str:
+    """An instant as STAC writes it: RFC 3339, with `Z` for UTC."""
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def build_catalog(request: Request) -> dict[str, object]:
     """Build the STAC catalog document."""
     self_href = self_url(request)
@@ -193,7 +204,8 @@ def build_catalog(request: Request) -> dict[str, object]:
         {"rel": "describedby", "href": "./README.md", "type": MARKDOWN_MEDIA_TYPE},
         {"rel": "agents", "href": "./AGENTS.md", "type": MARKDOWN_MEDIA_TYPE},
     ]
-    for dataset_id, artifact in _eligible_artifacts_by_dataset().items():
+    artifacts = _eligible_artifacts_by_dataset()
+    for dataset_id, artifact in artifacts.items():
         links.append(
             {
                 "rel": "child",
@@ -202,7 +214,7 @@ def build_catalog(request: Request) -> dict[str, object]:
                 "type": "application/json",
             }
         )
-    return {
+    catalog: dict[str, Any] = {
         "stac_version": STAC_VERSION,
         "stac_extensions": [PORTOLAN_SCHEMA],
         "type": "Catalog",
@@ -210,8 +222,12 @@ def build_catalog(request: Request) -> dict[str, object]:
         # The instance's own name, as in the web interface; "Open Geo Service" when unset.
         "title": _get_catalog_title(),
         "description": CATALOG_DESCRIPTION,
+        # Changed by every collection's sync, so the latest of theirs. A catalog whose collections
+        # are all mirrors is a mirror too, and Portolan requires it there (PORTO-CORE-057).
+        **({"updated": _stac_datetime(max(a.created_at for a in artifacts.values()))} if artifacts else {}),
         "links": links,
     }
+    return _declare_authentication(catalog, request)
 
 
 def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
@@ -237,10 +253,49 @@ def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, req
     return a newer record after a concurrent refresh, and the document would then mix the two.
     """
     if artifact.format == ArtifactFormat.GEOPARQUET:
-        return _build_feature_collection(dataset_id, artifact, request)
-    if artifact.format == ArtifactFormat.PARQUET:
-        return _build_table_collection(dataset_id, artifact, request)
-    return _build_raster_collection(dataset_id, artifact, request)
+        collection = _build_feature_collection(dataset_id, artifact, request)
+    elif artifact.format == ArtifactFormat.PARQUET:
+        collection = _build_table_collection(dataset_id, artifact, request)
+    else:
+        collection = _build_raster_collection(dataset_id, artifact, request)
+    return _declare_authentication(collection, request)
+
+
+# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
+# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
+_AUTH_SCHEMES: dict[str, dict[str, str]] = {
+    "basic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "An API token's id as the username and its secret as the password.",
+    },
+    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
+}
+
+
+def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
+    """With reads gated, a copy that declares how to sign in, and which links and assets need it.
+
+    Only links and assets on this instance are marked; a source page or licence elsewhere is
+    not. With reads public the document is returned unchanged.
+    """
+    if not reads_gated():
+        return document
+    base = absolute_base(request)
+    refs = sorted(_AUTH_SCHEMES)
+
+    def mark(target: dict[str, Any]) -> dict[str, Any]:
+        href = str(target.get("href", ""))
+        split = urllib.parse.urlsplit(href)
+        here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
+        return {**target, "auth:refs": refs} if here else target
+
+    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
+    declared["links"] = [mark(link) for link in document.get("links", [])]
+    if "assets" in document:
+        declared["assets"] = {key: mark(asset) for key, asset in document["assets"].items()}
+    return declared
 
 
 def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
@@ -313,7 +368,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     # was last synced from it. A workflow output names the sources of the data it was made from.
     for source_url in _source_pages(artifact.dataset_id, source_dataset):
         template_links.append({"rel": "via", "href": source_url, "type": "text/html", "title": "Source"})
-    collection_payload["updated"] = artifact.created_at.isoformat().replace("+00:00", "Z")
+    collection_payload["updated"] = _stac_datetime(artifact.created_at)
     # Relative, as for the catalog and feature collections, so they resolve beside the document.
     template_links.extend(_document_links())
     collection_payload["links"] = template_links
@@ -330,6 +385,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         "href": template_asset["href"],
         "type": template_asset.get("type"),
         "title": template_asset.get("title"),
+        "description": template_asset.get("description"),
         "roles": template_asset.get("roles"),
         "xarray:open_kwargs": xarray_open_kwargs,
     }
@@ -344,6 +400,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
             "href": thumbnail_href,
             "type": "image/png",
             "title": "Thumbnail",
+            "description": THUMBNAIL_DESCRIPTION,
             "roles": ["thumbnail"],
             **file_fields(thumbnail_path(dataset_id)),
         }
@@ -353,6 +410,10 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
             "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}"),
             "type": "application/octet-stream",
             "title": "Icechunk store (native SDK access)",
+            "description": (
+                "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
+                "JavaScript, with the dataset's version history."
+            ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
         }
@@ -442,7 +503,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
 
     # When the collection was last refreshed, which for a mirror of an upstream source is when
     # it was last synced from it.
-    collection.extra_fields["updated"] = artifact.created_at.isoformat().replace("+00:00", "Z")
+    collection.extra_fields["updated"] = _stac_datetime(artifact.created_at)
 
     _apply_table_extension(collection, artifact, detail)
     _add_feature_collection_links(
@@ -460,6 +521,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
             href=absolute_url(request, f"/features/{path_segment(dataset_id)}/data.parquet"),
             media_type=PARQUET_MEDIA_TYPE,
             title="GeoParquet collection",
+            description="Every feature with all its properties, in one GeoParquet file; table:columns describes them.",
             roles=["data"],
             extra_fields=file_size(data_path) if data_path is not None and data_path.is_file() else None,
         ),
@@ -474,6 +536,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 href=tiles_href,
                 media_type=tiles.PMTILES_MEDIA_TYPE,
                 title="Vector tiles (PMTiles)",
+                description="The features as vector tiles in one PMTiles archive, for drawing on a map.",
                 roles=["visual"],
                 extra_fields=file_size(tiles.archive_path(data_path)),
             ),
@@ -484,6 +547,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 href=absolute_url(request, f"/features/{path_segment(dataset_id)}/styles/default.json"),
                 media_type=tiles.STYLE_MEDIA_TYPE,
                 title="MapLibre style",
+                description="A MapLibre style that draws the vector tiles.",
                 roles=["style"],
             ),
         )
@@ -506,6 +570,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 href=absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png"),
                 media_type="image/png",
                 title="Thumbnail",
+                description=THUMBNAIL_DESCRIPTION,
                 roles=["thumbnail"],
                 extra_fields=file_fields(thumbnail_path(dataset_id)),
             ),
@@ -528,12 +593,13 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
 
 
 def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
-    """Build the STAC collection for a table dataset: values per feature and period in one Parquet file.
+    """Build the STAC collection for a table dataset: its rows in one Parquet file.
 
     A table document, as for a feature collection, with no geometry: `table:columns` from the
-    file's schema, each with its description and the value with its unit, and the file itself as
-    the `data` asset. The spatial extent is the bounds of the feature collections the values are
-    reported on, the temporal one the first and last `period_start`. A computed table has no
+    table's schema, each with its description and the value columns with their unit, and the file
+    itself as the `data` asset. The spatial extent is the bounds of the feature collections the
+    values are reported on, and the temporal one the first and last period, as the schema's columns
+    represent them. A computed table has no
     template, so its licence and providers are its sources' (`tables.sources`); `derived_from`
     links name those sources and `via` links the pages their data came from.
     """
@@ -555,7 +621,7 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     )
     collection.extra_fields["keywords"] = [artifact.dataset_id, "table", "parquet", "stac"]
     # When a value last changed: the record is replaced on every write that changes one.
-    collection.extra_fields["updated"] = artifact.created_at.isoformat().replace("+00:00", "Z")
+    collection.extra_fields["updated"] = _stac_datetime(artifact.created_at)
     collection.stac_extensions.append(PORTOLAN_SCHEMA)
     table = TableExtension.ext(collection, add_if_missing=True)
     table.row_count = summary.row_count
@@ -603,7 +669,7 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
             href=absolute_url(request, f"/tables/{path_segment(dataset_id)}/data.parquet"),
             media_type=PARQUET_MEDIA_TYPE,
             title="Table (Parquet)",
-            description="The dataset's current rows, one per feature, period and value; table:columns describes them.",
+            description="The dataset's current rows, one per key; table:columns describes them.",
             roles=["data"],
             # Size and checksum, as Portolan asks of a single-file asset: a table is small, and
             # the checksum is computed once per file version.
@@ -621,29 +687,23 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
 
 
 def _table_dataset_columns(artifact: ArtifactRecord) -> list[dict[str, str]]:
-    """`table:columns` for a table dataset's file: name and type from its schema, with descriptions and the unit.
+    """`table:columns` for a table dataset: each column its schema declares, with its type, description and unit."""
+    from open_geo_service.tables.schemas import WRITTEN_AT_DESCRIPTION
+    from open_geo_service.tables.store import schema_of, unit_of
 
-    An unreadable file leaves the collection without `table:columns`, as for a feature collection.
-    """
-    import pyarrow.parquet as pq
-
-    from open_geo_service.tables.store import COLUMN_DESCRIPTIONS
-
-    if not artifact.asset_paths:
-        return []
-    try:
-        schema = pq.read_schema(artifact.asset_paths[0])
-    except (OSError, ValueError) as exc:
-        logger.warning("Could not read the parquet schema of '%s': %s", artifact.asset_paths[0], exc)
-        return []
+    declared = schema_of(artifact)
     columns: list[dict[str, str]] = []
-    for field in schema:
+    for field in declared.arrow:
         column = {"name": field.name, "type": str(field.type)}
-        if field.name in COLUMN_DESCRIPTIONS:
-            column["description"] = COLUMN_DESCRIPTIONS[field.name]
+        described = declared.column(field.name)
+        # Only `written_at` is not declared: the store adds it to every table.
+        description = described.description if described is not None else WRITTEN_AT_DESCRIPTION
+        unit = unit_of(artifact, field.name)
+        if description:
+            column["description"] = description
         # The table extension defines no unit field, and its column schema admits further ones.
-        if field.name == "value" and artifact.units:
-            column["unit"] = artifact.units
+        if unit:
+            column["unit"] = unit
         columns.append(column)
     return columns
 
@@ -840,7 +900,7 @@ def _processor_provider(artifact: ArtifactRecord, request: Request) -> dict[str,
         "name": _get_catalog_title(),
         "roles": ["processor"],
         "url": absolute_url(request, "/"),
-        "processing:datetime": artifact.created_at.isoformat().replace("+00:00", "Z"),
+        "processing:datetime": _stac_datetime(artifact.created_at),
     }
     if artifact.provenance is not None and artifact.provenance.ogs_version is not None:
         provider["processing:software"] = {"open-geo-service": artifact.provenance.ogs_version}
@@ -942,6 +1002,7 @@ def _build_collection_template(
             href=zarr_href,
             media_type=_zarr_media_type(artifact),
             title="Zarr store",
+            description="The data as a Zarr store, for any Zarr reader. xarray:open_kwargs says how to open it.",
             roles=["data"],
         ),
     )
@@ -1203,6 +1264,8 @@ def _asset_to_dict(asset: pystac.Asset) -> dict[str, Any]:
         payload["type"] = asset.media_type
     if asset.title is not None:
         payload["title"] = asset.title
+    if asset.description is not None:
+        payload["description"] = asset.description
     if asset.roles is not None:
         payload["roles"] = asset.roles
     payload.update(asset.extra_fields)

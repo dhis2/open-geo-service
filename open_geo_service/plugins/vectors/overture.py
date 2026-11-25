@@ -25,11 +25,12 @@ Overture's `country` column. That column is ISO 3166-1 **alpha-2** while an inst
 a template to restate a code the instance already holds.
 
 **The release id is the version.** Overture publishes monthly, so a release *is* a version and
-"is there a newer one than we hold" is answerable without comparing data. It is passed
-explicitly rather than resolved to `latest`, so an instance upgrades deliberately and a
-re-extract is reproducible. Bumping it selects what the *next* run extracts rather than
-triggering one: a feature collection is not on the raster sync path, so a refresh is an explicit
-provider run.
+"is there a newer one than we hold" is answerable without comparing data. The latest release is
+read unless a template names one. Pinning one does not make an extract reproducible for long:
+Overture keeps only its latest few releases, about two months of them, so a pinned release
+stops working when it is removed. A refresh reads the latest at that moment rather than when
+Overture publishes: a feature collection is not on the raster sync path, so a refresh is an
+explicit provider run.
 
 **Licence.** Divisions incorporate OpenStreetMap, so the theme is ODbL: attribution plus
 share-alike on a derived database. The template declaring this provider carries `license` and
@@ -46,6 +47,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import urljoin, urlparse
+
+import httpx
 
 from open_geo_service.extents.services import get_extent
 from open_geo_service.features.providers import feature_provider
@@ -71,6 +75,7 @@ _THEME_DEFAULT_TYPE = {
 # `names` is a struct -- its `primary` is flattened to a plain `name`, see `_properties`.
 _DEFAULT_COLUMNS = ("id", "subtype", "class", "names", "country", "region", "admin_level")
 
+_STAC_CATALOG = "https://stac.overturemaps.org/catalog.json"
 _GEOMETRY_COLUMN = "geometry"
 _COUNTRY_COLUMN = "country"
 
@@ -82,7 +87,7 @@ ANY_COUNTRY = "any"
 @feature_provider("overture")
 def overture_features(
     *,
-    release: str,
+    release: str | None = None,
     bbox: Sequence[float] | None = None,
     theme: str = DEFAULT_THEME,
     type: str | None = None,  # noqa: A002 -- Overture's own field name, and a template writes it
@@ -95,6 +100,10 @@ def overture_features(
 
     Returns `(FeatureCollection, release)`. The release becomes the collection's recorded
     version, which is what makes a monthly-release source answerable without comparing data.
+
+    `release` defaults to the latest Overture publishes. Overture keeps only its latest few
+    releases, about two months of them, so a named one stops working once it is removed, and
+    is refused then with the releases there are.
 
     `bbox` is `[west, south, east, north]` in lon/lat. Omitted, it defaults to the instance
     extent, which is what a template almost always wants and keeps the shipped template free of
@@ -117,15 +126,22 @@ def overture_features(
     """
     window = _resolve_bbox(bbox)
     overture_type = _resolve_type(theme=theme, type_=type)
+    available, latest = _releases()
+    chosen = release or latest
+    if chosen not in available:
+        raise ValueError(
+            f"Overture release {chosen!r} is no longer published; Overture keeps its latest few, now "
+            f"{sorted(available)}. Leave `release` out to read the latest"
+        )
     keep = tuple(columns) if columns is not None else _DEFAULT_COLUMNS
     selection = _with_country(filters, country=country)
 
-    reader = _record_batch_reader(overture_type, bbox=window, release=release, stac=stac)
+    reader = _record_batch_reader(overture_type, bbox=window, release=chosen, stac=stac)
     if reader is None:
         # The client returns None rather than raising, and prints its own "No data found" to
         # stdout, so without this a misconfigured extract looks like an empty answer.
         raise ValueError(
-            f"Overture returned no data for type {overture_type!r} in release {release!r} for bbox "
+            f"Overture returned no data for type {overture_type!r} in release {chosen!r} for bbox "
             f"{list(window)}"
             + (" (stac=True prunes partitions and does not cover every type; try stac=False)" if stac else "")
         )
@@ -144,7 +160,7 @@ def overture_features(
 
     if not features:
         raise ValueError(
-            f"Overture {overture_type!r} returned no rows for bbox {list(window)} in release {release!r}"
+            f"Overture {overture_type!r} returned no rows for bbox {list(window)} in release {chosen!r}"
             + (f" matching {dict(selection)}" if selection else "")
         )
 
@@ -152,14 +168,40 @@ def overture_features(
         "Extracted %d Overture %s features (release %s, type %s) for bbox %s",
         len(features),
         theme,
-        release,
+        chosen,
         overture_type,
         list(window),
     )
     # The release is returned, not just used: it is what makes "is there a newer one than we
     # hold" answerable without comparing data, and the provider is the only thing that knows
     # which release was actually read.
-    return {"type": "FeatureCollection", "features": features}, release
+    return {"type": "FeatureCollection", "features": features}, chosen
+
+
+def _releases() -> tuple[list[str], str]:
+    """The releases Overture publishes now, and the latest, from its STAC catalogue."""
+    catalog = _catalog()
+    # Each release is a child catalogue at `<root>/<release>/catalog.json`, linked by an absolute
+    # URL or one relative to the root (`./<release>/catalog.json`); Overture has published both.
+    available = [
+        urlparse(urljoin(_STAC_CATALOG, link["href"])).path.strip("/").split("/")[0]
+        for link in catalog["links"]
+        if link.get("rel") == "child"
+    ]
+    return available, str(catalog["latest"])
+
+
+def _catalog() -> dict[str, Any]:
+    """Overture's STAC catalogue, fetched on every run.
+
+    Not `overturemaps.core.get_available_releases`: the client keeps the first catalogue it reads
+    for the life of the process, so a server would refresh from that release until Overture
+    removed it.
+    """
+    response = httpx.get(_STAC_CATALOG, timeout=60)
+    response.raise_for_status()
+    catalog: dict[str, Any] = response.json()
+    return catalog
 
 
 def _record_batch_reader(overture_type: str, *, bbox: tuple[float, float, float, float], release: str, stac: bool):  # type: ignore[no-untyped-def]

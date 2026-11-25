@@ -15,6 +15,7 @@
         {{ logo }}
         <h1>{{ name }}</h1>
       </a>
+      {{ account(mount) }}
     </header>
 
     <div class="layout">
@@ -80,7 +81,7 @@
 
             {% if dataset.kind == "table" %}
             <section class="panel" aria-labelledby="values-title">
-              {% if table %}
+              {% if table and table.preview %}
               <h3 id="values-title">Latest value of each feature{% if table.common_period %}, {{ table.common_period }}{% endif %}{% if table.common_series %} ({{ table.common_series }}){% endif %}</h3>
               <div class="table-wrap">
                 <table>
@@ -106,13 +107,12 @@
                   </tbody>
                 </table>
               </div>
-              <p class="note">
-                {% if table.more %}{{ table.more }} more latest values. {% endif %}{{ table.row_count }} rows in all{% if published %}, as <a href="{{ mount }}/tables/{{ dataset.id }}/rows?format=csv">CSV</a> or <a href="{{ mount }}/tables/{{ dataset.id }}/rows">JSON</a>{% endif %}.
-              </p>
               {% else %}
               <h3 id="values-title">Values</h3>
-              <p class="note">This table has no rows yet.</p>
               {% endif %}
+              <p class="note">
+                {% if table %}{% if table.more %}{{ table.more }} more latest values. {% endif %}{{ table.row_count }} rows in all{% if published %}, as <a href="{{ mount }}/tables/{{ dataset.id }}/rows?format=csv">CSV</a> or <a href="{{ mount }}/tables/{{ dataset.id }}/rows">JSON</a>{% endif %}.{% else %}This table has no rows yet.{% endif %}
+              </p>
             </section>
             {% endif %}
 
@@ -337,6 +337,8 @@
                   selectFromLocation();
                 })();
               </script>
+              {% elif syncable and sign_in %}
+              <p class="note">{{ sign_in_note(mount, "sync this dataset or schedule its sync") }}</p>
               {% elif not syncable %}
               <p class="note">
                 {% if sync_kind == "static" %}This dataset does not update from a source, so there is nothing to sync.{% else %}This dataset has no source to sync from.{% endif %}

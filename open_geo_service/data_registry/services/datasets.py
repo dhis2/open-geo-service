@@ -15,7 +15,7 @@ from open_geo_service import config as api_config
 from open_geo_service.data_registry import recipes
 from open_geo_service.ingestions.schemas import parse_declared_artifact_version
 from open_geo_service.shared.time import SUPPORTED_PERIOD_TYPES
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -417,11 +417,7 @@ def _validate_dataset_template(dataset: object, *, source: str) -> None:
     # before routing, so escaping it does not help and no single-segment route matches.
     # Rejected at registration, where a template author sees it, rather than discovered later
     # as a catalogue full of 404s.
-    if not is_segment_safe_id(dataset_id):
-        raise ValueError(
-            f"Dataset template id '{dataset_id}' in {source} cannot be used in a URL; it must "
-            "start with a letter or digit and carry only letters, digits, '.', '_' or '-'"
-        )
+    require_segment_safe_id(dataset_id, "dataset template id", where=source)
     # A categorical template declares `classes`; a malformed declaration would publish wrong
     # class metadata, so it is refused here. A continuous template has none and is not checked.
     if dataset.get("classes") is not None:

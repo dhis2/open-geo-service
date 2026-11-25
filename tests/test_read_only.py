@@ -227,6 +227,7 @@ def test_capabilities_omit_the_write_endpoints(ro_client: TestClient) -> None:
     endpoints = _capabilities(ro_client)
     assert "/jobs" not in endpoints
     assert "/jobs/{job_id}" not in endpoints
+    assert "/jobs/{job_id}/logs" not in endpoints
     assert "/jobs/{job_id}/results" not in endpoints
     assert endpoints["/process_graphs/{process_graph_id}"] == ["GET"]
     assert endpoints["/result"] == ["POST"]

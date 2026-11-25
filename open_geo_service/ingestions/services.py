@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import mimetypes
-import shutil
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -15,7 +14,6 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
 from uuid import uuid4
 
-import portalocker
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.responses import Response
@@ -24,6 +22,7 @@ from zarr.core.buffer import default_buffer_prototype
 from zarr.core.sync import sync as zarr_sync
 
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.data_accessor.services.accessor import get_data_coverage_for_paths
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -95,53 +94,28 @@ MutationResult = TypeVar("MutationResult")
 StoreResult = TypeVar("StoreResult")
 
 
-# Per-store threading locks prevent two concurrent ingest/sync runs from writing
-# to the same Icechunk store simultaneously (which causes MVCC commit conflicts).
 class StoreWriteLock:
-    """Exclusive writer lock for one Icechunk store, across threads and across processes.
+    """Exclusive writer lock for one Icechunk store.
 
-    The thread lock alone was invisible to a second OGS process: an overlapping restart, an
-    auto-reload, or a second worker could run a write against the same store at the same
-    time, and Icechunk then rejected one of them with a commit conflict. The file lock beside
-    the store makes the second writer refuse up front instead. The operating system releases
-    it when the holding process exits, so a crash never leaves a store locked.
+    Two writes to one store would make Icechunk reject one commit as a conflict. The writer
+    lease keeps every process but the instance's writer out (`writer_lease.py`), so two writes
+    can only meet inside the writer, as two threads, and a thread lock is all this needs.
     """
 
-    def __init__(self, store_path: Path) -> None:
+    def __init__(self) -> None:
         self._thread_lock = threading.Lock()
-        self._lock_path = store_path.with_name(f"{store_path.name}.lock")
-        self._handle: Any | None = None
 
     def acquire(self, blocking: bool = True) -> bool:
-        """Take the lock; with ``blocking=False`` return False at once when another writer holds it."""
-        if not self._thread_lock.acquire(blocking=blocking):
-            return False
-        try:
-            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(self._lock_path, "a+", encoding="utf-8")  # noqa: SIM115 -- held until release()
-            try:
-                flags = portalocker.LOCK_EX if blocking else portalocker.LOCK_EX | portalocker.LOCK_NB
-                portalocker.lock(handle, flags)
-            except portalocker.exceptions.LockException:
-                handle.close()
-                self._thread_lock.release()
-                return False
-        except BaseException:
-            self._thread_lock.release()
-            raise
-        self._handle = handle
-        return True
+        """Take the lock; with ``blocking=False`` return False at once when another write holds it.
+
+        Raises `WriterLeaseHeld` when another process is the instance's writer: one that holds
+        no lease, such as a script, takes it here, so it cannot write beside the server.
+        """
+        writer_lease.ensure_held()
+        return self._thread_lock.acquire(blocking=blocking)
 
     def release(self) -> None:
-        handle, self._handle = self._handle, None
-        try:
-            if handle is not None:
-                try:
-                    portalocker.unlock(handle)
-                finally:
-                    handle.close()
-        finally:
-            self._thread_lock.release()
+        self._thread_lock.release()
 
 
 _store_locks: dict[str, StoreWriteLock] = {}
@@ -184,10 +158,10 @@ class _StreamingMaterializationPlan:
 
 @dataclass(frozen=True)
 class _StoreNormalizationResult:
-    """Outcome of normalizing a store, including whether its directory was swapped."""
+    """Outcome of normalizing a store, including whether it was rewritten whole."""
 
     completed: bool
-    swapped: bool = False
+    rewritten: bool = False
 
 
 def _acquire_store_lock(store_path: Path) -> StoreWriteLock:
@@ -199,7 +173,7 @@ def _acquire_store_lock(store_path: Path) -> StoreWriteLock:
     key = str(store_path.resolve())
     with _store_locks_mutex:
         if key not in _store_locks:
-            _store_locks[key] = StoreWriteLock(Path(key))
+            _store_locks[key] = StoreWriteLock()
         return _store_locks[key]
 
 
@@ -230,16 +204,6 @@ def _resolve_artifacts_dir() -> Path:
 
 ARTIFACTS_DIR = _resolve_artifacts_dir()
 ARTIFACTS_INDEX_PATH = ARTIFACTS_DIR / "records.json"
-
-
-def ensure_store() -> None:
-    """Create the artifact metadata store if it does not exist."""
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    if ARTIFACTS_INDEX_PATH.exists():
-        return
-    with index_lock(ARTIFACTS_INDEX_PATH):
-        if not ARTIFACTS_INDEX_PATH.exists():
-            atomic_text(ARTIFACTS_INDEX_PATH, "[]\n")
 
 
 def list_artifacts() -> ArtifactListResponse:
@@ -1245,7 +1209,7 @@ def _plan_static_materialization(*, store_path: Path, overwrite: bool) -> _Strea
 
     There are no periods to compare, so a stored dataset is current: an ingest without
     ``overwrite`` keeps it, and one with ``overwrite`` fetches it again into a replacement that
-    is swapped in once it is complete.
+    `main` moves to once it is complete.
     """
     has_store = store_path.exists() and not is_store_empty(store_path)
     if has_store and not overwrite:
@@ -1255,7 +1219,7 @@ def _plan_static_materialization(*, store_path: Path, overwrite: bool) -> _Strea
     else:
         action = SyncAction.APPEND
     # A stored dataset counts as committed data, so a failed rebuild of its replacement raises
-    # instead of swapping in a store that was never normalized.
+    # instead of publishing a store that was never normalized.
     return _StreamingMaterializationPlan(
         action=action, start=None, end=None, periods=None, has_committed_periods=has_store
     )
@@ -1326,23 +1290,21 @@ def _create_streaming_artifact(
             detail=f"An ingest or sync is already running for dataset '{dataset['id']}'. Wait for it to finish.",
         )
     plugin: IngestionPlugin | StaticIngestionPlugin | None = None
-    replacement_path: Path | None = None
-    rollback_repo: Any | None = None
+    # Set when the store already holds data: the version readers see on `main` before this ingest,
+    # kept by a rollback branch until the new version is recorded.
+    repo: Any | None = None
     rollback_branch: str | None = None
     rollback_snapshot: str | None = None
-    published_swap_pending = False
+    replacement_branch: str | None = None
+    rewritten = False
     store_committed = False
     plugin_handed_to_orchestrator = False
     ingest_completed = False
     try:
         timeless = registry_datasets.is_timeless(dataset)
         plugin = _load_streaming_plugin(plugin_path, params=params, static=timeless)
-        # First thing under the lock, before anything looks at the store. A swap killed between
-        # its two renames leaves the published path missing and the data at `.retired`; ingest
-        # would read that as a brand-new store and write only the requested delta into a fresh
-        # one, after which recovery finds the target present and strands the whole history in
-        # `.retired`. Healing before any inspection makes the next sync an ordinary append.
-        recover_interrupted_swap(store_path)
+        # Before anything looks at the store, so a killed ingest's branches never reach planning.
+        clean_up_interrupted_ingest(store_path)
 
         if timeless:
             plan = _plan_static_materialization(store_path=store_path, overwrite=overwrite)
@@ -1388,26 +1350,27 @@ def _create_streaming_artifact(
             on_update_planned(_previous_coverage_end(dataset, plan))
         materialization_scope = request_scope.model_copy(update={"start": plan.start, "end": plan.end})
 
-        ingest_path = store_path
-        if plan.action == SyncAction.REMATERIALIZE and store_path.exists():
-            # Build a prepend/overwrite beside the published store. Fetching is the least
-            # reliable part of ingestion, so the current data remains readable until the
-            # contiguous replacement has been fetched, validated, and normalized.
-            replacement_path = store_path.with_name(f"{store_path.name}.replacement")
-            _remove_store_path(replacement_path)
-            ingest_path = replacement_path
-        elif plan.action != SyncAction.NO_OP and plan.has_committed_periods:
-            # Icechunk commits each fetched period independently. Keep a pre-ingest
-            # snapshot for failures after ingest completes (for example normalization
-            # or record persistence). Mid-ingest failures retain their committed prefix
-            # so a retry can resume instead of downloading successful periods again.
-            repo = open_or_create_repo(store_path)
-            snapshot = repo.lookup_branch("main")
-            branch = f"ogs-ingest-rollback-{uuid4().hex}"
-            repo.create_branch(branch, snapshot)
-            rollback_repo = repo
-            rollback_snapshot = snapshot
-            rollback_branch = branch
+        ingest_branch = "main"
+        rematerialize = plan.action == SyncAction.REMATERIALIZE and store_path.exists()
+        if rematerialize or (plan.action != SyncAction.NO_OP and plan.has_committed_periods):
+            # Keep the version readers see reachable until the new one is recorded, so a failure
+            # after the ingest completes (normalization, the record) resets `main` to it. A
+            # forward append that fails part way keeps the periods it committed instead, so a
+            # retry resumes rather than downloading them again.
+            existing_repo = open_or_create_repo(store_path)
+            rollback_snapshot = existing_repo.lookup_branch("main")
+            rollback_branch = f"{_INGEST_BRANCH_PREFIX}rollback-{uuid4().hex}"
+            existing_repo.create_branch(rollback_branch, rollback_snapshot)
+            repo = existing_repo
+        if rematerialize:
+            assert repo is not None
+            # A prepend or overwrite is built on its own branch, from the repository's empty first
+            # snapshot, and `main` moves to it only once it is fetched, validated and normalized.
+            # Fetching is the least reliable part of ingestion, and readers keep the current data
+            # until then.
+            replacement_branch = f"{_INGEST_BRANCH_PREFIX}replacement-{uuid4().hex}"
+            repo.create_branch(replacement_branch, _first_snapshot(repo))
+            ingest_branch = replacement_branch
 
         if plan.action != SyncAction.NO_OP and timeless:
             plugin_handed_to_orchestrator = True
@@ -1416,8 +1379,9 @@ def _create_streaming_artifact(
                 params=params,
                 dataset=dataset,
                 bbox=bbox,
-                store_path=ingest_path,
+                store_path=store_path,
                 is_cancel_requested=is_cancel_requested,
+                branch=ingest_branch,
             )
             ingest_completed = True
         elif plan.action != SyncAction.NO_OP:
@@ -1430,19 +1394,22 @@ def _create_streaming_artifact(
                 bbox=bbox,
                 start=plan.start,
                 end=plan.end,
-                store_path=ingest_path,
+                store_path=store_path,
                 period_type=str(dataset["period_type"]),
                 on_progress=on_progress,
                 is_cancel_requested=is_cancel_requested,
                 save_cursor=save_cursor,
                 periods=plan.periods,
-                committed_periods=plan.committed_periods if ingest_path == store_path else [],
+                committed_periods=plan.committed_periods if replacement_branch is None else [],
+                branch=ingest_branch,
             )
             ingest_completed = True
-            if result.periods_written == 0 and not ingest_path.exists():
+            if result.periods_written == 0 and (replacement_branch is not None or not store_path.exists()):
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
-        coverage_data = get_data_coverage_for_paths(dataset, icechunk_path=str(ingest_path.resolve()))
+        coverage_data = get_data_coverage_for_paths(
+            dataset, icechunk_path=str(store_path.resolve()), branch=ingest_branch
+        )
         if not coverage_data.get("has_data", True):
             raise HTTPException(
                 status_code=409,
@@ -1475,26 +1442,20 @@ def _create_streaming_artifact(
                     ),
                 )
 
-        normalization = _maybe_build_pyramid(
-            ingest_path,
-            dataset,
-            retain_previous=plan.has_committed_periods and replacement_path is None,
-        )
+        normalization = _maybe_build_pyramid(store_path, dataset, branch=ingest_branch)
+        rewritten = normalization.rewritten
         if plan.action != SyncAction.NO_OP and plan.has_committed_periods and not normalization.completed:
             raise RuntimeError(f"Could not normalize '{dataset['id']}'; the dataset update was rolled back")
-        if normalization.swapped and ingest_path == store_path and plan.has_committed_periods:
-            # Pyramid normalization replaced the published repository but retained
-            # the previous one until its matching artifact record is durable. From
-            # here, rollback first restores that repository and then resets its main
-            # branch to the pre-ingest snapshot retained above.
-            published_swap_pending = True
-        if replacement_path is not None:
-            _swap_store(replacement_path, store_path, retain_previous=True)
-            published_swap_pending = True
+        if replacement_branch is not None:
+            assert repo is not None
+            # Readers move from the old version to the complete new one in one step. Nothing else
+            # moves `main` meanwhile: the writer lease keeps other processes out and the store lock
+            # other ingests, which is also what lets a failure reset it below.
+            repo.reset_branch("main", repo.lookup_branch(replacement_branch))
         # Once per sync run, here rather than per commit: a streaming ingest commits one
         # period at a time, so rendering on each would produce a few hundred PNGs during a
-        # historical backfill and keep the last. After the swap, so it renders the store that
-        # is actually published. Never raises — see write_dataset_thumbnail.
+        # historical backfill and keep the last. After `main` has moved, so it renders the version
+        # readers see. Never raises — see write_dataset_thumbnail.
         write_dataset_thumbnail(store_path, dataset)
 
         record = ArtifactRecord(
@@ -1507,7 +1468,7 @@ def _create_streaming_artifact(
             format=ArtifactFormat.ICECHUNK,
             path=str(store_path.resolve()),
             asset_paths=[str(store_path.resolve())],
-            # After the swap, like the thumbnail: the size and statistics of the store that is published.
+            # After `main` has moved, like the thumbnail: the size and statistics of what readers see.
             size_bytes=stored_bytes(store_path),
             statistics=measure_statistics(store_path, str(dataset["variable"])),
             variables=[str(dataset["variable"])],
@@ -1521,206 +1482,143 @@ def _create_streaming_artifact(
             overwrite=overwrite,
         )
         store_committed = True
-        if published_swap_pending:
-            # A swapped-out repository either disappeared with successful cleanup or
-            # remains only as a retired fallback. Never try to operate on its temporary
-            # branch through the newly published repository path.
-            rollback_repo = None
-            rollback_branch = None
-            rollback_snapshot = None
         if publish and stored_record.publication.status != PublicationStatus.PUBLISHED:
             return publish_artifact_record(stored_record.artifact_id)
         return stored_record
     finally:
         try:
             rollback_error: Exception | None = None
-            if published_swap_pending and not store_committed:
-                try:
-                    _rollback_store_swap(store_path)
-                    published_swap_pending = False
-                except Exception as exc:
-                    rollback_error = exc
-                    logger.error(
-                        "Could not restore the previous store for '%s' after artifact registration failed",
-                        store_path,
-                        exc_info=True,
-                    )
-            elif published_swap_pending:
-                try:
-                    _finalize_store_swap(store_path)
-                    published_swap_pending = False
-                except Exception:
-                    logger.warning("Could not clean up retired store '%s'", store_path, exc_info=True)
             if not plugin_handed_to_orchestrator and plugin is not None:
                 try:
                     close_ingestion_plugin(plugin)
                 except Exception:
                     logger.warning("Could not close ingestion plugin after planning failure", exc_info=True)
-            if (
-                rollback_error is None
-                and rollback_repo is not None
-                and rollback_branch is not None
-                and rollback_snapshot is not None
-            ):
-                try:
-                    rolled_back = not store_committed and ingest_completed
-                    if rolled_back:
-                        rollback_repo.reset_branch("main", rollback_snapshot)
+            rolled_back = False
+            if repo is not None and rollback_snapshot is not None:
+                rolled_back = not store_committed and ingest_completed
+                if rolled_back:
                     try:
-                        rollback_repo.delete_branch(rollback_branch)
+                        repo.reset_branch("main", rollback_snapshot)
                     except Exception as exc:
-                        # Recovery may already have removed the temporary ref. The
-                        # snapshot reset above is the operation that restores data;
-                        # an absent cleanup ref must not mask the original failure.
-                        if "ref not found" not in str(exc).lower():
-                            raise
-                    if rolled_back:
-                        # The reset left every period this attempt committed unreachable.
-                        # Still under the store lock, so nothing is mid-write. The retention
-                        # window keeps the attempt's recent commits, so a later collection
-                        # is marked pending for them.
-                        collect_unreachable_objects(rollback_repo, store_path)
-                        _mark_collection_pending(store_path)
-                except Exception as exc:
-                    if not store_committed:
                         rollback_error = exc
-                    logger.error(
-                        "Could not %s append transaction for '%s'",
-                        "roll back" if not store_committed else "clean up",
-                        store_path,
-                        exc_info=True,
-                    )
-            if not store_committed and not ingest_completed and rollback_repo is not None:
+                        logger.error("Could not roll back the update of '%s'", store_path, exc_info=True)
+                        rollback_branch = _keep_for_restore(repo, rollback_branch, rollback_snapshot)
+                for branch in (rollback_branch, replacement_branch):
+                    if branch is None or (rollback_error is not None and branch == rollback_branch):
+                        continue  # the rollback branch still names the version to restore by hand
+                    _delete_branch(repo, branch, store_path)
+            if rollback_error is None and (rolled_back or replacement_branch is not None or rewritten):
+                # Still under the store lock, so nothing is mid-write. The version this ingest
+                # replaced, or the one it abandoned, is now reachable from no branch.
+                _collect_replaced_versions(store_path)
+            if not store_committed and not ingest_completed and replacement_branch is None and repo is not None:
                 # A forward append that failed part way keeps the periods it committed, so a
                 # retry can resume; the store has grown, so its recorded size must follow.
                 _refresh_recorded_size(store_path)
-            if replacement_path is not None:
-                # Failed fetches and validations leave only a disposable partial replacement. A
-                # successful swap has already moved this path away, making cleanup a no-op.
-                try:
-                    _remove_store_path(replacement_path)
-                except Exception:
-                    # Cleanup is best-effort: the published store is still intact and the next
-                    # overwrite removes this path before reuse. Do not mask the ingest failure.
-                    logger.warning("Could not remove replacement store '%s'", replacement_path, exc_info=True)
             if rollback_error is not None:
                 raise RuntimeError(
                     f"Ingestion failed and rollback could not complete for '{store_path}'. "
-                    f"Retained recovery data and branch '{rollback_branch}' at snapshot '{rollback_snapshot}'; "
-                    "inspect the store and its .retired/.failed paths before retrying."
+                    f"Branch '{rollback_branch}' names the version before it, snapshot "
+                    f"'{rollback_snapshot}'; reset `main` to it before retrying, then delete the branch. "
+                    "Nothing else deletes it."
                 ) from rollback_error
         finally:
-            # Releasing the in-process writer lock must not depend on filesystem cleanup.
+            # Releasing the in-process writer lock must not depend on store cleanup.
             lock.release()
 
 
-def _retired_path(target: Path) -> Path:
-    return target.with_name(f"{target.name}.retired")
+# Every branch an ingest creates for itself starts with this, and only lives while the ingest runs.
+_INGEST_BRANCH_PREFIX = "ogs-ingest-"
+
+# A branch naming the version a failed rollback could not restore; cleanup leaves it for the operator.
+_RESTORE_BRANCH_PREFIX = "ogs-restore-"
 
 
-def _remove_store_path(path: Path) -> None:
-    """Remove a disposable store path whether it is a directory, file, or symlink."""
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.exists():
-        shutil.rmtree(path)
+def _keep_for_restore(repo: Any, branch: str | None, snapshot: str) -> str | None:
+    """Name *snapshot* by a branch cleanup leaves alone, in place of the ingest's own *branch*.
 
-
-def recover_interrupted_swap(target: Path) -> bool:
-    """Restore a store left behind by a swap that was killed between its two renames.
-
-    ``_swap_store`` moves the published store aside before moving the rebuilt one in. An
-    exception between the two is handled there, but a SIGKILL or a host restart is not: the
-    published path then does not exist and the data sits at ``<name>.retired``, which no
-    reader looks for. Called before the store is opened, so the next sync heals it rather
-    than reporting an unreadable dataset.
-
-    An interrupted rollback also leaves its rejected replacement at ``.failed``.
-    Remove that copy only after the original store has been restored.
-
-    A pyramid rebuild killed part way leaves its partial copy at ``.rebuild``, which nothing
-    reads and which can be most of the store's size; it is removed here too. A rollback branch
-    left by a killed ingest means that attempt's commits were never cleaned up, so the objects
-    no branch reaches are then collected. A collection left pending by an earlier rollback runs
-    here too, once its retention window has passed.
-
-    Returns True when a recovery was performed.
+    Returns the branch that names it, *branch* itself if a new one could not be made.
     """
-    retired = _retired_path(target)
-    failed = target.with_name(f"{target.name}.failed")
-    recovered = False
-    if not target.exists() and retired.is_dir():
-        retired.rename(target)
-        recovered = True
-        logger.warning("Recovered '%s' from '%s' after an interrupted swap", target.name, retired.name)
-    if _remove_rebuild_leftover(target):
-        recovered = True
-    # A rollback interrupted before or after restoring the retired store leaves
-    # its rejected replacement here. Delete it only once a usable target exists.
-    if target.exists() and failed.exists():
-        _remove_store_path(failed)
-        recovered = True
-    if not target.exists() and failed.exists():
-        raise RuntimeError(f"Cannot recover '{target}': only the rejected .failed store remains")
-    if target.exists() and (target / "repo").exists():
-        try:
-            repo = open_or_create_repo(target)
-            stale_branches = [branch for branch in repo.list_branches() if branch.startswith("ogs-ingest-rollback-")]
-            for branch in stale_branches:
-                repo.delete_branch(branch)
-            if stale_branches:
-                recovered = True
-                logger.warning("Removed %d stale ingest rollback branch(es) from '%s'", len(stale_branches), target)
-                collect_unreachable_objects(repo, target)
-                _mark_collection_pending(target)
-            collect_pending_garbage(target)
-        except Exception:
-            # Swap recovery must remain usable for older or partially damaged
-            # repositories whose branch metadata cannot be inspected.
-            logger.warning("Could not clean stale ingest rollback branches from '%s'", target, exc_info=True)
-    return recovered
-
-
-def _remove_rebuild_leftover(target: Path) -> bool:
-    """Remove the partial copy a killed pyramid rebuild left at ``<store>.rebuild``.
-
-    Safe whenever no rebuild of this store is running: the build writes there and swaps it in
-    within one locked ingest, and nothing ever reads it back. Returns True when one was removed.
-    """
-    leftover = target.with_name(f"{target.name}.rebuild")
-    if not leftover.exists():
-        return False
+    kept = f"{_RESTORE_BRANCH_PREFIX}{uuid4().hex}"
     try:
-        _remove_store_path(leftover)
-    except OSError:
-        logger.warning("Could not remove leftover pyramid rebuild '%s'", leftover, exc_info=True)
-        return False
-    logger.warning("Removed leftover pyramid rebuild '%s' from an interrupted build", leftover.name)
+        repo.create_branch(kept, snapshot)
+    except Exception:
+        logger.error("Could not keep snapshot '%s' on a branch of its own", snapshot, exc_info=True)
+        return branch
+    if branch is not None:
+        _delete_branch(repo, branch)
+    return kept
+
+
+def _first_snapshot(repo: Any) -> str:
+    """The repository's first snapshot, which holds nothing and which Icechunk never expires."""
+    *_, first = repo.ancestry(branch="main")
+    return str(first.id)
+
+
+def _delete_branch(repo: Any, branch: str, store_path: Path | None = None) -> bool:
+    """Delete *branch*, and return whether it is gone; one already gone is fine.
+
+    Never raises: a branch that could not be deleted is logged and left for the next cleanup
+    (:func:`clean_up_interrupted_ingest`), so one failure does not stop the cleanup around it.
+    """
+    try:
+        repo.delete_branch(branch)
+    except Exception as exc:
+        if "ref not found" not in str(exc).lower():
+            logger.warning("Could not delete branch '%s' of '%s'", branch, store_path or "a store", exc_info=True)
+            return False
     return True
 
 
-def remove_leftover_rebuilds() -> int:
-    """Remove every ``*.icechunk.rebuild`` left in the store directory; returns how many.
+def clean_up_interrupted_ingest(store_path: Path) -> bool:
+    """Remove the branches an ingest killed part way left in *store_path*, and free what only they kept.
 
-    Run at startup before this process recovers jobs. An older process may still be rebuilding
-    during an overlapping restart, so remove a leftover only while holding the target store's
-    writer lock. Recovery at the start of each ingest also removes one, but a dataset that is
-    never synced again would otherwise keep a partial copy of its whole store indefinitely.
+    An ingest that is killed rather than failing never runs its own cleanup. Its branches hold
+    nothing readers use: `main` is either where the ingest found it or where it moved it, and
+    either is a complete version. They only keep an abandoned replacement, or the version `main`
+    replaced, from being collected. A collection left pending by an earlier ingest runs here too,
+    once its retention window has passed.
+
+    Call with the store's write lock held. Returns True when it removed a branch.
     """
-    directory = Path(downloader.DOWNLOAD_DIR)
-    if not directory.is_dir():
-        return 0
-    removed = 0
-    for leftover in directory.glob("*.icechunk.rebuild"):
-        target = leftover.with_suffix("")
-        lock = _acquire_store_lock(target)
-        if not lock.acquire(blocking=False):
-            continue
-        try:
-            removed += _remove_rebuild_leftover(target)
-        finally:
-            lock.release()
+    if not (store_path / "repo").exists():
+        return False
+    removed = False
+    try:
+        repo = open_or_create_repo(store_path)
+        stale = [branch for branch in repo.list_branches() if branch.startswith(_INGEST_BRANCH_PREFIX)]
+        deleted = [branch for branch in stale if _delete_branch(repo, branch, store_path)]
+        if deleted:
+            removed = True
+            logger.warning("Removed %d branch(es) of an interrupted ingest from '%s'", len(deleted), store_path)
+            _collect_replaced_versions(store_path)
+        collect_pending_garbage(store_path)
+    except Exception:
+        logger.warning("Could not clean up an interrupted ingest in '%s'", store_path, exc_info=True)
     return removed
+
+
+def _collect_replaced_versions(store_path: Path) -> None:
+    """Free the versions no branch reaches any more, keeping recent ones for readers that opened them.
+
+    A replaced or abandoned version is still in the history of `main` until its snapshots are
+    expired, and only then can a collection free its data. Expiry keeps every branch's tip.
+    Objects written within :data:`_GC_RETENTION` are kept, and a pending collection frees them
+    later. The window counts from when an object was written, not from when it was replaced, so a
+    version older than that is freed at once, also under a reader still on it; CLIM-1976 keeps
+    replaced versions for longer. Never raises.
+    """
+    try:
+        repo = open_or_create_repo(store_path)
+        repo.expire_snapshots(older_than=datetime.now(UTC))
+    except Exception:
+        logger.warning("Could not expire replaced snapshots in '%s'", store_path, exc_info=True)
+        return
+    collect_unreachable_objects(repo, store_path)
+    _mark_collection_pending(store_path)
+    # A version older than the retention window was freed at once, and the recorded size counted it.
+    _refresh_recorded_size(store_path)
 
 
 # Unreachable objects younger than this are kept. Readers take no store lock, and one that
@@ -1766,24 +1664,38 @@ def _collection_marker(store_path: Path) -> Path:
     return store_path.with_name(f"{store_path.name}.gc-pending")
 
 
-def _mark_collection_pending(store_path: Path) -> None:
+def _mark_collection_pending(store_path: Path, *, at: datetime | None = None) -> None:
     """Record that *store_path* holds unreachable objects too recent to collect yet.
 
     A file beside the store holding the time, so the collection survives a restart and runs
     whether or not the dataset is ever synced again. A later rollback moves the time forward.
     """
     try:
-        _collection_marker(store_path).write_text(datetime.now(UTC).isoformat())
+        _collection_marker(store_path).write_text((at or datetime.now(UTC)).isoformat())
     except OSError:
         logger.warning("Could not mark a pending collection for '%s'", store_path, exc_info=True)
+
+
+def _move_collection_after_writes(store_path: Path) -> None:
+    """Move a pending collection of *store_path* to its newest write, when that is later than the marker."""
+    marker = _collection_marker(store_path)
+    try:
+        marked = datetime.fromisoformat(marker.read_text().strip())
+    except (OSError, ValueError):
+        return  # none pending, or unreadable, which `collect_pending_garbage` collects at once
+    times = [path.stat().st_mtime for path in (store_path / "repo").rglob("*") if path.is_file()]
+    newest = datetime.fromtimestamp(max(times), UTC) if times else None
+    if newest is not None and newest > marked:
+        _mark_collection_pending(store_path, at=newest)
 
 
 def collect_pending_garbage(store_path: Path) -> bool:
     """Run a collection marked pending for *store_path* once its retention window has passed.
 
-    Call with the store's write lock held. Everything the marked rollback left unreachable was
-    committed before the marker's time, so a collection at least :data:`_GC_RETENTION` later
-    frees all of it; the marker is then removed. Returns True when a collection ran.
+    Call with the store's write lock held. Everything the marked rollback or replacement left
+    unreachable was committed before the marker's time, so a collection at least
+    :data:`_GC_RETENTION` later frees all of it; the marker is then removed, and the recorded size,
+    which counted what was freed, is measured again. Returns True when a collection ran.
     """
     marker = _collection_marker(store_path)
     try:
@@ -1801,7 +1713,33 @@ def collect_pending_garbage(store_path: Path) -> bool:
     if not collect_unreachable_objects(open_or_create_repo(store_path), store_path):
         return False
     marker.unlink(missing_ok=True)
+    _refresh_recorded_size(store_path)
     return True
+
+
+def clean_up_interrupted_ingests() -> int:
+    """Clean up after every ingest a previous process left part way; return how many stores changed.
+
+    Run by the writer at startup, so a store that is never ingested again is cleaned up too: a
+    killed overwrite's branches, and what a killed pyramid build wrote. Nothing of the previous
+    process is still writing, so a pending collection is moved to start after the store's newest
+    write, which covers whatever it wrote after marking; a clean restart moves nothing. A store an
+    ingest already holds is skipped.
+    """
+    directory = Path(downloader.DOWNLOAD_DIR)
+    if not directory.is_dir():
+        return 0
+    changed = 0
+    for store_path in directory.glob("*.icechunk"):
+        lock = _acquire_store_lock(store_path)
+        if not lock.acquire(blocking=False):
+            continue
+        try:
+            _move_collection_after_writes(store_path)
+            changed += clean_up_interrupted_ingest(store_path)
+        finally:
+            lock.release()
+    return changed
 
 
 def collect_pending_garbage_everywhere() -> int:
@@ -1828,72 +1766,24 @@ def collect_pending_garbage_everywhere() -> int:
     return collected
 
 
-def _swap_store(staging: Path, target: Path, *, retain_previous: bool = False) -> None:
-    """Move ``staging`` into ``target``'s place, keeping the original until the swap lands.
-
-    Two directory renames on one filesystem rather than a copy, so the cost is metadata
-    rather than bytes. Two caveats, both real:
-
-    * **The target does not exist between the renames.** A reader that opens the store in that
-      window fails. The window is two metadata operations wide, but it is not zero.
-    * **Only an exception is rolled back here.** A process kill or host restart between the
-      renames leaves the published path missing, which :func:`recover_interrupted_swap`
-      repairs on the next sync.
-
-    Neither is fixable by reordering: POSIX has no atomic directory exchange that Python
-    exposes portably. The durable answer is to publish through a pointer that can be switched
-    atomically, which is CLIM-880 — this keeps the window small and recoverable meanwhile.
-    """
-    retired = _retired_path(target)
-    shutil.rmtree(retired, ignore_errors=True)
-    target.rename(retired)
-    try:
-        staging.rename(target)
-    except Exception:
-        retired.rename(target)  # leave the store exactly as it was
-        raise
-    if not retain_previous:
-        shutil.rmtree(retired, ignore_errors=True)
-
-
-def _finalize_store_swap(target: Path) -> None:
-    """Discard the previous store after its replacement record is durable."""
-    _remove_store_path(_retired_path(target))
-
-
-def _rollback_store_swap(target: Path) -> None:
-    """Restore the retained store when replacement metadata cannot be persisted."""
-    retired = _retired_path(target)
-    if not retired.exists():
-        raise FileNotFoundError(f"Cannot roll back '{target}': retained store '{retired}' is missing")
-    failed = target.with_name(f"{target.name}.failed")
-    _remove_store_path(failed)
-    target.rename(failed)
-    try:
-        retired.rename(target)
-    except Exception:
-        failed.rename(target)
-        raise
-    _remove_store_path(failed)
-
-
 def _maybe_build_pyramid(
     store_path: Path,
     dataset: dict[str, object],
     *,
-    retain_previous: bool = False,
+    branch: str = "main",
 ) -> _StoreNormalizationResult:
-    """Apply GeoZarr conventions and a multiscale pyramid to the committed Icechunk store.
+    """Apply GeoZarr conventions and a multiscale pyramid to what *branch* of the Icechunk store holds.
 
     Streaming ingest writes a flat store with root GeoZarr attrs but no
     ``spatial_ref`` CRS coordinate or pyramid levels. This rewrites the store via
     ``write_to_icechunk_store`` to add them, so every Icechunk store follows the
     same GeoZarr layout regardless of size.
 
-    ``write_to_icechunk_store`` would overwrite the very store it is reading from, so the
-    rewrite goes to a sibling store which is then swapped in. That keeps the source readable
-    while topozarr streams the pyramid out of it, which is what lets the build stay lazy
-    instead of materialising the whole store in RAM.
+    The rewrite is one commit on *branch* of the same repository, read lazily from the version
+    the branch held before it: a readonly session keeps the version it opened, so topozarr
+    streams the pyramid out of it while the commit is written, without materialising the whole
+    store in RAM. Readers of `main` see the old version until the commit lands and the new one
+    after, with no moment in between.
 
     A *temporal append* to an already-normalised flat store produces nothing new, though:
     ``spatial_ref`` is a scalar that survives the append and streaming refreshes the root
@@ -1904,7 +1794,7 @@ def _maybe_build_pyramid(
     periods level 0 has gained, which ``append_pyramid_levels`` does in place. Anything else
     (a first ingest, a replacement, a changed resampling method) rebuilds.
 
-    Returns whether normalization completed and whether it swapped the store.
+    Returns whether normalization completed and whether it rewrote the store.
     Errors remain logged and swallowed so a brand-new plain flat artifact can
     still be registered; callers updating an existing store use the result to
     roll back instead.
@@ -1913,7 +1803,7 @@ def _maybe_build_pyramid(
 
     try:
         appended = downloader.append_pyramid_levels(
-            store_path, pyramid_method=downloader.resampling_method_from_template(dataset)
+            store_path, pyramid_method=downloader.resampling_method_from_template(dataset), branch=branch
         )
     except Exception:
         # One commit, so a failure leaves the store as the ingest committed it.
@@ -1928,7 +1818,7 @@ def _maybe_build_pyramid(
         # so a shard several periods wide would be rewritten on every append (CLIM-879).
         # Splitting merged chunks afterwards instead made the build five times slower and
         # larger in memory, since every split re-reads its merged block (CLIM-1765).
-        ds = open_icechunk_dataset(store_path, merge_time=False)
+        ds = open_icechunk_dataset(store_path, merge_time=False, branch=branch)
     except Exception:
         logger.warning("Could not open Icechunk store for GeoZarr write; skipping", exc_info=True)
         return _StoreNormalizationResult(completed=False)
@@ -1945,7 +1835,7 @@ def _maybe_build_pyramid(
             # coordinate here (cheap; data variables untouched).
             if t_dim is not None:
                 try:
-                    downloader.ensure_time_coordinate_chunking(store_path, t_dim)
+                    downloader.ensure_time_coordinate_chunking(store_path, t_dim, branch=branch)
                 except Exception:
                     logger.warning("Time-coordinate re-chunk failed for '%s'", store_path.name, exc_info=True)
             logger.info(
@@ -1953,29 +1843,26 @@ def _maybe_build_pyramid(
                 store_path.name,
             )
             return _StoreNormalizationResult(completed=True)
-        # `ds` reads lazily from `store_path`, and the rewrite overwrites that same store —
-        # the aliasing is why this used to materialise everything first. Build into a sibling
-        # store and swap it in, so the source stays readable while topozarr streams the
-        # pyramid out of it. The cost moves from RAM (the whole store: 3.47 GB for Uganda's
-        # GPP) to transient disk (one extra copy, reclaimed on success).
-        staging = store_path.with_name(f"{store_path.name}.rebuild")
-        shutil.rmtree(staging, ignore_errors=True)
+        # `ds` reads lazily from the version the branch held, which the commit leaves as it was.
+        # Lazy rather than loaded: the whole store is 3.47 GB for Uganda's GPP. Until the old
+        # version is collected it costs disk instead, as one extra copy.
+        #
+        # Marked before the build, so what it writes is collected even if it is killed part way:
+        # chunks no snapshot references, which nothing else would collect on a first ingest. A
+        # failure marks again once it has stopped writing; after a kill, the writer's startup does.
+        _mark_collection_pending(store_path)
         try:
             downloader.write_to_icechunk_store(
                 ds,
-                staging,
+                store_path,
                 t_dim=t_dim,
                 pyramid_method=downloader.resampling_method_from_template(dataset),
                 commit_message="Applied GeoZarr conventions",
+                branch=branch,
             )
-            ds.close()  # drop the read session before the directory moves under it
-            _swap_store(staging, store_path, retain_previous=retain_previous)
-        finally:
-            # A failed build leaves a partial copy of the whole store behind. That matters most
-            # when the failure *was* disk exhaustion: the flat-store fallback below would
-            # otherwise run with the transient copy still occupying the space. A successful
-            # swap has already moved `staging` away, so this is a no-op then.
-            shutil.rmtree(staging, ignore_errors=True)
+        except Exception:
+            _mark_collection_pending(store_path)
+            raise
     except Exception:
         logger.error(
             "GeoZarr/pyramid write failed for '%s'; flat Icechunk artifact will be used as-is",
@@ -1985,7 +1872,7 @@ def _maybe_build_pyramid(
         return _StoreNormalizationResult(completed=False)
     finally:
         ds.close()
-    return _StoreNormalizationResult(completed=True, swapped=True)
+    return _StoreNormalizationResult(completed=True, rewritten=True)
 
 
 def _load_streaming_plugin(
@@ -2185,7 +2072,7 @@ def _latest_published_raster_artifacts_cached() -> dict[str, ArtifactRecord]:
         return _store_artifacts_cache[1]
     artifacts = latest_published_raster_artifacts_by_dataset()
     _store_artifacts_cache = (key, artifacts)
-    # A rebuilt store can sit at the same path as the one it replaced; reopen everything.
+    # A dataset deleted and ingested again has a new store at the same path; reopen everything.
     with _open_stores_lock:
         _open_repositories.clear()
         _open_sessions.clear()
@@ -2573,14 +2460,16 @@ def _encode_records(records: list[ArtifactRecord]) -> str:
 
 
 def _load_records() -> list[ArtifactRecord]:
-    ensure_store()
-    raw = json.loads(ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8"))
-    return [_decode_record(item) for item in raw]
+    """The stored records; none before the first write, so a read never creates the index."""
+    try:
+        raw = ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return [_decode_record(item) for item in json.loads(raw or "[]")]
 
 
 def _save_records(records: list[ArtifactRecord]) -> None:
     global _records_write_count
-    ensure_store()
     with index_lock(ARTIFACTS_INDEX_PATH):
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1
@@ -2671,20 +2560,28 @@ def _upsert_artifact_record(
 def _refresh_recorded_size(store_path: Path) -> None:
     """Re-measure *store_path* and record it on the newest record for that path, if there is one.
 
-    For a failed append that kept its committed periods. Best-effort: a size is a figure for
-    display, so this logs rather than raising and never masks the failure that led here.
+    For a failed append that kept its committed periods, and after a collection freed a replaced
+    version. Best-effort: a size is a figure for display, so this logs rather than raising and
+    never masks the failure that led here.
     """
     try:
         path = str(store_path.resolve())
         size = stored_bytes(store_path)
 
-        def update(records: list[ArtifactRecord]) -> None:
+        def newest(records: list[ArtifactRecord]) -> int | None:
             matching = [index for index, record in enumerate(records) if record.path == path]
-            if matching:
-                newest = max(matching, key=lambda index: records[index].created_at)
-                records[newest] = records[newest].model_copy(update={"size_bytes": size})
+            return max(matching, key=lambda index: records[index].created_at) if matching else None
 
-        _mutate_records(update)
+        def update(records: list[ArtifactRecord]) -> None:
+            index = newest(records)
+            if index is not None:
+                records[index] = records[index].model_copy(update={"size_bytes": size})
+
+        # Rewriting the index empties every dataset's cached repositories and sessions.
+        current = _load_records()
+        index = newest(current)
+        if index is not None and current[index].size_bytes != size:
+            _mutate_records(update)
     except Exception:
         logger.warning("Could not refresh the recorded size of '%s'", store_path, exc_info=True)
 
@@ -2754,10 +2651,8 @@ def _mutate_records(mutation: Callable[[list[ArtifactRecord]], MutationResult]) 
     see the records before the write or after it and never a partly written file.
     """
     global _records_write_count
-    ensure_store()
     with index_lock(ARTIFACTS_INDEX_PATH):
-        raw = ARTIFACTS_INDEX_PATH.read_text(encoding="utf-8")
-        records = [_decode_record(item) for item in json.loads(raw or "[]")]
+        records = _load_records()
         result = mutation(records)
         atomic_text(ARTIFACTS_INDEX_PATH, _encode_records(records))
         _records_write_count += 1

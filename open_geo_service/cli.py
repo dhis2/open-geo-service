@@ -1,5 +1,6 @@
 """Command-line entry point for running the Open Geo Service with uvicorn."""
 
+import logging
 import os
 
 import uvicorn
@@ -26,6 +27,8 @@ def main() -> None:
     host = os.environ.get("HOST", DEFAULT_HOST)
     port = int(os.environ.get("PORT", DEFAULT_PORT))
     forwarded_allow_ips = os.environ.get("FORWARDED_ALLOW_IPS")
+    # Here rather than at import, so an app embedding GeoService configures logging itself.
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     uvicorn.run(
         "open_geo_service.main:app",

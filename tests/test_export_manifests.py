@@ -28,7 +28,7 @@ from open_geo_service.shared.provenance import (
 )
 from open_geo_service.shared.time import utc_now
 
-from .conftest import named_exports
+from .conftest import TEST_DATA_ROOT, named_exports
 
 
 def _data() -> pd.DataFrame:
@@ -42,6 +42,7 @@ def saved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         config,
         "_cache",
         {
+            "data_dir": str(TEST_DATA_ROOT),
             "dhis2_connections": [{"id": "hmis", "url": "https://hmis.example.org/dhis", "token_env": "TEST_TOKEN"}],
         },
     )

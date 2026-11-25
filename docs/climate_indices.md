@@ -12,7 +12,7 @@ The indicators come from three xclim realms, plus the water-budget converters SP
 
 | Module | Domain | Examples |
 |---|---|---|
-| `atmos` | Atmospheric | SPI, SPEI, CDD, CWD, TX days above, heat wave frequency, frost days, growing degree days, … |
+| `atmos` | Atmospheric | SPI, SPEI, dry and wet spells, TX days above, heat wave frequency, frost days, growing degree days, … |
 | `land` | Land surface | Snow water equivalent, soil freeze/thaw, … |
 | `seaIce` | Sea ice | Ice extent, concentration trends |
 | `convert` | Conversions | `potential_evapotranspiration`, `water_budget`, `water_budget_from_tas` |
@@ -35,7 +35,7 @@ Or call `GET /processes` directly and search by keyword. In the [openEO Web Edit
 
 Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. [SPI](#standardized-precipitation-index-spi) takes them as they are. Two things need a **rate** instead:
 
-- **xclim's other precipitation indicators** (SPEI's `water_budget`, CDD, CWD and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
+- **xclim's other precipitation indicators** (SPEI's `water_budget`, dry and wet spells and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
 - **Comparisons across periods of different length.** January's total covers 31 days and February's 28 or 29, so a February total looks drier than the same daily rainfall in January. As a rate in mm/d, months compare directly with each other and with daily data.
 
 Convert in the process graph with `amount2rate`, between `load_collection` and whatever needs the rate. In the openEO Python client:
@@ -238,10 +238,10 @@ These take a precipitation rate too:
 rate = precip.process("amount2rate", arguments={"data": precip})
 
 # Annual maximum consecutive dry days (CDD)
-rate.process("cdd", arguments={"pr": rate, "thresh": "1 mm/day", "freq": "YS"})
+rate.process("dry_spell_max_length", arguments={"pr": rate, "thresh": "1 mm", "window": 1, "freq": "YS"})
 
 # Monthly maximum consecutive wet days (CWD)
-rate.process("cwd", arguments={"pr": rate, "thresh": "1 mm/day", "freq": "MS"})
+rate.process("wet_spell_max_length", arguments={"pr": rate, "thresh": "1 mm", "window": 1, "freq": "MS"})
 ```
 
 ### Days above temperature threshold
@@ -266,6 +266,20 @@ tmax.process(
     },
 )
 ```
+
+### Indicators replaced in xclim 1.0
+
+xclim 1.0 deprecated five indicators in favour of more general spell indicators, and Open Geo Service lists only the replacements. Process graphs that use an old id need its replacement, with the arguments below: the replacements' own defaults differ, so the id alone changes the result (`hot_spell_total_length` counts spells of 3 days above 30 °C, where `heat_wave_index` counted 5 days above 25 °C).
+
+| Old id | Replacement | Arguments that keep the old values |
+|---|---|---|
+| `cdd` | `dry_spell_max_length` | `thresh: "1 mm"`, `window: 1` |
+| `cwd` | `wet_spell_max_length` | `thresh: "1 mm"`, `window: 1` |
+| `heat_wave_index` | `hot_spell_total_length` | `thresh: "25 degC"`, `window: 5` |
+| `cold_spell_days` | `cold_spell_total_length` | the same `thresh`, `window: 5` |
+| `maximum_consecutive_warm_days` | `hot_spell_max_length` | `thresh: "25 degC"` |
+
+`cdd` and `cwd` took the threshold as a rate (`1 mm/day`); their replacements take a daily amount and have no `condition` or `min_gap`. The `op` of `heat_wave_index` and `maximum_consecutive_warm_days` is `condition` in their replacements. Other arguments carry over. An xclim upgrade that deprecates another indicator is held back until the indicator is reviewed and added to this table.
 
 ---
 
@@ -325,10 +339,10 @@ from open_geo_service.openeo.xclim_processes import call_with_ogs_time_dim
 from open_geo_service.process import process
 
 
-@process(summary="Consecutive dry days (Rwanda threshold)")
-def cdd(pr: xr.DataArray, thresh: str = "0.5 mm/day", freq: str = "MS") -> xr.DataArray:
-    """CDD with a lower threshold suited to Rwanda's dry season definition."""
-    return call_with_ogs_time_dim(xclim.compute.maximum_consecutive_dry_days, pr, thresh=thresh, freq=freq)
+@process(summary="Dry spell maximum length (Rwanda threshold)")
+def dry_spell_max_length(pr: xr.DataArray, thresh: str = "0.5 mm", freq: str = "MS") -> xr.DataArray:
+    """Longest run of dry days, with a lower threshold suited to Rwanda's dry season definition."""
+    return call_with_ogs_time_dim(xclim.compute.dry_spell_max_length, pr, thresh=thresh, window=1, freq=freq)
 ```
 
 Datacubes in Open Geo Service name their time dimension `t`, while xclim requires `time`. `call_with_ogs_time_dim` renames it on the way in and back on the result; calling xclim directly on a cube fails with `KeyError: 'time'`.

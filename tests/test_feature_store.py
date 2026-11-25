@@ -608,7 +608,9 @@ def test_rows_are_stored_in_spatial_order_so_each_row_group_covers_a_small_area(
     assert len(set(bounds)) == 4
 
 
-def test_row_groups_are_bounded_and_no_index_column_is_written(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_row_groups_are_bounded_zstd_compressed_and_no_index_column_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import pyarrow.parquet as pq
 
     monkeypatch.setattr(store, "ROW_GROUP_SIZE", 5)
@@ -617,6 +619,7 @@ def test_row_groups_are_bounded_and_no_index_column_is_written(monkeypatch: pyte
 
     metadata = pq.ParquetFile(str(record.path)).metadata
     assert [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)] == [5, 5, 5, 1]
+    assert {metadata.row_group(0).column(i).compression for i in range(metadata.num_columns)} == {"ZSTD"}
     # Sorting permutes the index; it must not travel into the file as a column of its own.
     assert not [name for name in pq.read_schema(str(record.path)).names if name.startswith("__index")]
     assert store.read_feature_collection(record)["orgUnitCode"].is_unique

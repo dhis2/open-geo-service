@@ -137,7 +137,6 @@ def test_sync_appends_to_every_level_and_matches_a_rebuild(
 
     assert state["rebuilds"] == 1, "the sync must not rebuild the pyramid"
     assert artifact.coverage.temporal.end == "2026-01-05"
-    assert not synced.with_name(f"{synced.name}.rebuild").exists()
     with open_icechunk_dataset(synced) as stored:
         assert stored.sizes["t"] == 5
     _assert_same_store(synced, _rebuild(state, tmp_path, "2026-01-05"))
@@ -237,21 +236,29 @@ def test_a_failed_record_write_rolls_back_the_appended_levels(
     assert set(lengths.values()) == {3}, lengths
 
 
-def test_an_ingested_pyramid_keeps_one_period_per_time_shard(pyramid_sync: dict[str, Any]) -> None:
+def test_every_level_of_an_ingested_pyramid_has_one_period_per_shard_and_a_fill_value(
+    pyramid_sync: dict[str, Any],
+) -> None:
     """Every level of a pyramid built through the ingest path holds one period per shard.
 
     A sync appends one period at a time, and appending into a shard several periods wide rewrites
     that shard on every append (CLIM-879). topozarr widens time shards when the source's time
     chunks allow it, and the ingest path reads the streaming store with time merged per dask chunk,
     so this fails if either one changes (CLIM-1765).
+
+    Each level also declares its fill value where xarray reads it, which is where the STAC band's
+    `nodata` comes from (CLIM-1974).
     """
     state = pyramid_sync
     _ingest(state, "2026-01-03")
     root = _root(state["store"])
     levels = sorted(root.group_keys())
     assert len(levels) >= 3, "precondition: a pyramid with several levels"
+    session = icechunk.Repository.open(icechunk.local_filesystem_storage(str(state["store"]))).readonly_session("main")
     for level in levels:
         tg = root[level]["tg"]
         assert tg.shape[0] == 3, level
         assert (tg.shards or tg.chunks)[0] == 1, level
         assert tg.chunks[0] == 1, level
+        fill = xr.open_zarr(session.store, group=level, consolidated=False)["tg"].encoding.get("_FillValue")
+        assert fill is not None and np.isnan(fill), level

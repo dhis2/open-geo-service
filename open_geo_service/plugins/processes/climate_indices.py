@@ -108,7 +108,9 @@ def spi(
 def _is_amount(pr: xr.DataArray) -> bool:
     """Whether ``pr`` is a precipitation amount (a length such as mm) rather than a rate."""
     units = pr.attrs.get("units")
-    return bool(units) and units2pint(units).dimensionality == units2pint("mm").dimensionality
+    if not isinstance(units, str) or not units:
+        return False
+    return bool(units2pint(units).dimensionality == units2pint("mm").dimensionality)
 
 
 def _monthly_totals(pr: xr.DataArray, freq: str | None) -> xr.DataArray:

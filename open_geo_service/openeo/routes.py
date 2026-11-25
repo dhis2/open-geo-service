@@ -15,9 +15,11 @@ from open_geo_service.openeo.jobs import get_openeo_job_service
 from open_geo_service.openeo.schemas import (
     OpenEOJobCreate,
     OpenEOJobListResponse,
+    OpenEOJobLogs,
     OpenEOJobRecord,
     OpenEOJobResults,
     OpenEOJobUpdate,
+    OpenEOLogLevel,
     WorkflowListResponse,
     WorkflowRecord,
 )
@@ -225,7 +227,8 @@ def list_processes(request: Request, response: Response) -> dict[str, Any] | HTM
     The openEO JSON by default, as clients expect. A browser gets the catalogue page the rail
     links to, on the same terms as a single process.
     """
-    from open_geo_service.system.templates import prefers_html, render_processes_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_processes_page
 
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
@@ -254,7 +257,8 @@ def get_process_spec(process_id: str, request: Request, response: Response) -> d
     p = processes_service.get_openeo_process(process_id)
     if p is None:
         raise HTTPException(status_code=404, detail=f"Process '{process_id}' not found")
-    from open_geo_service.system.templates import prefers_html, render_process_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_process_page
 
     # Two representations on one URL — see the dataset page's note on Vary.
     response.headers["Vary"] = "Accept"
@@ -325,6 +329,12 @@ def start_job(job_id: OwnedJobId) -> Response:
 def get_results(job_id: OwnedJobId) -> OpenEOJobResults:
     """Return result links for a finished job."""
     return get_openeo_job_service().get_results(job_id)
+
+
+@jobs_router.get("/{job_id}/logs", response_model=OpenEOJobLogs)
+def get_logs(job_id: OwnedJobId, level: OpenEOLogLevel = "debug", offset: str | None = None) -> OpenEOJobLogs:
+    """Return a job's log entries at `level` or more severe, after the entry `offset`."""
+    return get_openeo_job_service().get_logs(job_id, level=level, offset=offset)
 
 
 @jobs_router.delete("/{job_id}/results", status_code=204)

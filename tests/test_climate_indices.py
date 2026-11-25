@@ -7,8 +7,10 @@ import pandas as pd
 import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
+from xclim.core.indicator import registry
 
 from open_geo_service.openeo.plugin_processes import load_plugin_processes
+from open_geo_service.openeo.xclim_processes import _REALMS, REPLACED
 from open_geo_service.plugins.processes.climate_indices import spi
 from open_geo_service.plugins.processes.precipitation_conversion import amount2rate, rate2amount
 from open_geo_service.process import get_process_metadata
@@ -214,27 +216,39 @@ def test_spi_process_summary_in_catalog(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CDD, CWD, TX days above — auto-registered from xclim
+# Dry and wet spells, TX days above — auto-registered from xclim
 # ---------------------------------------------------------------------------
 
 
-def test_cdd_cwd_tx_appear_in_get_processes(client: TestClient) -> None:
+def test_spells_and_tx_appear_in_get_processes(client: TestClient) -> None:
     response = client.get("/processes")
     ids = {p["id"] for p in response.json()["processes"]}
-    assert {"cdd", "cwd", "tx_days_above"} <= ids
+    assert {"dry_spell_max_length", "wet_spell_max_length", "tx_days_above"} <= ids
+    assert set(REPLACED.values()) <= ids
+    assert not set(REPLACED) & ids
 
 
-def test_cdd_catalog_metadata(client: TestClient) -> None:
+def test_every_deprecated_indicator_is_replaced() -> None:
+    """An xclim upgrade that deprecates another indicator fails here until it is reviewed."""
+    deprecated = {
+        key: obj.version_deprecated[1]
+        for key, obj in registry.items()
+        if "." not in key and obj.realm in _REALMS and obj.version_deprecated
+    }
+    assert deprecated == REPLACED
+
+
+def test_dry_spell_catalog_metadata(client: TestClient) -> None:
     procs = {p["id"]: p for p in client.get("/processes").json()["processes"]}
-    assert "consecutive dry" in procs["cdd"]["summary"].lower()
-    thresh = next(p for p in procs["cdd"]["parameters"] if p["name"] == "thresh")
-    assert thresh["default"] == "1 mm/day"
+    assert "dry spell" in procs["dry_spell_max_length"]["summary"].lower()
+    thresh = next(p for p in procs["dry_spell_max_length"]["parameters"] if p["name"] == "thresh")
+    assert thresh["default"] == "1 mm"
     assert thresh["schema"].get("type") == "string"
 
 
-def test_cwd_catalog_metadata(client: TestClient) -> None:
+def test_wet_spell_catalog_metadata(client: TestClient) -> None:
     procs = {p["id"]: p for p in client.get("/processes").json()["processes"]}
-    assert "consecutive wet" in procs["cwd"]["summary"].lower()
+    assert "wet spell" in procs["wet_spell_max_length"]["summary"].lower()
 
 
 def test_tx_days_above_catalog_metadata(client: TestClient) -> None:
@@ -244,19 +258,44 @@ def test_tx_days_above_catalog_metadata(client: TestClient) -> None:
     assert "25" in thresh["default"]
 
 
-def test_cdd_registered_callable_computes(daily_precip: xr.DataArray) -> None:
+def test_dry_spell_registered_callable_computes(daily_precip: xr.DataArray) -> None:
     procs = dict(load_plugin_processes())
-    assert "cdd" in procs
-    result = xr.DataArray(procs["cdd"](pr=daily_precip))
+    assert "dry_spell_max_length" in procs
+    result = xr.DataArray(procs["dry_spell_max_length"](pr=daily_precip))
     assert isinstance(result, xr.DataArray)
     assert "time" in result.dims
 
 
-def test_cdd_cwd_registered_callables_are_complementary(daily_precip: xr.DataArray) -> None:
-    procs = dict(load_plugin_processes())
-    r_cdd = xr.DataArray(procs["cdd"](pr=daily_precip))
-    r_cwd = xr.DataArray(procs["cwd"](pr=daily_precip))
-    assert not np.allclose(r_cdd.values, r_cwd.values, equal_nan=True)
+@pytest.mark.parametrize(
+    ("old", "variable", "old_args", "new_args"),
+    [
+        ("cdd", "pr", {}, {"thresh": "1 mm", "window": 1}),
+        ("cwd", "pr", {}, {"thresh": "1 mm", "window": 1}),
+        ("heat_wave_index", "tasmax", {}, {"thresh": "25 degC", "window": 5}),
+        ("cold_spell_days", "tas", {"thresh": "15 degC"}, {"thresh": "15 degC", "window": 5}),
+        ("maximum_consecutive_warm_days", "tasmax", {}, {"thresh": "25 degC"}),
+    ],
+)
+def test_a_replacement_gives_the_deprecated_indicators_values_with_the_documented_arguments(
+    old: str,
+    variable: str,
+    old_args: dict[str, str],
+    new_args: dict[str, str],
+    daily_precip: xr.DataArray,
+    daily_tasmax: xr.DataArray,
+) -> None:
+    from xclim.core.options import set_options
+
+    # The fixture's flux would make every day wet; as a daily amount it has spells of both.
+    data = daily_precip.assign_attrs(units="mm/day") if variable == "pr" else daily_tasmax
+    with set_options(as_dataset=False):
+        expected = registry[old](**{variable: data}, **old_args)
+    new = dict(load_plugin_processes())[REPLACED[old]]
+    assert float(expected.sum()) > 0
+    np.testing.assert_array_equal(new(**{variable: data}, **new_args).values, expected.values)
+    if old in ("cdd", "heat_wave_index"):
+        # The replacement's own defaults count other spells.
+        assert not np.array_equal(new(**{variable: data}, **old_args).values, expected.values)
 
 
 def test_tx_days_above_registered_callable_higher_threshold_gives_fewer_days(daily_tasmax: xr.DataArray) -> None:
@@ -270,7 +309,7 @@ def test_tx_days_above_registered_callable_higher_threshold_gives_fewer_days(dai
 def test_xclim_returns_schema_is_datacube() -> None:
     """Auto-registered xclim processes should declare a datacube return type."""
     procs = dict(load_plugin_processes())
-    cdd_fn = procs["cdd"]
+    cdd_fn = procs["dry_spell_max_length"]
     meta = get_process_metadata(cdd_fn)
     assert meta is not None
     schema = meta.get("returns", {}).get("schema", {})
@@ -293,15 +332,15 @@ def test_spi_nullable_string_params_have_no_null_default() -> None:
             )
 
 
-def test_cdd_via_process_graph(client: TestClient, daily_precip: xr.DataArray) -> None:
-    """CDD should be callable through the openEO synchronous result endpoint."""
+def test_dry_spell_via_process_graph(client: TestClient, daily_precip: xr.DataArray) -> None:
+    """A dry spell process should be callable through the openEO synchronous result endpoint."""
     from unittest.mock import patch
 
     def mock_run(process: dict, request: object = None, **kwargs: object) -> object:
         procs = dict(load_plugin_processes())
-        cdd_fn = procs["cdd"]
+        cdd_fn = procs["dry_spell_max_length"]
         # Return a plain dict so the route serialises it as JSON
-        result = cdd_fn(pr=daily_precip, thresh="1 mm/day")
+        result = cdd_fn(pr=daily_precip, thresh="1 mm")
         return {"cdd": float(result.mean().item())}  # type: ignore[union-attr]
 
     with patch("open_geo_service.openeo.execution.run_process_graph", mock_run):
@@ -314,8 +353,8 @@ def test_cdd_via_process_graph(client: TestClient, daily_precip: xr.DataArray) -
                         "arguments": {"id": "chirps3_precipitation_daily"},
                     },
                     "cdd": {
-                        "process_id": "cdd",
-                        "arguments": {"pr": {"from_node": "load"}, "thresh": "1 mm/day"},
+                        "process_id": "dry_spell_max_length",
+                        "arguments": {"pr": {"from_node": "load"}, "thresh": "1 mm"},
                         "result": True,
                     },
                 }

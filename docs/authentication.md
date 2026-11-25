@@ -1,9 +1,9 @@
 # Authentication and authorization
 
-This note records how Open Geo Service authenticates callers and decides what they may do. The first step
-of the [order of delivery](#order-of-delivery) is in place: named tokens, tiers and the route
-table, configured as described in [Authentication](instance_guide.md#authentication). The rest is
-design. Until web sign-in ships, operators act through the API on an instance with tokens on.
+This note records how Open Geo Service authenticates callers and decides what they may do. The first three steps
+of the [order of delivery](#order-of-delivery) are in place: named tokens, tiers and the route
+table, web interface sign-in, and optional gating of reads, configured as described in
+[Authentication](instance_guide.md#authentication). The rest is design.
 
 ## The principle
 
@@ -66,11 +66,26 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment can gate them with an explicit setting, and
-the STAC catalog then advertises the scheme through the STAC Authentication extension so STAC
-Browser can offer a sign-in. Advertising a scheme does not make every reader send the credential.
-Until signed links exist (see [Private data](#private-data)), gating reads can leave the map
-viewer, QGIS and the Zarr, PMTiles and GeoParquet assets linked from STAC unable to load.
+Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+every public route then needs the authenticated tier, except the few a client needs to find out
+how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
+sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
+lists the catalogue, is gated. The table's tiers do not change, so read-only mode, which reads
+them, still serves reads to a token. Responses are marked `Cache-Control: private`, so a caching
+proxy in front does not serve one caller's answer to another.
+
+Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
+sign in and brought back, rather than shown the JSON refusal a client gets.
+
+The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
+Authentication extension (v1.2.0), and mark the links and assets on this instance with
+`auth:refs`. Basic carries the token id and secret, which QGIS, GDAL and STAC Browser can send;
+the middleware already accepts it on every route. STAC Browser offers a sign-in from its own
+`authConfig`, not from the catalog's schemes, and supports only basic among HTTP schemes, so it is
+deployed with `authConfig` set to http basic. The web interface and its map viewer read with
+the session cookie, since their requests are same-origin. Advertising a scheme does not make
+every reader send the credential: until signed links exist (see [Private data](#private-data)), a
+reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet assets.
 
 ## Where it is enforced
 
@@ -121,10 +136,22 @@ Named tokens are permanent. They remain the credential for machine clients after
 
 ## The web interface
 
-The pages post plain HTML forms, which cannot send a bearer header, so the web interface gets a
-sign-in page. It sets a session cookie marked `HttpOnly`, `Secure` and `SameSite=Lax` that holds a
-signed session id, never the secret. Every write made with the cookie carries a CSRF token.
-Signed out, the pages stay readable and their action panels say what signing in would allow.
+The pages post plain HTML forms, which cannot send a bearer header, so the web interface has a
+sign-in page. It takes a token once and sets a session cookie marked `HttpOnly`, `Secure` and
+`SameSite=Lax` that holds a random session id, never the secret. Sessions are kept in memory, so a
+restart signs everyone out; a session also ends after 8 hours, at sign-out, or when its token is
+removed or given a new secret. An expired or unknown cookie counts as no credential and is
+cleared, rather than refused, so it cannot lock the browser out of the pages.
+
+Sign-in is offered only over HTTPS or on `localhost`, where the token does not travel in clear.
+A write made with the cookie must come from the instance's own pages: its `Origin`, scheme, host
+and port, must be the one the request addressed or `GEOSERVICE_BASE_URL`'s, or, without `Origin`,
+`Sec-Fetch-Site` must say `same-origin`. The middleware checks this before reading the body, which a CSRF token in the
+form would need. `GET /credentials/basic` answers only a `Basic` credential, so a signed-in page
+cannot read the secret back.
+
+Signed out, or signed in below the operator tier, the pages stay readable and their action panels
+say they need an operator's sign-in.
 
 The cookie serves only the Open Geo Service interface on its own origin. A client on another origin, such as a
 browser app or the openEO Web Editor, sends a bearer token. Cross-site cookies, which would need
@@ -213,9 +240,11 @@ Each step ships on its own and is useful alone; no later step redoes an earlier 
 
 1. Principals and tiers, the route table, the middleware, named tokens, the openEO basic exchange,
    and owners on jobs and stored process graphs.
-2. Web interface sign-in with a session cookie and CSRF.
+2. Web interface sign-in with a session cookie and an origin check on its writes.
 3. Optional gating of reads, advertised in STAC.
-4. OIDC and per-person ownership.
+4. OIDC and per-person ownership. Signing in through the provider and validating its tokens
+   use an established library, such as Authlib, rather than code of our own; the session
+   handling from step 2 is reconsidered then, to keep one mechanism.
 5. Role mapping and quotas.
 6. Per-dataset access with signed links.
 7. DHIS2 routes, for the operations the first DHIS2 app names.

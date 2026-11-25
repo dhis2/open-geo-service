@@ -447,7 +447,7 @@ curl -s "http://127.0.0.1:9000/stac/chirps3_precipitation_daily/collection.json"
 What this means:
 
 - `/stac` is the public STAC discovery surface for published datasets, raster and vector alike
-- native FastAPI no longer exposes `/collections`
+- `/collections` is the openEO collection listing, not a second STAC catalogue
 - dataset responses include `/stac/{dataset_id}/collection.json`
 
 ### Raster and feature collections are described differently
@@ -573,8 +573,10 @@ tiles.
 
 ## 12. Read table datasets
 
-A table dataset holds rows in one Parquet file. A computed table holds values per feature and
-period, such as monthly precipitation per district. It is listed under `/datasets` with `itemType: "table"`, and its rows are served by
+A table dataset holds rows in one Parquet file, with the columns its schema declares (see
+[Table schemas](#table-schemas)). A computed table has the built-in aggregation schema: values per
+feature and period, such as monthly precipitation per district, which the rest of this section
+describes. It is listed under `/datasets` with `itemType: "table"`, and its rows are served by
 `GET /tables/{dataset_id}/rows`, as JSON or with `format=csv`:
 
 ```bash
@@ -607,7 +609,7 @@ last changed; the same value written again keeps its row. Rows written for a new
 feature collection replace that collection's rows of other versions. No history is kept.
 
 Filters: `collection`, `feature`, `start` and `end` (inclusive bounds on `period_start`), `reducer` and
-`weights`. Only published table datasets are served. `GET /tables/{dataset_id}/data.parquet` serves the
+`weights`. A filter on a column the table does not have is refused with 400. Only published table datasets are served. `GET /tables/{dataset_id}/data.parquet` serves the
 dataset's Parquet file as it is stored.
 
 A pipeline with the `table` destination keeps its workflow's value per feature and period as a
@@ -658,6 +660,60 @@ their source pages as `via`. Its `README.md` lists the columns and gives a DuckD
 table to its feature collection's GeoParquet on `collection_id` and `feature_id`. The dataset page
 shows the latest value of each feature, up to 10.
 
+### Table schemas
+
+A table has no fixed schema. A schema file declares one: its columns, the key columns that say
+which stored row a write replaces, and, where it matters, what a column represents. Schema files are YAML lists in a
+`tables/schemas/` folder, read from core, then installed plugin packages, then the instance
+`plugins_dir`; a later schema with the same id replaces an earlier one. The built-in
+`aggregation` schema, in `open_geo_service/plugins/tables/schemas/aggregation.yaml`, is the one
+described above. The `table` pipeline destination writes it, and a table dataset that names no
+schema gets it. A dataset keeps the schema of its first write: its record and its Parquet file's
+metadata (`ogs:table_schema`) hold the schema's declaration, and its rows are read by that, so an
+edited schema file does not change how stored rows read. A later write takes up a new name or
+description, but is refused when the schema has changed its columns or key; give a changed
+schema a new id, or delete the dataset to write it again.
+
+```yaml
+- id: station_daily
+  name: Daily station observations
+  columns:
+    - {name: station, type: string, required: true, nullable: false, description: Id of the station.}
+    - {name: day, type: date, required: true, nullable: false, represents: period_start, description: Day of the observation.}
+    - {name: rainfall, type: double, unit: mm, represents: value, description: Rainfall over the day.}
+  key: [station, day]
+```
+
+A column has a `type` (`string`, `double`, `int32`, `int64`, `bool`, `date`, `timestamp`), a
+`description`, and optionally a `unit`. There is no duration type, as Apache Iceberg has none:
+store a time span as `int64` with a `unit`, as the aggregation schema's `lead_time` does in `s`.
+A row must name each `required` column, and a column with `nullable: false` must hold a value.
+The store adds `written_at` to every table.
+
+A column's `represents` tells the store and its readers what it holds, which adds what they do
+with it. The names are the aggregation schema's columns, and a column with one of those names
+represents it without saying so; mark only a column named otherwise, and rename a column that
+holds something else under one of those names. At most one column represents each, except
+`value`, and a column representing `collection_id`, `collection_version`, `feature_id` or
+`period_start` must be in the key:
+
+| `represents` | Column type | What it adds |
+| --- | --- | --- |
+| `dataset_id` | string | Filled with the dataset id; a row naming another is refused |
+| `collection_id` | string | Filled with the feature collection a write reports on; goes with `feature_id` |
+| `feature_id` | string | Checked against the collection's features; `feature` filter; join example in the README; latest values on the page |
+| `feature_name` | string | Shown and sorted by on the page |
+| `period_start` | date | Must be `required` and not `nullable`; stored as its period's first day; one period type per dataset; `start` and `end` filters; `period` and `period_end` in the rows API, so no column may take those names; temporal extent |
+| `value` | number | A measured value: its unit in STAC; the first is shown on the page |
+| `unit` | string | One unit per dataset, given to the value columns in STAC |
+| `coverage` | double | From 0 to 1; a value with coverage 0 is refused |
+| `collection_version` | string | A write for one version replaces the collection's rows of other versions |
+
+A table without one of these skips what it adds: without a `feature_id` column, no collection is
+checked and the README has no join example; without a `period_start` column, there is no temporal
+extent and no latest values. A table without a `collection_id` column reports the whole world as
+its spatial extent.
+
 ## 13. `/sync`
 
 `/sync` advances an existing managed dataset from its latest local coverage toward a requested upstream period.
@@ -675,7 +731,7 @@ Implemented behavior:
 - preserve stable managed dataset identity
 - use template-level `sync_execution`
 - `append` execution reuses the sync planner's source-available delta and writes only periods missing from the committed store
-- `rematerialize` execution downloads the complete planned contiguous union into a sibling store and publishes it only after validation
+- `rematerialize` execution downloads the complete planned contiguous union onto a temporary branch of the store and moves `main` to it only after validation
 - return the updated dataset view plus structured `sync_detail`
 - validate realized temporal coverage against the planned contiguous artifact scope; retain the caller's request scope separately as provenance
 
@@ -836,38 +892,41 @@ Expected planning response:
 - `delta_end` is `2024-02-10`
 
 `append` here means Open Geo Service reuses the planner's source-available delta and
-writes only missing periods to the existing Icechunk store. A rollback snapshot protects
-the previously committed store until normalization and artifact registration succeed.
+writes only missing periods to the existing Icechunk store. A rollback branch keeps the
+version before the append until normalization and artifact registration succeed, and a
+failure after that point resets `main` to it.
 Progress counts the new periods in this append, excluding already committed history.
 
 If a complete store has lost its artifact record, repeating `/ingest` reconstructs the
 record from the store without querying or fetching historical source data. Recovery
 validates and normalizes the store and honors the request's publication setting.
 
-Interrupted directory rollback can leave a rejected replacement at `<store>.failed`.
-The next ingest restores a missing target from `<store>.retired` and removes the
-rejected copy once the target exists. If rollback itself fails, the job reports that
-failure and preserves the recovery branch and snapshot; inspect the reported store
-paths before retrying. Snapshot reset is skipped if the original repository could
-not be restored.
+A rematerialization, and an overwrite, is built on a temporary branch of the same Icechunk
+repository. Readers keep the current version on `main` until the new one is fetched,
+validated and normalized, and `main` then moves to it in one step. A pyramid rebuild is one
+commit on the branch it rebuilds. Readers therefore always open a complete version, also
+when an ingest is killed part way: a killed ingest leaves only its temporary branches, which
+the next ingest of that store removes. If rollback itself fails, the job reports that failure
+and names the rollback branch, which still points at the version before the ingest.
 
-A rolled-back append leaves the periods it committed unreachable, and Icechunk keeps them
-until collected. Only data that no branch or tag reaches is removed, so every version still
-reachable is kept, including the one published before the failed attempt.
+A rolled-back append leaves the periods it committed unreachable, and a replaced version is
+unreachable once `main` has moved past it; Icechunk keeps both until collected. Only data that
+no branch or tag reaches is removed, so every version still reachable is kept, including the
+one published before a failed attempt.
 
 Data committed in the last hour is kept as well. Readers take no lock, so a client that opened
-the dataset during the failed attempt may be reading one of its interim versions; the hour lets
-it finish. It is a window, not a guarantee: a client still reading such an interim version more
+the dataset during a failed attempt may be reading one of its interim versions; the hour lets it
+finish. The hour counts from when data was written, not from when it was replaced: a version
+older than that, replaced by an overwrite or a pyramid rebuild, is freed at once, and a client
+still reading it, such as a long-running job, fails and has to reopen the dataset. It is a window, not a guarantee: a client still reading such an interim version more
 than an hour after it was committed can fail with "object not found", and has to reopen the
 dataset. Clients that opened the dataset before the attempt, or after the rollback, are not
 affected.
 
-Collection runs right after the rollback, and when the next ingest finds a rollback branch left
-by a killed one. What the hour kept is marked in `<store>.gc-pending` and collected once the
-hour has passed: at the next ingest of that store, at startup, and every 15 minutes on a
-writable instance. A pyramid rebuild killed part way leaves a partial copy at
-`<store>.rebuild`, which is removed at startup (on a writable instance) and by the next ingest
-of that store.
+Collection runs right after a rollback or a replacement, and when the next ingest finds the
+branches of a killed one. What the hour kept is marked in `<store>.gc-pending` and collected once
+the hour has passed: at the next ingest of that store, at startup, and every 15 minutes on a
+writable instance.
 
 Where these timestamps come from:
 

@@ -33,12 +33,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra server --extra dhis2 && \
     python -m compileall -q open_geo_service/
 
-RUN mkdir -p /app/data/pygeoapi /app/data/artifacts && \
+RUN mkdir -p /app/data/artifacts && \
     printf '[]\n' > /app/data/artifacts/records.json && \
     chown -R geoservice:geoservice /app/data
 
-ENV PYGEOAPI_CONFIG=/app/data/pygeoapi/pygeoapi-config.yml
-ENV PYGEOAPI_OPENAPI=/app/data/pygeoapi/pygeoapi-openapi.yml
 ENV PORT=9000
 ENV PATH="/app/.venv/bin:$PATH"
 

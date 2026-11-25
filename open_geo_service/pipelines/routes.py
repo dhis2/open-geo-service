@@ -31,9 +31,9 @@ from open_geo_service.pipelines.schemas import (
     ValidationResult,
 )
 from open_geo_service.shared.api_errors import body_error, error_responses
+from open_geo_service.shared.negotiation import wants_json
 from open_geo_service.shared.time import utc_now
 from open_geo_service.shared.urls import mount_prefix
-from open_geo_service.system.templates import wants_json
 
 router = APIRouter()
 
@@ -190,7 +190,6 @@ def _render_page(
             revision=revision,
             selection=_form_selection(choices, workflow_id, plugin_id) if tab == "create" else {},
             labels=labels,
-            read_only=api_config.is_read_only(),
         ),
         status_code=status_code or (400 if error else 200),
     )
