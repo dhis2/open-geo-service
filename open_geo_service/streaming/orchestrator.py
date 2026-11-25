@@ -226,9 +226,8 @@ async def run_streaming_ingest(
     ``refresh_periods`` are committed periods to fetch again and write in place, before any
     new period is appended: those fetched while preliminary whose final version is now
     expected. Each is durable once written, with a new ``fetched_at``, so an interrupted
-    refresh resumes at the periods it did not reach. One that comes back with every value
-    missing is not written: it keeps its preliminary values and ``fetched_at``, so a later
-    sync fetches it again. A *replace* run refreshes nothing; it rewrites every period.
+    refresh resumes at the periods it did not reach. A *replace* run refreshes nothing; it
+    rewrites every period.
     """
     from open_geo_service.jobs.models import JobCancelledError
 
@@ -323,8 +322,6 @@ async def run_streaming_ingest(
             break
         in_flight.append((period_id, asyncio.create_task(_fetch(period_id))))
     written = 0
-    # Periods processed, written or not, for progress.
-    done = 0
     # The periods at the end of the run whose values are all missing, and the snapshot before
     # the first of them, to reset to. See "Empty periods at the end of a run are not stored" in
     # docs/architecture.md.
@@ -338,7 +335,6 @@ async def run_streaming_ingest(
 
             period_id, task = in_flight.popleft()
             refresh_at = refresh_index.get(period_id)
-            kept_preliminary = False
             ds = await task
             # Always release the fetched dataset's backing handles (open_rasterio /
             # open_dataset / remote HTTP) once it is written, so long backfills don't
@@ -364,16 +360,15 @@ async def run_streaming_ingest(
                 if all(var.chunks is None for var in ds.data_vars.values()):
                     ds.load()
                 checked = template_variable if template_variable in ds.data_vars else next(iter(ds.data_vars))
-                if refresh_at is not None:
-                    # Writing it would replace the preliminary values with nothing and stamp it
-                    # final, so it is not written, and stays due.
-                    kept_preliminary = _all_values_missing(ds[checked])
-                elif _all_values_missing(ds[checked]):
-                    if not empty_tail:
-                        before_empty_tail = repo.lookup_branch(branch)
-                    empty_tail.append(period_id)
-                else:
-                    empty_tail.clear()
+                # New periods only: the end of the series is where a source lists periods before
+                # their data. A refreshed period is written as it comes back.
+                if refresh_at is None:
+                    if _all_values_missing(ds[checked]):
+                        if not empty_tail:
+                            before_empty_tail = repo.lookup_branch(branch)
+                        empty_tail.append(period_id)
+                    else:
+                        empty_tail.clear()
 
                 _strip_cf_encoding(ds, period_type, time_dim=spec.time_dim)
                 apply_cf_metadata(ds, cf_attrs, variable=template_variable, overwrite=True)
@@ -392,78 +387,69 @@ async def run_streaming_ingest(
                         f"expected {expected_spatial_shape}"
                     )
 
-                if kept_preliminary:
-                    logger.warning(
-                        "Every value is missing for %s, fetched again to replace its preliminary values, in %s. "
-                        "Its preliminary values were kept; a later sync fetches it again.",
-                        period_id,
-                        store_path,
-                    )
+                # Every path below writes it: first write, append and refresh alike.
+                ds = _stamp_fetched_at(ds, time_dim=spec.time_dim)
+                session = repo.writable_session(branch)
+                if is_first_write:
+                    ds.to_zarr(session.store, mode="w", zarr_format=3)
+                    is_first_write = False
                 else:
-                    # Every path below writes it: first write, append and refresh alike.
-                    ds = _stamp_fetched_at(ds, time_dim=spec.time_dim)
-                    session = repo.writable_session(branch)
-                    if is_first_write:
-                        ds.to_zarr(session.store, mode="w", zarr_format=3)
-                        is_first_write = False
-                    else:
-                        if not axes_checked:
-                            _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim, branch=branch)
-                            # Where the data actually lives. A store promoted to a pyramid by an
-                            # earlier sync keeps its variables in level groups, and appending at the
-                            # root would create a second one-timestep array beside the pyramid,
-                            # leaving the store unopenable. Resolved once per sync, since promotion
-                            # only happens between syncs.
-                            append_group = committed_data_group(store_path, branch=branch)
-                            axes_checked = True
-                            ensure_fetched_at(session.store, group=append_group, time_dim=spec.time_dim)
-                        # xarray replaces the group's attrs with the period's on append. At the root
-                        # write_geozarr_attrs restores them below; a pyramid level's are its own.
-                        level_attrs = (
-                            dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
-                            if append_group is not None
-                            else None
-                        )
-                        if refresh_at is not None:
-                            # A region write takes only the variables along time; the spatial
-                            # coordinates and `spatial_ref` stay as committed.
-                            along_time = [name for name in ds.variables if spec.time_dim not in ds[name].dims]
-                            ds.drop_vars(along_time).to_zarr(
-                                session.store,
-                                group=append_group,
-                                region={spec.time_dim: slice(refresh_at, refresh_at + 1)},
-                                zarr_format=3,
-                            )
-                        else:
-                            ds.to_zarr(
-                                session.store,
-                                group=append_group,
-                                append_dim=spec.time_dim,
-                                zarr_format=3,
-                            )
-                        if level_attrs is not None:
-                            zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
-                    # Root attrs are rewritten on every commit so later append sessions
-                    # preserve GeoZarr metadata even if the underlying store layer only
-                    # touches array content for the new period.
-                    write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
-                    kind = "refresh" if refresh_at is not None else "ingest"
-                    if run_start is None:
-                        session.commit(f"{kind}: {period_id}")
-                        run_start = period_id
-                    else:
-                        session.amend(f"{kind}: {run_start} to {period_id}")
-                    written += 1
+                    if not axes_checked:
+                        _assert_appendable_axes(store_path, ds, x_dim=x_dim, y_dim=y_dim, branch=branch)
+                        # Where the data actually lives. A store promoted to a pyramid by an
+                        # earlier sync keeps its variables in level groups, and appending at the
+                        # root would create a second one-timestep array beside the pyramid,
+                        # leaving the store unopenable. Resolved once per sync, since promotion
+                        # only happens between syncs.
+                        append_group = committed_data_group(store_path, branch=branch)
+                        axes_checked = True
+                        ensure_fetched_at(session.store, group=append_group, time_dim=spec.time_dim)
+                    # xarray replaces the group's attrs with the period's on append. At the root
+                    # write_geozarr_attrs restores them below; a pyramid level's are its own.
+                    level_attrs = (
+                        dict(zarr.open_group(session.store, path=append_group, mode="r").attrs)
+                        if append_group is not None
+                        else None
+                    )
                     if refresh_at is not None:
-                        refreshed_indices.append(refresh_at)
+                        # A region write takes only the variables along time; the spatial
+                        # coordinates and `spatial_ref` stay as committed.
+                        along_time = [name for name in ds.variables if spec.time_dim not in ds[name].dims]
+                        ds.drop_vars(along_time).to_zarr(
+                            session.store,
+                            group=append_group,
+                            region={spec.time_dim: slice(refresh_at, refresh_at + 1)},
+                            zarr_format=3,
+                        )
+                    else:
+                        ds.to_zarr(
+                            session.store,
+                            group=append_group,
+                            append_dim=spec.time_dim,
+                            zarr_format=3,
+                        )
+                    if level_attrs is not None:
+                        zarr.open_group(session.store, path=append_group, mode="r+").attrs.update(level_attrs)
+                # Root attrs are rewritten on every commit so later append sessions
+                # preserve GeoZarr metadata even if the underlying store layer only
+                # touches array content for the new period.
+                write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
+                kind = "refresh" if refresh_at is not None else "ingest"
+                if run_start is None:
+                    session.commit(f"{kind}: {period_id}")
+                    run_start = period_id
+                else:
+                    session.amend(f"{kind}: {run_start} to {period_id}")
+                if refresh_at is not None:
+                    refreshed_indices.append(refresh_at)
             finally:
                 ds.close()
 
-            done += 1
-            if save_cursor and refresh_at is None and (done % commit_batch_size == 0 or done == len(pending)):
+            written += 1
+            if save_cursor and refresh_at is None and (written % commit_batch_size == 0 or written == len(pending)):
                 save_cursor({"last_committed": period_id})
             if on_progress:
-                on_progress(total - len(pending) + done, total, f"Wrote {period_id}")
+                on_progress(total - len(pending) + written, total, f"Wrote {period_id}")
 
             next_period = next(period_queue, None)
             if next_period is not None:
