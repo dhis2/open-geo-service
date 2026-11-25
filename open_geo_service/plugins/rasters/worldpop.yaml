@@ -48,7 +48,7 @@
 
 - id: worldpop_population_global2_1km
   name: Total population (WorldPop Global2, 1km)
-  short_name: Total population
+  short_name: Total population (1 km)
   description: >-
     Modelled number of people living in each 1 km grid cell, worldwide. Yearly estimates and
     projections for 2015-2030 from the WorldPop Global2 R2025A release, read from the global
