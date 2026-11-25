@@ -63,6 +63,10 @@ Daily mean temperature, averaged from the 24 hourly values of the **UTC calendar
 
 `era5land_temperature_daily_min` and `era5land_temperature_daily_max` are the same, with the daily minimum and maximum of the hourly values instead of the mean.
 
+#### Daily, from Earth Data Hub (for large extents)
+
+`era5land_temperature_daily_edh` holds the same daily mean temperature, read from the [Earth Data Hub ERA5-Land daily](https://earthdatahub.destine.eu/collections/era5/datasets/era5-land-daily) archive and needing `EDH_API_KEY` instead of `CDS_API_KEY`. Use it when the extent is large. The CDS archive behind `era5land_temperature_daily` is chunked for point time series, about 3.9 years by 4 × 8 cells per chunk, so a day over a large extent reads years of data for every chunk it touches; over Africa that is tens of gigabytes per ten days. Earth Data Hub stores daily values in chunks of 75 days by 150 × 300 cells, so the same extent reads little more than it keeps. It lags the CDS source by a few more days, and has no daily minimum or maximum.
+
 ---
 
 ### Monthly

@@ -1,3 +1,42 @@
+- id: era5land_temperature_daily_edh
+  name: 2m temperature (ERA5-Land, daily, Earth Data Hub)
+  short_name: 2m temperature
+  description: >-
+    Daily mean air temperature 2 m above the ground at 9 km worldwide, read from the Earth Data
+    Hub daily archive. Days run in UTC. The same values as era5land_temperature_daily, from an
+    archive chunked for maps rather than point time series, so large extents ingest quickly.
+  standard_name: air_temperature
+  variable: t2m
+  period_type: daily
+  sync:
+    kind: temporal
+    execution: append
+  extents:
+    spatial:
+      bbox: [-180, -90, 180, 90]
+    temporal:
+      begin: "1950-01-01"
+      resolution: P1D
+  ingestion:
+    plugin: open_geo_service.plugins.rasters.era5_land_edh.ERA5LandEDHDailyPlugin
+    params:
+      variable: t2m
+      unit_transform: kelvin_to_celsius
+  units: degC
+  cell_methods: "time: mean"
+  resolution: 9 km x 9 km
+  source: ERA5-Land Reanalysis
+  source_url: https://earthdatahub.destine.eu/collections/era5/datasets/era5-land-daily
+  license:
+    name: Licence to Use Copernicus Products
+    url: https://apps.ecmwf.int/datasets/licences/copernicus/
+  providers:
+    - name: Copernicus Climate Change Service (C3S)
+      url: https://climate.copernicus.eu/
+  display:
+    colormap: rdbu_r
+    midpoint: 0
+
 - id: era5land_temperature_monthly
   name: 2m temperature (ERA5-Land, monthly)
   short_name: 2m temperature
