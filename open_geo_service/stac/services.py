@@ -352,9 +352,12 @@ def _derived_from(artifact: ArtifactRecord, request: Request) -> list[dict[str, 
 
     An input that is not published has no collection to link to, so it is left out.
     """
+    inputs = ingestion_services.recorded_inputs(artifact)
+    if not inputs:
+        return []  # most collections, and the records need not be read for them
     published = _eligible_artifacts_by_dataset()
     links: list[dict[str, str]] = []
-    for recorded in ingestion_services.recorded_inputs(artifact):
+    for recorded in inputs:
         input_id = str(recorded["collection_id"])
         source = published.get(input_id)
         if source is not None:
