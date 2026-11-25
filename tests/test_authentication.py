@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import Response
 from fastapi.testclient import TestClient
 from starlette.types import Message
 
@@ -20,6 +21,7 @@ from open_geo_service import config as api_config
 from open_geo_service.auth import middleware, sessions
 from open_geo_service.auth.route_table import ROUTE_TABLE, UNGATED, route_tier
 from open_geo_service.auth.tokens import Tier, configured_tokens
+from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import get_openeo_job_service
@@ -494,6 +496,11 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     for store in ("/zarr/abc/zarr.json", "/zarr/abc/", "/icechunk/abc/"):
         assert client.get(store, headers=cookie).status_code not in (401, 403)
     assert client.get("/datasets", headers=cookie).headers["cache-control"] == "private"
+    # A route's own caching keeps for the browser, never for a shared cache in front.
+    for own, sent in (("max-age=60", "private, max-age=60"), ("no-store", "no-store")):
+        own_caching = Response(headers={"Cache-Control": own})
+        monkeypatch.setattr(ingestion_services, "serve_icechunk_file", lambda *_, r=own_caching: r)
+        assert client.get("/icechunk/abc/repo", headers=cookie).headers["cache-control"] == sent
 
     # Read-only refuses writes by the table's tiers, so gated reads still answer a token.
     monkeypatch.setitem(api_config._cache or {}, "read_only", True)

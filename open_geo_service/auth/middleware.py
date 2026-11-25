@@ -205,13 +205,18 @@ def _clearing_cookie(send: Send, path: str) -> Send:
 
 
 def _private(send: Send) -> Send:
-    """`send`, marking the response `Cache-Control: private` unless it sets its own caching."""
+    """`send`, marking the response `Cache-Control: private`, before any caching the route sets.
+
+    A browser keeps what the route allows; a shared cache keeps nothing.
+    """
 
     async def wrapped(message: Message) -> None:
         if message["type"] == "http.response.start":
             headers = MutableHeaders(scope=message)
-            if "cache-control" not in headers:
-                headers["cache-control"] = "private"
+            own = headers.get("cache-control", "")
+            directives = {directive.strip().split("=")[0].lower() for directive in own.split(",")}
+            if not directives & {"private", "no-store"}:
+                headers["cache-control"] = f"private, {own}" if own else "private"
         await send(message)
 
     return wrapped
