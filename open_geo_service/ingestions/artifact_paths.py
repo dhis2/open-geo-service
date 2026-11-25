@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service.shared import layout
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def _rebase_legacy(candidate: Path, root: Path) -> Path:
         return candidate
     parts = candidate.parts
     for index in range(1, len(parts) - 1):
-        if parts[index] != "rasters":
+        if parts[index] != layout.Kind.RASTER.value:
             continue
         rebased = resolved_root.joinpath(*parts[index:])
         if rebased.exists():
