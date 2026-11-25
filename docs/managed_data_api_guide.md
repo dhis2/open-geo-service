@@ -387,7 +387,7 @@ Both endpoints are advertised as `assets` in the STAC collection:
   },
   "icechunk": {
     "href": "https://host/icechunk/chirps3_precipitation_daily/",
-    "type": "application/octet-stream",
+    "type": "application/vnd.zarr+icechunk",
     "xarray:open_kwargs": { "zarr_format": 3, "consolidated": false }
   },
   "thumbnail": {

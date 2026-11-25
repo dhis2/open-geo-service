@@ -557,6 +557,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
     # The Icechunk href needs no redirect, and the file a client joins to it is served.
     icechunk_href = assets["icechunk"]["href"]
     assert icechunk_href.endswith(f"/icechunk/{dataset_id}/")
+    assert assets["icechunk"]["type"] == "application/vnd.zarr+icechunk"
     assert client.get(f"{icechunk_href}/repo", follow_redirects=False).status_code == 200
     bands = collection["assets"]["zarr"]["bands"]
     assert [band["name"] for band in bands] == list(collection["cube:variables"])

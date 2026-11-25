@@ -409,7 +409,8 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         collection_payload["assets"]["icechunk"] = {
             # The repository's directory, with its slash, so no client is redirected to it.
             "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/"),
-            "type": "application/octet-stream",
+            # As the STAC Zarr best practices and xpystac name an Icechunk repository.
+            "type": "application/vnd.zarr+icechunk",
             "title": "Icechunk store (native SDK access)",
             "description": (
                 "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
