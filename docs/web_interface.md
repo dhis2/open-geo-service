@@ -281,7 +281,7 @@ says changed, not the dataset's whole coverage:
   period, so the run covers the whole coverage after it, `current_start` to `current_end`.
 
 The run records which (`source.update`). A sync that replaces preliminary periods with final
-values (see [Preliminary periods](zarr_and_geozarr.md#preliminary-periods)) is an append whose
+values (see [Preliminary periods](architecture.md#preliminary-periods)) is an append whose
 `previous_end` lies before the first replaced period, so the run carries the final values to
 the destination. It covers every period from there to `current_end`, including those in between
 that did not change. Any other revision of past data at the source is followed only if the
