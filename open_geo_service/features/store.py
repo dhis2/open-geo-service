@@ -1,6 +1,6 @@
 """The feature collection store: where a collection is written, and how it is read back.
 
-One location and one file per collection (`config.get_features_root`), written as GeoParquet
+One file per collection version, in the collection's folder (`shared.layout`), written as GeoParquet
 and read back through `read_feature_collection`. `ingestions.services.create_feature_artifact`
 turns a written file into a registered collection; nothing here writes a record, and nothing
 here discovers a file on disk. That split is deliberate: a record is what makes a collection
@@ -18,11 +18,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.features import tiles
 from open_geo_service.ingestions.schemas import ArtifactRecord
-from open_geo_service.shared import geoparquet
+from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.crs import canonical_crs_code, transform_bbox
 from open_geo_service.shared.urls import require_segment_safe_id
 
@@ -239,9 +238,9 @@ def _prune_orphaned_markers(dataset_id: str) -> None:
 
 
 def _collection_root(dataset_id: str) -> Path:
-    """Return the store directory, having checked the id that will name files inside it."""
+    """Return the collection's folder, having checked the id that will name files inside it."""
     validate_collection_id(dataset_id)
-    return api_config.get_features_root()
+    return layout.dataset_dir(layout.Kind.VECTOR, dataset_id)
 
 
 def validate_features_for_write(*, dataset_id: str, features: object, id_property: str) -> gpd.GeoDataFrame:
@@ -333,10 +332,10 @@ def write_feature_collection(
 
     path = new_collection_file(dataset_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Written beside the target and moved into place, so a reader never sees a partial file.
+    # Written in the staging folder and moved into place, so a reader never sees a partial file.
     # The target is new on every write, so this replaces nothing a record points at: an
     # interrupted write leaves an unreferenced file, never a truncated collection.
-    staging = path.with_name(f"{path.name}.{uuid4().hex}.writing")
+    staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         frame.to_parquet(
             staging,

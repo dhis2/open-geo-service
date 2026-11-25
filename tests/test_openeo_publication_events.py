@@ -32,6 +32,7 @@ from open_geo_service.openeo import execution
 from open_geo_service.openeo import jobs as openeo_jobs
 from open_geo_service.openeo.execution import SaveResultEnvelope
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import utc_now
 from tests.test_managed_publish_units import managed_instance  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
@@ -140,7 +141,7 @@ def _job(
 
 
 def _store() -> Path:
-    return downloader.DOWNLOAD_DIR / f"{_DATASET}.icechunk"
+    return layout.raster_store(_DATASET)
 
 
 def _head() -> str:
@@ -888,7 +889,6 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     import jsonschema
 
     from open_geo_service import __version__
-    from open_geo_service import config as api_config
     from tests.test_feature_store import _register
     from tests.test_initial_ingestion_event import _Plugin
 
@@ -908,7 +908,6 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     read = openeo_jobs.store_head(Path(str(input_artifact.path)))
     recorded = {**_EVIDENCE["sources"][0], "collection_id": source, "artifact_id": input_artifact.artifact_id}
     # A feature collection keeps its artifact id when refreshed and has no snapshot to compare.
-    monkeypatch.setattr(api_config, "get_features_root", lambda: Path(str(input_artifact.path)).parent / "vectors")
     boundaries = {"collection_id": "districts", "artifact_id": _register().artifact_id, "snapshot_id": None}
     evidence = {**_EVIDENCE, "sources": [{**recorded, "snapshot_id": read}] * 2 + [boundaries]}
     monkeypatch.setattr(sys.modules[__name__], "_EVIDENCE", evidence)

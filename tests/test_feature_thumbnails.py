@@ -19,8 +19,8 @@ from PIL import Image
 from open_geo_service import config as api_config
 from open_geo_service.features import services as feature_services
 from open_geo_service.ingestions import services as ingestion_services
-from open_geo_service.shared import thumbnails
-from open_geo_service.shared.thumbnails import THUMBNAIL_LONG_SIDE_PIXELS, thumbnail_path
+from open_geo_service.shared import layout, thumbnails
+from open_geo_service.shared.thumbnails import THUMBNAIL_LONG_SIDE_PIXELS
 
 TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "code"}
 
@@ -28,7 +28,7 @@ TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "co
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep collections, records and thumbnails out of the developer's data directory."""
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
@@ -53,7 +53,7 @@ def _refresh(*features: dict[str, Any], collection_id: str = "districts") -> Non
 
 
 def _image(collection_id: str = "districts") -> Image.Image:
-    return Image.open(io.BytesIO(thumbnail_path(collection_id).read_bytes())).convert("RGBA")
+    return Image.open(io.BytesIO(layout.thumbnail(layout.Kind.VECTOR, collection_id).read_bytes())).convert("RGBA")
 
 
 def _broken_renderer(*_args: object, **_kwargs: object) -> None:
@@ -138,13 +138,13 @@ def test_a_failed_draw_keeps_the_previous_thumbnail_and_the_refresh_still_succee
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _refresh(_box("W", 0.0, 0.0, 1.0, 1.0))
-    before = thumbnail_path("districts").read_bytes()
+    before = layout.thumbnail(layout.Kind.VECTOR, "districts").read_bytes()
 
     monkeypatch.setattr(thumbnails, "render_features_png", _broken_renderer)
     _refresh(_box("W", 0.0, 0.0, 2.0, 2.0))
 
-    assert thumbnail_path("districts").read_bytes() == before
-    assert not list(thumbnail_path("districts").parent.glob(".*.tmp.png"))
+    assert layout.thumbnail(layout.Kind.VECTOR, "districts").read_bytes() == before
+    assert not list(layout.staging_dir().glob("*.tmp.png"))
 
 
 def test_the_thumbnail_is_served_and_advertised_in_stac(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -167,5 +167,5 @@ def test_a_collection_without_a_thumbnail_does_not_advertise_one(
     _refresh(_box("W", 0.0, 0.0, 1.0, 1.0))
     monkeypatch.setattr(ingestion_services, "_artifact_storage_exists", lambda _: True)
 
-    assert not thumbnail_path("districts").exists()
+    assert not layout.thumbnail(layout.Kind.VECTOR, "districts").exists()
     assert "thumbnail" not in client.get("/stac/districts/collection.json").json()["assets"]

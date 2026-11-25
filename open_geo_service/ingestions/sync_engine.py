@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from open_geo_service import config as api_config
 from open_geo_service.ingestions.schemas import (
     ArtifactFormat,
     ArtifactRecord,
@@ -30,6 +29,7 @@ from open_geo_service.ingestions.schemas import (
     parse_declared_artifact_version,
 )
 from open_geo_service.publications.services import managed_dataset_id_for
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import (
     datetime_to_period_string,
     dekad_start,
@@ -653,7 +653,7 @@ def _is_plugin_backed(source_dataset: dict[str, Any]) -> bool:
 
 def _artifact_storage_roots() -> tuple[Path, ...]:
     """Return the trusted local roots that may contain managed artifact stores."""
-    return (api_config.get_download_root().resolve(),)
+    return (layout.kind_root(layout.Kind.RASTER).resolve(),)
 
 
 def _resolve_local_artifact_path(raw_path: str | None) -> tuple[Path | None, str | None]:

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from open_geo_service.shared import layout
 from open_geo_service.shared.crs import canonical_crs_code
 
 logger = logging.getLogger(__name__)
@@ -52,12 +53,12 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
 
     **Never raises.** A collection that cannot be tiled is still registered.
 
-    Written beside the target and moved into place, so the route never serves a partial
+    Written in the staging folder and moved into place, so the route never serves a partial
     archive. tylertoo reads WGS 84 or Web Mercator; a collection stored in another CRS is
     reprojected into a temporary copy first.
     """
     target = archive_path(collection_path)
-    staging = target.with_name(f"{target.name}.{uuid4().hex}.writing")
+    staging = layout.staging_dir() / f"{target.name}.{uuid4().hex}.writing"
     try:
         import tylertoo
 

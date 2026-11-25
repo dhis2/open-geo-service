@@ -3591,9 +3591,7 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
     (tmp_path / "managed" / "rasters").mkdir()
-    monkeypatch.setattr(
-        "open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path / "managed" / "rasters"
-    )
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "managed")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "artifacts" / "records.json")
 

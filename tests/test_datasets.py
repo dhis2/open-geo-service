@@ -11,6 +11,7 @@ import zarr
 from fastapi.testclient import TestClient
 from icechunk.store import IcechunkStore
 
+from open_geo_service import config as api_config
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
@@ -1558,6 +1559,7 @@ def test_create_artifact_rolls_back_append_when_pyramid_rebuild_fails(
         "period_type": "daily",
         "ingestion": {"plugin": "example.Plugin"},
     }
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     store_path = tmp_path / "chirps3_precipitation_daily.icechunk"
     store_path.mkdir()
     transaction_repo = _TransactionRepo()
@@ -1624,7 +1626,7 @@ def test_create_artifact_rolls_back_append_when_pyramid_rebuild_fails(
     # rollback branch no longer pins them.
     assert transaction_repo.calls == ["reset", "delete", "expire", "collect"]
     # The retention window kept the attempt's recent commits, so a later collection is pending.
-    assert store_path.with_name(f"{store_path.name}.gc-pending").exists()
+    assert services._collection_marker(store_path).exists()
     assert stored_records == []
 
 

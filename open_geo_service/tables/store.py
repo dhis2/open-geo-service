@@ -4,7 +4,7 @@ A table's rows follow its schema (`tables.schemas`, CLIM-1971): the columns it d
 that says which stored row a write replaces, and what columns represent, which adds rules: feature ids checked
 against their collection and periods stored as their first day. The dataset's record names its schema.
 
-One folder per table dataset under `config.get_tables_root`, holding the dataset's one file of
+One folder per table dataset (`shared.layout`), holding the dataset's one file of
 current values. No history is kept: a revised value replaces its row, and a value written again
 unchanged keeps the row and its `written_at`, so `written_at` says when each value last changed.
 
@@ -39,7 +39,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
-from open_geo_service import config as api_config
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -49,6 +48,7 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.urls import require_segment_safe_id
@@ -492,8 +492,8 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
 
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{stamp:%Y%m%dT%H%M%S%fZ}-{uuid4().hex}.parquet"
-    # A dot name no listing of `*.parquet` matches, so a half-written file is never taken for the dataset.
-    staging = folder / f".{path.name}.writing"
+    # Outside the dataset's folder, so a half-written file is never taken for the dataset.
+    staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
         os.replace(staging, path)
@@ -503,7 +503,7 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
 
 
 def _dataset_root(dataset_id: str) -> Path:
-    return api_config.get_tables_root() / dataset_id
+    return layout.dataset_dir(layout.Kind.TABLE, dataset_id)
 
 
 def _prune_superseded(folder: Path, *, keep: Path) -> None:

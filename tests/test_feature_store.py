@@ -24,6 +24,7 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.features import validate_feature_ids
 
 DISTRICTS_TEMPLATE: dict[str, object] = {
@@ -56,7 +57,7 @@ def _collection(*features: dict[str, Any]) -> dict[str, Any]:
 def feature_store_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point the store at a temporary directory, and keep records out of the real index."""
     root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -347,7 +348,7 @@ def test_an_unmarked_file_is_never_deleted_in_the_same_call_that_marks_it(
 
 def test_prune_removes_a_marker_orphaned_by_a_partial_earlier_delete() -> None:
     """A marker whose file is already gone is swept up rather than left forever."""
-    root = api_config.get_features_root()
+    root = layout.kind_root(layout.Kind.VECTOR)
     root.mkdir(parents=True, exist_ok=True)
     orphan = root / f"districts.{'a' * 32}.parquet.superseded"
     orphan.touch()
@@ -523,7 +524,7 @@ def test_concurrent_writes_of_one_collection_do_not_share_a_staging_file() -> No
     # Two writes, two versions. Neither was registered, so nothing pruned either: a write only
     # ever adds a file, and the record is what makes one of them the collection.
     assert len(_collection_files()) == 2
-    assert not list(api_config.get_features_root().glob("*.writing"))
+    assert not list(layout.staging_dir().glob("*.writing"))
 
 
 def test_a_written_collection_round_trips_through_the_reader() -> None:
@@ -701,7 +702,7 @@ def test_a_failed_write_leaves_no_partial_file() -> None:
             id_property="orgUnitCode",
         )
 
-    assert not list(api_config.get_features_root().glob("*.writing"))
+    assert not list(layout.staging_dir().glob("*.writing"))
     assert len(store.read_feature_collection(first)) == 2
 
 

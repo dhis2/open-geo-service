@@ -960,7 +960,7 @@ before it became unreachable can finish; one still reading it after that can fai
 not found" and has to reopen the dataset.
 
 Collection runs right after a rollback or a replacement, and when the next ingest finds the
-branches of a killed one. What the hour kept is marked in `<store>.gc-pending` and collected once
+branches of a killed one. What the hour kept is marked in `<data_dir>/gc-pending/<id>` and collected once
 the hour has passed: at the next ingest of that store, at startup, and every 15 minutes on a
 writable instance.
 

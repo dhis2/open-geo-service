@@ -30,7 +30,7 @@ from open_geo_service.features import templates as feature_templates
 from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord, FeatureDetail
-from open_geo_service.shared import geoparquet
+from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.classes import (
     STAC_CLASSIFICATION_EXTENSION,
     classification_from_template,
@@ -40,7 +40,7 @@ from open_geo_service.shared.crs import canonical_crs_code, is_builtin_crs
 from open_geo_service.shared.display import display_range
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
 from open_geo_service.shared.licences import DatasetLicence, declared_providers, parse_licence
-from open_geo_service.shared.thumbnails import colormap_stops, thumbnail_path
+from open_geo_service.shared.thumbnails import colormap_stops
 from open_geo_service.shared.time import (
     Cadence,
     parse_period_string_to_datetime,
@@ -310,7 +310,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     # nothing to draw leaves an otherwise complete collection without the asset.
     thumbnail_href = (
         absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png")
-        if thumbnail_path(dataset_id).is_file()
+        if layout.thumbnail(layout.Kind.RASTER, dataset_id).is_file()
         else None
     )
     licence = parse_licence(source_dataset.get("license"))
@@ -402,7 +402,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
             "title": "Thumbnail",
             "description": THUMBNAIL_DESCRIPTION,
             "roles": ["thumbnail"],
-            **file_fields(thumbnail_path(dataset_id)),
+            **file_fields(layout.thumbnail(layout.Kind.RASTER, dataset_id)),
         }
         collection_payload["stac_extensions"] = sorted({*collection_payload["stac_extensions"], FILE_EXTENSION})
     if artifact.format == ArtifactFormat.ICECHUNK:
@@ -563,7 +563,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
         collection.stac_extensions.append(WEB_MAP_LINKS_EXTENSION)
     # As for a raster collection: only when the file is there, so a client never follows a
     # thumbnail href to a 404.
-    if thumbnail_path(dataset_id).is_file():
+    if layout.thumbnail(layout.Kind.VECTOR, dataset_id).is_file():
         collection.add_asset(
             "thumbnail",
             pystac.Asset(
@@ -572,7 +572,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 title="Thumbnail",
                 description=THUMBNAIL_DESCRIPTION,
                 roles=["thumbnail"],
-                extra_fields=file_fields(thumbnail_path(dataset_id)),
+                extra_fields=file_fields(layout.thumbnail(layout.Kind.VECTOR, dataset_id)),
             ),
         )
 

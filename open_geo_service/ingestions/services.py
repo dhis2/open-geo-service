@@ -63,6 +63,7 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.ingestions.sync_engine import SyncConfigurationError, plan_sync, run_sync
 from open_geo_service.publications.services import managed_dataset_id_for, publish_artifact
+from open_geo_service.shared import layout
 from open_geo_service.shared.compute import get_job_slots
 from open_geo_service.shared.crs import transform_bbox
 from open_geo_service.shared.licences import DatasetLicence, declared_providers
@@ -1724,17 +1725,19 @@ def collect_unreachable_objects(repo: Any, store_path: Path) -> bool:
 
 
 def _collection_marker(store_path: Path) -> Path:
-    return store_path.with_name(f"{store_path.name}.gc-pending")
+    return layout.collection_marker(store_path.name.removesuffix(".icechunk"))
 
 
 def _mark_collection_pending(store_path: Path, *, at: datetime | None = None) -> None:
     """Record that *store_path* holds unreachable objects too recent to collect yet.
 
-    A file beside the store holding the time, so the collection survives a restart and runs
+    A file in the data folder holding the time, so the collection survives a restart and runs
     whether or not the dataset is ever synced again. A later rollback moves the time forward.
     """
+    marker = _collection_marker(store_path)
     try:
-        _collection_marker(store_path).write_text((at or datetime.now(UTC)).isoformat())
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text((at or datetime.now(UTC)).isoformat())
     except OSError:
         logger.warning("Could not mark a pending collection for '%s'", store_path, exc_info=True)
 
@@ -1788,11 +1791,8 @@ def clean_up_interrupted_ingests() -> int:
     write, which covers whatever it wrote after marking; a clean restart moves nothing. A store an
     ingest already holds is skipped.
     """
-    directory = Path(downloader.DOWNLOAD_DIR)
-    if not directory.is_dir():
-        return 0
     changed = 0
-    for store_path in directory.glob("*.icechunk"):
+    for store_path in layout.raster_stores():
         lock = _acquire_store_lock(store_path)
         if not lock.acquire(blocking=False):
             continue
@@ -1810,12 +1810,9 @@ def collect_pending_garbage_everywhere() -> int:
     Called at startup and periodically on a writable instance, which is what guarantees a
     failed attempt's data is freed even when it was the last ingest the store will see.
     """
-    directory = Path(downloader.DOWNLOAD_DIR)
-    if not directory.is_dir():
-        return 0
     collected = 0
-    for marker in directory.glob("*.icechunk.gc-pending"):
-        store_path = marker.with_suffix("")
+    for dataset_id in layout.pending_collections():
+        store_path = layout.raster_store(dataset_id)
         lock = _acquire_store_lock(store_path)
         if not lock.acquire(blocking=False):
             continue  # an ingest is running; its own recovery or the next sweep collects

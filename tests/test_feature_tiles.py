@@ -20,6 +20,7 @@ from open_geo_service.features import services as feature_services
 from open_geo_service.features import store, tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
+from open_geo_service.shared import layout
 
 TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "code"}
 
@@ -33,7 +34,7 @@ def _no_vector_tiles() -> None:
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Keep collections, records and thumbnails out of the developer's data directory."""
     root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
@@ -122,7 +123,7 @@ def test_a_failed_tile_build_does_not_fail_the_refresh(
 
     assert Path(str(record.path)).is_file()
     assert not tiles.archive_path(Path(str(record.path))).exists()
-    assert not [p for p in _isolated.iterdir() if p.name.endswith(".writing")]
+    assert not list(layout.staging_dir().glob("*.writing"))
     # Nothing advertises or serves an archive that is not there.
     assert client.get("/features/districts/data.pmtiles").status_code == 404
     collection = client.get("/stac/districts/collection.json").json()

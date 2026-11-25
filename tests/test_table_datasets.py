@@ -37,8 +37,7 @@ def _box(code: str, west: float, south: float) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Temporary feature, table and record stores, with a registered 'districts' collection."""
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
-    monkeypatch.setattr(api_config, "get_tables_root", lambda: tmp_path / "tables")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")

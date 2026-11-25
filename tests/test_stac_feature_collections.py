@@ -59,7 +59,7 @@ def _collection_payload() -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -495,7 +495,7 @@ def test_a_feature_collections_data_files_carry_their_size_but_are_not_hashed(
     """Hashing on request would read every GeoParquet and PMTiles file on a cold cache; only thumbnails are hashed."""
     import hashlib
 
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
     hashed: list[int] = []
     sha256 = hashlib.sha256
@@ -506,7 +506,7 @@ def test_a_feature_collections_data_files_carry_their_size_but_are_not_hashed(
 
     monkeypatch.setattr(stac_services.hashlib, "sha256", counting_sha256)
     monkeypatch.setattr(stac_services, "_CHECKSUMS", {})
-    thumbnail_path("districts").unlink(missing_ok=True)
+    layout.thumbnail(layout.Kind.VECTOR, "districts").unlink(missing_ok=True)
 
     doc = client.get("/stac/districts/collection.json").json()
     data = Path(str(districts.path))
@@ -523,11 +523,11 @@ def test_a_collection_with_no_file_left_does_not_declare_the_file_extension(
 ) -> None:
     """The extension is declared for the `file:*` fields an asset carries, as on a raster collection."""
     from open_geo_service.features import tiles
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
     data = Path(str(districts.path))
     tiles.archive_path(data).unlink(missing_ok=True)
-    thumbnail_path("districts").unlink(missing_ok=True)
+    layout.thumbnail(layout.Kind.VECTOR, "districts").unlink(missing_ok=True)
     data.unlink()
 
     doc = client.get("/stac/districts/collection.json").json()
