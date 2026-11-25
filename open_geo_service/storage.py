@@ -14,7 +14,9 @@ place, and the folder flushed.
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import stat
 import tempfile
 from collections.abc import Iterator
@@ -135,13 +137,38 @@ class Objects:
         staging.mkdir(parents=True, exist_ok=True)
         return staging
 
+    def _move_across_filesystems(self, source: Path, target: Path, *, create: bool) -> None:
+        """Move *source* to *target* on another filesystem, as when `catalog/` is a mount of its own.
+
+        Copied beside the target under a hidden name first, so the last step is still a rename
+        within one filesystem and a reader sees the old file or the new one.
+        """
+        beside = target.with_name(f".{target.name}.{os.getpid()}.moving")
+        try:
+            shutil.copyfile(source, beside)
+            with open(beside, "rb+") as handle:
+                os.fsync(handle.fileno())
+            os.chmod(beside, _file_mode(target))
+            if create:
+                os.link(beside, target)
+            else:
+                replace_file(beside, target)
+        finally:
+            beside.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+
     def _move_into_place(self, source: Path, target: Path, *, create: bool) -> None:
         os.chmod(source, _file_mode(target))
-        if create:
-            os.link(source, target)  # fails when the target exists, unlike a rename
-            source.unlink()
-        else:
-            replace_file(source, target)  # retried while Windows refuses to replace a file being read
+        try:
+            if create:
+                os.link(source, target)  # fails when the target exists, unlike a rename
+                source.unlink()
+            else:
+                replace_file(source, target)  # retried while Windows refuses to replace a file being read
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            self._move_across_filesystems(source, target, create=create)
         if os.name == "nt":
             return  # a folder cannot be opened to flush it there
         # Every folder up to the root, so one created for a new dataset survives a power cut too.

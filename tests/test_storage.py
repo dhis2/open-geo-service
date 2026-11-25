@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import time
@@ -50,7 +51,21 @@ def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
         objects.put("catalog/a/collection.json", b"{ }")
     with pytest.raises(FileExistsError):
         objects.put("catalog/a/collection.json", b"[]", create=True)
+
     assert objects.get("catalog/a/collection.json") == b"{ }"
+
+    # With catalog/ on another filesystem than the staging folder, as a mount or a symlinked disk.
+    replace = storage.replace_file
+
+    def across(source: str | Path, target: Path) -> None:
+        if Path(source).parent != target.parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        replace(source, target)
+
+    monkeypatch.setattr(storage, "replace_file", across)
+    objects.put("catalog/a/collection.json", b"{  }")
+    assert objects.get("catalog/a/collection.json") == b"{  }"
+    assert sorted(p.name for p in objects.path("catalog/a").iterdir()) == ["collection.json"], "nothing left beside it"
     assert [listed.key for listed in objects.scan("catalog")] == ["catalog/a/collection.json"]
 
 
