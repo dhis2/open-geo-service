@@ -369,6 +369,8 @@ def _dataset_view(dataset: Any, template: dict[str, Any] | None) -> dict[str, An
         "coverage": _coverage_label(dataset.extent.temporal.start, dataset.extent.temporal.end, dataset.period_type),
         "status": status,
         "has_thumbnail": has_thumbnail,
+        # From the catalog, as a static host serves it, so a page of cards reads no records.
+        "thumbnail": f"/stac/{layout.dataset_key(layout.kind_of(dataset.item_type), dataset.dataset_id)}/thumbnail.png",
         "ramp": _colormap_ramp(colormap),
         "kind": {"feature": "vector", "table": "table"}.get(dataset.item_type, "raster"),
     }

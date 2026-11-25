@@ -73,7 +73,13 @@ def _write(rows: list[dict[str, Any]], written_at: datetime = FIRST) -> Any:
 
 
 def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(client: TestClient) -> None:
-    _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    record = _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    # As a table written before the id rule changed: its record keeps a schema id the rule refuses.
+    assert record.table_schema is not None
+    old_rule = record.model_copy(update={"table_schema": {**record.table_schema, "id": "monthly.v1"}})
+    ingestion_services._save_records(
+        [old_rule if r.artifact_id == record.artifact_id else r for r in ingestion_services._load_records()]
+    )
 
     listed = {item["dataset_id"]: item for item in client.get("/datasets").json()["items"]}
     table = listed["precip_districts"]

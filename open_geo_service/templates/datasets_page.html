@@ -68,7 +68,7 @@
             >
               <div class="thumb{% if ds.has_thumbnail %} has-image{% endif %}{% if ds.kind == "table" %} thumb-table{% endif %}"{% if ds.kind == "raster" %} style="--ramp: {{ ds.ramp }}"{% endif %}>
                 {% if ds.has_thumbnail %}
-                <img src="{{ mount }}/datasets/{{ ds.id }}/thumbnail.png" alt="" loading="lazy" />
+                <img src="{{ mount }}{{ ds.thumbnail }}" alt="" loading="lazy" />
                 {% elif ds.kind == "table" %}
                 {# A table has no map to preview; one picture of a table says what it is instead. #}
                 {% include "_table_thumbnail.html" %}

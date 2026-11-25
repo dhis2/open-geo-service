@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service.data_registry.services import datasets as registry_datasets
+from open_geo_service.main import app
 from open_geo_service.system import templates as landing
 
 
@@ -247,7 +248,10 @@ def test_a_dataset_with_a_thumbnail_links_it() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"png")
     try:
-        assert landing._dataset_view(_record("rendered_dataset"), None)["has_thumbnail"] is True
+        view = landing._dataset_view(_record("rendered_dataset"), None)
+        assert view["has_thumbnail"] is True
+        # Linked from the catalog, which serves it without reading the records.
+        assert TestClient(app).get(view["thumbnail"]).content == b"png"
     finally:
         path.unlink()
 
