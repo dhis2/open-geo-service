@@ -58,8 +58,8 @@ def _collection_payload() -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
+    root = tmp_path / "catalog" / "vectors"
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -638,7 +638,7 @@ def test_the_asset_route_resolves_through_the_record_not_the_directory(
     )
 
     assert written.is_file()
-    assert written.parent == isolated_store
+    assert written.parent == isolated_store / "unregistered"
     assert client.get("/features/unregistered/data.parquet").status_code == 404
 
 

@@ -227,6 +227,22 @@ open-geo-service = { git = "https://github.com/dhis2/open-geo-service.git", rev 
 
 Pinning to a released version (`==X.Y.Z`) is recommended over tracking `main`: a release is reproducible, whereas `main`'s dependency tree shifts over time and can change under you between syncs.
 
+### Moving to a new data folder layout
+
+A release that changes the [data folder layout](data_folder_layout.md) reads only the new one,
+and logs a warning at startup while old folders remain. Move the data with `migrate_layout`,
+which renames files on the same disk and downloads nothing:
+
+1. Stop every server on the data folder, the read-only ones too.
+2. Back up the data folder.
+3. From the directory the instance's `.env` is in, see what would change:
+   `uv run python -m open_geo_service.migrate_layout --dry-run`
+4. Run it without `--dry-run`, then start the servers.
+
+It refuses to run while a dataset's id breaks the id rule (lowercase letters, digits, `_` and
+`-`, starting with a letter), and names each one: delete it, or ingest it again under a valid id.
+Running it again once done changes nothing.
+
 ### Troubleshooting
 
 - **Always run inside the synced environment** — use `make run` or `uv run uvicorn …`, never a bare `uvicorn`/`python`. If a stray virtual environment is activated (`echo $VIRTUAL_ENV`), deactivate it; uv warns when `VIRTUAL_ENV` doesn't match the project's `.venv`.

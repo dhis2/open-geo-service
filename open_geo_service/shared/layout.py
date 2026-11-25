@@ -1,9 +1,11 @@
 """Where each file in the data folder lives.
 
-Dataset files sit under the catalog root, by kind; GeoService's own state (records, the writer
-lease, jobs, staging files, markers) sits beside it at the data folder root. Every path to a
-dataset file is built here, as a key relative to the catalog root, and :func:`local` joins a key
-to the data folder. A storage backend for object storage replaces that one function (CLIM-555).
+Every dataset has a folder of its own, `catalog/<kind>/<id>/`, holding its data and thumbnail;
+GeoService's own state (records, the writer lease, jobs, staging files, markers) sits beside
+`catalog/` at the data folder root. Every path to a dataset file is built here, as a key relative
+to the catalog root, and :func:`local` joins a key to the data folder. A storage backend for
+object storage replaces that one function (CLIM-555). The layout is described in
+`docs/data_folder_layout.md`.
 """
 
 from __future__ import annotations
@@ -14,9 +16,12 @@ from pathlib import Path
 
 from open_geo_service import config as api_config
 
+CATALOG = "catalog"
+"""The catalog root, a folder of the data folder."""
+
 
 class Kind(StrEnum):
-    """The kinds of dataset, each a folder of its own under the catalog root."""
+    """The kinds of dataset, each a sub-catalog of its own under the catalog root."""
 
     RASTER = "rasters"
     VECTOR = "vectors"
@@ -34,7 +39,12 @@ def kind_of(stored_as: str) -> Kind:
 
 def local(key: str) -> Path:
     """The file or folder at *key*, a path relative to the catalog root, in the data folder."""
-    return api_config.get_data_root() / key
+    return catalog_root() / key
+
+
+def catalog_root() -> Path:
+    """The folder holding every dataset, which is published as a catalog."""
+    return api_config.get_data_root() / CATALOG
 
 
 def kind_root(kind: Kind) -> Path:
@@ -44,8 +54,7 @@ def kind_root(kind: Kind) -> Path:
 
 def dataset_key(kind: Kind, dataset_id: str) -> str:
     """The key of the folder holding *dataset_id*'s files."""
-    # Rasters and vectors share one folder per kind; a table has a folder of its own.
-    return f"{kind.value}/{dataset_id}" if kind is Kind.TABLE else kind.value
+    return f"{kind.value}/{dataset_id}"
 
 
 def dataset_dir(kind: Kind, dataset_id: str) -> Path:
@@ -67,12 +76,12 @@ def raster_stores() -> Iterator[Path]:
     """Every raster dataset's Icechunk store in the data folder."""
     root = kind_root(Kind.RASTER)
     if root.is_dir():
-        yield from sorted(root.glob("*.icechunk"))
+        yield from sorted(store for folder in root.iterdir() if (store := raster_store(folder.name)).is_dir())
 
 
 def thumbnail(kind: Kind, dataset_id: str) -> Path:
     """The thumbnail of *dataset_id*, whether or not it exists yet."""
-    return local(f"thumbnails/{dataset_id}.png")
+    return dataset_dir(kind, dataset_id) / "thumbnail.png"
 
 
 def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:

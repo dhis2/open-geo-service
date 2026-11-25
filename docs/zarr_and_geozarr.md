@@ -49,7 +49,7 @@ The Open Geo Service targets the same access pattern at country scale for arbitr
 
 ## Store layout on disk
 
-Each managed dataset has exactly one store on disk, under `{data_dir}/rasters/{dataset_id}.icechunk`. All stores use the [Icechunk](https://icechunk.io) versioned Zarr v3 format.
+Each managed dataset has exactly one store on disk, `{data_dir}/catalog/rasters/{dataset_id}/{dataset_id}.icechunk` (see [Data folder layout](data_folder_layout.md)). All stores use the [Icechunk](https://icechunk.io) versioned Zarr v3 format.
 
 Inside the store, the layout is either:
 

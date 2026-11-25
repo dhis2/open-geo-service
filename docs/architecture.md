@@ -44,7 +44,7 @@ Multiple artifacts can exist for the same data source if data was ingested at di
 
 Artifacts are stored in `{data_dir}/artifacts/records.json`, where `data_dir` is the path configured in `geoservice.yaml`. This is an internal implementation detail — consumers should never depend on artifact IDs or artifact paths directly.
 
-Store paths are persisted relative to `data_dir` (`rasters/foo.icechunk`) and resolved to absolute paths when records are loaded, so the data directory stays portable: it can be moved, copied to another host, or written in a container at `/app/data` and read from the host. Records written before this convention hold absolute paths and are re-rooted onto the current `data_dir` on read, then rewritten in relative form on the next update. Stores kept outside `data_dir` are recorded as absolute paths.
+Store paths are persisted relative to `data_dir` (`catalog/rasters/foo/foo.icechunk`, see [Data folder layout](data_folder_layout.md)) and resolved to absolute paths when records are loaded, so the data directory stays portable: it can be moved, copied to another host, or written in a container at `/app/data` and read from the host. Records written before this convention hold absolute paths and are re-rooted onto the current `data_dir` on read, then rewritten in relative form on the next update. Stores kept outside `data_dir` are recorded as absolute paths.
 
 ### Managed dataset
 

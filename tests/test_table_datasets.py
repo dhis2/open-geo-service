@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
-from open_geo_service.shared import versions
+from open_geo_service.shared import layout, versions
 from open_geo_service.tables import store
 
 FIRST = datetime(2026, 3, 1, tzinfo=UTC)
@@ -53,7 +53,7 @@ def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         crs=feature_store.WGS84,
         primary_geometry=geometry,
     )
-    return tmp_path / "tables"
+    return layout.kind_root(layout.Kind.TABLE)
 
 
 def _row(feature_id: str, value: float | None, **extra: Any) -> dict[str, Any]:

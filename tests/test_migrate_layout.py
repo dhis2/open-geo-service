@@ -1,19 +1,29 @@
-"""CLIM-1253: moving an instance from datasets/features/downloads to rasters/vectors."""
+"""Moving an instance onto the current layout: rasters/vectors (CLIM-1253), then catalog/ (CLIM-1968)."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
+import xarray as xr
+from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service import migrate_layout
 from open_geo_service.shared import layout
 
 from .test_writer_lease import start_other_writer
+
+UUID = "0123456789abcdef0123456789abcdef"
+RASTER = {"dataset_id": "chirps", "format": "icechunk"}
+VECTOR = {"dataset_id": "districts", "format": "geoparquet"}
 
 
 @pytest.fixture
@@ -23,13 +33,18 @@ def instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (data / "downloads" / "chirps.icechunk").mkdir(parents=True)
     (data / "downloads" / "chirps.icechunk.lock").write_text("")
     (data / "features").mkdir()
-    (data / "features" / "districts.abc.parquet").write_bytes(b"PAR1")
+    (data / "features" / f"districts.{UUID}.parquet").write_bytes(b"PAR1")
     (data / "artifacts").mkdir()
     records = [
-        {"artifact_id": "a", "path": "downloads/chirps.icechunk", "asset_paths": ["downloads/chirps.icechunk"]},
-        {"artifact_id": "b", "path": str(data / "features" / "districts.abc.parquet"), "asset_paths": []},
-        {"artifact_id": "c", "path": "/mnt/elsewhere/downloads/era5.icechunk", "asset_paths": []},
-        {"artifact_id": "d", "path": "/app/data/downloads/chirps.icechunk", "asset_paths": []},
+        {
+            **RASTER,
+            "artifact_id": "a",
+            "path": "downloads/chirps.icechunk",
+            "asset_paths": ["downloads/chirps.icechunk"],
+        },
+        {**VECTOR, "artifact_id": "b", "path": str(data / "features" / f"districts.{UUID}.parquet"), "asset_paths": []},
+        {**RASTER, "artifact_id": "c", "path": "/mnt/elsewhere/downloads/era5.icechunk", "asset_paths": []},
+        {**RASTER, "artifact_id": "d", "path": "/app/data/downloads/chirps.icechunk", "asset_paths": []},
     ]
     (data / "artifacts" / "records.json").write_text(json.dumps(records, indent=2) + "\n")
 
@@ -72,17 +87,21 @@ def test_moves_data_and_plugins_and_rewrites_what_names_them(instance: Path) -> 
     assert migrate_layout.main([]) == 0
 
     data, plugins = instance / "data", instance / "plugins"
-    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "rasters", "vectors", "writer.lock"]
-    assert (data / "rasters" / "chirps.icechunk").is_dir()
-    assert (data / "rasters" / "chirps.icechunk.lock").exists(), "a store's sibling files move with it"
-    assert (data / "vectors" / "districts.abc.parquet").exists()
+    assert sorted(p.name for p in data.iterdir()) == ["artifacts", "catalog", "writer.lock"]
+    assert sorted(p.relative_to(data / "catalog").as_posix() for p in (data / "catalog").glob("*/*/*")) == [
+        "rasters/chirps/chirps.icechunk",
+        f"vectors/districts/districts.{UUID}.parquet",
+    ], "the empty store lock is deleted"
 
     records = json.loads((data / "artifacts" / "records.json").read_text())
-    assert records[0]["path"] == "rasters/chirps.icechunk"
-    assert records[0]["asset_paths"] == ["rasters/chirps.icechunk"]
-    assert records[1]["path"] == "vectors/districts.abc.parquet", "an absolute path under the data dir becomes portable"
+    chirps = "catalog/rasters/chirps/chirps.icechunk"
+    assert records[0]["path"] == chirps
+    assert records[0]["asset_paths"] == [chirps]
+    assert records[1]["path"] == f"catalog/vectors/districts/districts.{UUID}.parquet", (
+        "an absolute path under the data dir becomes portable"
+    )
     assert records[2]["path"] == "/mnt/elsewhere/downloads/era5.icechunk", "a store outside the data dir is left alone"
-    assert records[3]["path"] == "rasters/chirps.icechunk", "a store recorded under a container's mount is ours"
+    assert records[3]["path"] == chirps, "a store recorded under a container's mount is ours"
 
     assert sorted(p.name for p in plugins.iterdir()) == ["processes", "rasters", "vectors"]
     process = (plugins / "processes" / "indices.py").read_text()
@@ -166,7 +185,7 @@ def test_the_service_reads_the_migrated_instance(instance: Path) -> None:
     migrate_layout.main([])
     registry.reset_template_caches()
 
-    assert layout.kind_root(layout.Kind.RASTER) == instance / "data" / "rasters"
+    assert layout.raster_store("chirps").is_dir()
     assert "chelsa" in {t["id"] for t in registry.list_datasets()}
     assert "regions" in {t["id"] for t in feature_templates.list_feature_templates()}
 
@@ -175,14 +194,14 @@ def test_a_data_dir_reached_through_a_symlink_is_migrated(instance: Path) -> Non
     link = instance / "link"
     link.symlink_to(instance / "data")
     index = instance / "data" / "artifacts" / "records.json"
-    index.write_text(json.dumps([{"artifact_id": "a", "path": str(link / "downloads" / "chirps.icechunk")}]) + "\n")
+    index.write_text(json.dumps([{**RASTER, "artifact_id": "a", "path": str(link / "downloads" / "chirps.icechunk")}]))
     (instance / "geoservice.yaml").write_text(f"data_dir: {link}\nplugins_dir: ./plugins\n")
     api_config._cache = None
 
     assert migrate_layout.main([]) == 0
 
     [record] = json.loads(index.read_text())
-    assert record["path"] == "rasters/chirps.icechunk"
+    assert record["path"] == "catalog/rasters/chirps/chirps.icechunk"
 
 
 def test_an_external_store_that_still_exists_is_left_alone(instance: Path) -> None:
@@ -190,9 +209,175 @@ def test_an_external_store_that_still_exists_is_left_alone(instance: Path) -> No
     external = instance / "archive" / "downloads" / "chirps.icechunk"
     external.mkdir(parents=True)
     index = instance / "data" / "artifacts" / "records.json"
-    index.write_text(json.dumps([{"artifact_id": "a", "path": str(external)}]) + "\n")
+    index.write_text(json.dumps([{**RASTER, "artifact_id": "a", "path": str(external)}]))
 
     assert migrate_layout.main([]) == 0
 
     [record] = json.loads(index.read_text())
     assert record["path"] == str(external)
+
+
+# --- step 2: into catalog/ ------------------------------------------------------------------------
+
+
+def _back_to_the_old_layout(data: Path) -> None:
+    """Rearrange a data folder written by this version into the layout before catalog/."""
+    catalog = data / "catalog"
+    (data / "thumbnails").mkdir()
+    for kind in ("rasters", "vectors"):
+        (data / kind).mkdir()
+        for folder in (catalog / kind).iterdir():
+            (folder / "thumbnail.png").rename(data / "thumbnails" / f"{folder.name}.png")
+            for path in folder.iterdir():
+                path.rename(data / kind / path.name)
+    (catalog / "tables").rename(data / "tables")
+    shutil.rmtree(catalog)
+    # What the old layout kept beside the data: an empty store lock, a collection marker, and a
+    # marker for a feature file replaced under the old rule.
+    (data / "rasters" / "rain.icechunk.lock").write_text("")
+    (data / "rasters" / "rain.icechunk.gc-pending").write_text("2000-01-01T00:00:00+00:00")
+    (data / "rasters" / "gone.icechunk.gc-pending").write_text("2000-01-01T00:00:00+00:00")
+    (data / "vectors" / f"districts.{'0' * 32}.parquet.superseded").write_text("")
+    # And files an earlier version was killed writing, inside a table's folder too.
+    (data / "vectors" / f"districts.{'1' * 32}.parquet.{'2' * 32}.writing").write_text("")
+    (data / "tables" / "rain_districts" / f"x.parquet.{'3' * 32}.writing").write_text("")
+    old = {"catalog/rasters/rain/": "rasters/", "catalog/vectors/districts/": "vectors/", "catalog/tables/": "tables/"}
+    for index in (data / "artifacts" / "records.json", data / "openeo_jobs" / "jobs.json"):
+        text = index.read_text()
+        for new, before in old.items():
+            text = text.replace(new, before)
+        index.write_text(text)
+
+
+@pytest.fixture
+def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A data folder before catalog/: a raster, a feature collection and a table, with thumbnails
+    and an openEO job that published the raster, written by this version and moved back."""
+    from open_geo_service.data_manager.services import downloader
+    from open_geo_service.features import services as feature_services
+    from open_geo_service.ingestions import services as ingestion_services
+    from open_geo_service.ingestions.schemas import (
+        ArtifactCoverage,
+        ArtifactFormat,
+        ArtifactPublication,
+        ArtifactRecord,
+        ArtifactRequestScope,
+        CoverageSpatial,
+        CoverageTemporal,
+        PublicationStatus,
+    )
+    from open_geo_service.tables import store as table_store
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(api_config, "get_data_root", lambda: data)
+    monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", data / "artifacts")
+    monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", data / "artifacts" / "records.json")
+
+    cube = xr.Dataset(
+        {"precip": (("t", "y", "x"), np.ones((2, 2, 2), dtype="float32"))},
+        coords={"t": pd.date_range("2026-01-01", periods=2, freq="D"), "y": [1.5, 0.5], "x": [10.5, 11.5]},
+    )
+    store = layout.raster_store("rain")
+    downloader.write_to_icechunk_store(cube, store, commit_message="test")
+    record = ArtifactRecord(
+        artifact_id="a1",
+        dataset_id="rain",
+        dataset_name="Rain",
+        variable="precip",
+        period_type="daily",
+        format=ArtifactFormat.ICECHUNK,
+        path=str(store),
+        asset_paths=[str(store)],
+        variables=["precip"],
+        request_scope=ArtifactRequestScope(start="2026-01-01", end="2026-01-02"),
+        coverage=ArtifactCoverage(
+            temporal=CoverageTemporal(start="2026-01-01", end="2026-01-02"),
+            spatial=CoverageSpatial(xmin=10.0, ymin=0.0, xmax=12.0, ymax=2.0),
+        ),
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        publication=ArtifactPublication(status=PublicationStatus.PUBLISHED, collection_id="rain"),
+    )
+    ingestion_services.register_artifact_record(record, publish=True)
+    box = {
+        "type": "Feature",
+        "properties": {"orgUnitCode": "D1"},
+        "geometry": {"type": "Polygon", "coordinates": [[[10, 0], [12, 0], [12, 2], [10, 2], [10, 0]]]},
+    }
+    feature_services.refresh_feature_collection(
+        template={"id": "districts", "name": "Districts", "id_property": "orgUnitCode"},
+        features={"type": "FeatureCollection", "features": [box]},
+    )
+    table_store.write_rows(
+        dataset_id="rain_districts",
+        collection_id="districts",
+        rows=[{"feature_id": "D1", "period_start": "2026-01-01", "value": 1.0, "reducer": "mean"}],
+    )
+    for kind, dataset_id in ((layout.Kind.RASTER, "rain"), (layout.Kind.VECTOR, "districts")):
+        layout.thumbnail(kind, dataset_id).write_bytes(b"\x89PNG\r\n\x1a\n" + dataset_id.encode())
+    jobs = [
+        {
+            "id": "job-1",
+            "status": "finished",
+            "usage": {"output_path": "managed://rain"},
+            "publication": {"store_path": str(store), "record": record.model_dump(mode="json")},
+        }
+    ]
+    (data / "openeo_jobs").mkdir()
+    (data / "openeo_jobs" / "jobs.json").write_text(json.dumps(jobs))
+
+    _back_to_the_old_layout(data)
+    return data
+
+
+def test_an_old_data_folder_is_served_from_the_catalog_after_the_migration(old_data: Path, client: TestClient) -> None:
+    assert migrate_layout.main([]) == 0
+
+    assert sorted(p.name for p in old_data.iterdir()) == [
+        "artifacts",
+        "catalog",
+        "gc-pending",
+        "openeo_jobs",
+        "tmp",
+    ] + [
+        "writer.json",
+        "writer.lock",
+    ]
+    catalog = sorted(p.relative_to(old_data / "catalog").as_posix() for p in (old_data / "catalog").rglob("*"))
+    assert [name for name in catalog if name.count("/") == 2 and not name.endswith(".parquet")] == [
+        "rasters/rain/rain.icechunk",
+        "rasters/rain/thumbnail.png",
+        "vectors/districts/thumbnail.png",
+    ], "nothing but the data and its thumbnail: no lock, marker or staging file"
+    assert sorted(p.name for p in (old_data / "gc-pending").iterdir()) == ["rain"], "a marker of a deleted store goes"
+
+    assert client.get("/zarr/rain/zarr.json").status_code == 200
+    assert client.get("/icechunk/rain/repo").status_code == 200
+    assert client.get("/features/districts/data.parquet").status_code == 200
+    assert client.get("/tables/rain_districts/rows").json()["items"][0]["value"] == 1.0
+    assert client.get("/tables/rain_districts/data.parquet").status_code == 200
+    assert client.get("/datasets/rain/thumbnail.png").content.endswith(b"rain")
+    assert client.get("/datasets/districts/thumbnail.png").content.endswith(b"districts")
+    [job] = json.loads((old_data / "openeo_jobs" / "jobs.json").read_text())
+    assert job["publication"]["store_path"] == job["publication"]["record"]["path"] == str(layout.raster_store("rain"))
+    assert job["usage"]["output_path"] == "managed://rain"
+
+    records = (old_data / "artifacts" / "records.json").read_text()
+    assert migrate_layout.main([]) == 0, "running it again"
+    assert (old_data / "artifacts" / "records.json").read_text() == records
+
+
+def test_a_dataset_whose_id_breaks_the_rule_stops_the_migration(
+    old_data: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index = old_data / "artifacts" / "records.json"
+    records = json.loads(index.read_text())
+    index.write_text(json.dumps([*records, {**records[0], "artifact_id": "a2", "dataset_id": "Rain.v2"}]))
+    before = sorted(p.relative_to(old_data).as_posix() for p in old_data.rglob("*"))
+
+    assert migrate_layout.main(["--dry-run"]) == 1
+    assert "'Rain.v2'" in capsys.readouterr().err
+    assert migrate_layout.main([]) == 1
+    assert "'Rain.v2'" in capsys.readouterr().err
+
+    assert sorted(p.relative_to(old_data).as_posix() for p in old_data.rglob("*")) == before, "nothing moved"

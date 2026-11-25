@@ -23,14 +23,16 @@ def test_raster_stores_live_in_the_data_dir_from_config(monkeypatch: pytest.Monk
     config_file.write_text("data_dir: ./data\nextent:\n  id: test\n", encoding="utf-8")
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config_file))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert layout.raster_store("rain") == tmp_path / "data" / "rasters" / "rain.icechunk"
+    assert layout.raster_store("rain") == tmp_path / "data" / "catalog" / "rasters" / "rain" / "rain.icechunk"
 
 
 def test_raster_stores_live_under_xdg_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory() as xdg:
         monkeypatch.delenv("GEOSERVICE_CONFIG", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", xdg)
-        assert layout.raster_store("rain") == Path(xdg) / "geoservice" / "rasters" / "rain.icechunk"
+        assert (
+            layout.raster_store("rain") == Path(xdg) / "geoservice" / "catalog" / "rasters" / "rain" / "rain.icechunk"
+        )
 
 
 def test_resolve_artifacts_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

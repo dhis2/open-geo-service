@@ -29,7 +29,7 @@ from open_geo_service.openeo.jobs import get_openeo_job_service
 from open_geo_service.pipelines import routes as pipeline_routes
 from open_geo_service.scheduler import routes as scheduler_routes
 from open_geo_service.scheduler.service import get_scheduler_service
-from open_geo_service.shared import urls
+from open_geo_service.shared import layout, urls
 from open_geo_service.stac import routes as stac_routes
 from open_geo_service.system import routes as system_routes
 from open_geo_service.tables import routes as table_routes
@@ -201,6 +201,13 @@ async def _services() -> AsyncGenerator[None]:
     pipeline_recovery: asyncio.Task[None] | None = None
     notification_replay: asyncio.Task[None] | None = None
     derived_refresh: asyncio.Task[None] | None = None
+    old_folders = [f"{name}/" for name in (*layout.Kind, "thumbnails") if (api_config.get_data_root() / name).is_dir()]
+    if old_folders:
+        logger.warning(
+            "The data folder holds %s from an earlier layout, which this version does not read. "
+            "Stop the server and run `python -m open_geo_service.migrate_layout`.",
+            ", ".join(old_folders),
+        )
     if not api_config.is_read_only():
         # A read-only instance may share its data directory with a writing one, so it leaves
         # the stores alone.
