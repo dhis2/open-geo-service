@@ -81,13 +81,16 @@ async function run(dataset) {
   });
   cdp.on("Network.responseReceived", (e) => {
     const entry = byId.get(e.requestId);
-    if (entry && e.response.fromDiskCache) entry.cached = true;
+    if (!entry) return;
+    if (e.response.fromDiskCache) entry.cached = true;
+    // A server error still finishes loading; a 404 is an absent chunk, which Zarr reads as empty.
+    if (e.response.status >= 500) entry.failed = true;
   });
   const finish = (failed) => (e) => {
     const entry = byId.get(e.requestId);
     if (!entry) return;
-    Object.assign(entry, { done: true, failed, end: (e.timestamp - navStart) * 1000 });
-    if (!failed) entry.bytes = e.encodedDataLength;
+    Object.assign(entry, { done: true, failed: failed || entry.failed, end: (e.timestamp - navStart) * 1000 });
+    if (!entry.failed) entry.bytes = e.encodedDataLength;
   };
   cdp.on("Network.loadingFinished", finish(false));
   cdp.on("Network.loadingFailed", finish(true));
@@ -104,13 +107,18 @@ for (const dataset of datasets) {
   const results = [];
   for (let i = 0; i < runs; i++) results.push(await run(dataset));
   for (const phase of ["cold", "warm"]) {
-    const rs = results.map((r) => r[phase]);
+    // A run with a failed request is left out of the medians: it did not load the view.
+    const rs = results.map((r) => r[phase]).filter((r) => !r.failed);
+    const failed = runs - rs.length;
+    if (!rs.length) {
+      console.log(`${dataset.padEnd(40)} ${phase}  all ${runs} runs had failed requests`);
+      continue;
+    }
     const field = (name) => median(rs.map((r) => r[name]));
-    const failed = rs.reduce((sum, r) => sum + r.failed, 0);
     console.log(
       `${dataset.padEnd(40)} ${phase}  data done ${field("lastData").toFixed(0)} ms, ` +
         `${field("requests")} req (${field("fromCache")} cached), ${(field("bytes") / 1024).toFixed(0)} KB` +
-        (failed ? `, ${failed} failed` : ""),
+        (failed ? `, ${failed} of ${runs} runs left out for failed requests` : ""),
     );
   }
 }
