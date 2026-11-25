@@ -115,8 +115,9 @@ def test_a_revised_value_replaces_the_previous_one(
         ("D1", 11.0, "2026-04-01T00:00:00+00:00"),
         ("D2", 20.0, "2026-03-01T00:00:00+00:00"),
     ]
-    # One file holds the dataset; no history is kept.
-    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 1
+    # No history is kept: the file the record names, and the one it replaced for a reader that
+    # resolved the previous record.
+    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 2
 
     # Still one record, however many writes.
     assert (

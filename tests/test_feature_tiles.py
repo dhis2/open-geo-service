@@ -206,6 +206,7 @@ def test_an_unpublished_collection_serves_no_tiles(client: TestClient) -> None:
 def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
+    _refresh()
     current = Path(str(_refresh().path))  # removes it, past a zero grace period
 
     assert not first.exists()

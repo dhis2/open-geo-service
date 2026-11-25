@@ -325,6 +325,20 @@ def test_a_replaced_file_stays_until_its_replacement_is_older_than_the_grace_per
     assert not first.exists()
 
 
+def test_a_file_current_until_a_refresh_stays_however_old_an_unregistered_file_after_it_is() -> None:
+    """A refresh killed between writing and registering leaves a file that was never current."""
+    current = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    orphan, _count, _geometry = store.write_feature_collection(
+        dataset_id="districts", features=_collection(), id_property="orgUnitCode"
+    )
+    _age(Path(str(current.path)), 1000)
+    _age(orphan, 500)
+
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+
+    assert len(store.read_feature_collection(current)) == 2, "a reader holding the replaced record can still read it"
+
+
 def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,9 +371,10 @@ def test_a_reader_that_pauses_past_the_grace_period_can_still_lose_its_file(
     """The accepted limit of a time-based grace period, pinned so it stays a checked fact."""
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     old_record = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    feature_services.refresh_feature_collection(
-        template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
-    )
+    for _ in range(2):
+        feature_services.refresh_feature_collection(
+            template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
+        )
 
     with pytest.raises(ValueError, match="the record and the store disagree"):
         store.read_feature_collection(old_record)

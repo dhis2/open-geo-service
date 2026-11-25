@@ -23,19 +23,24 @@ longer while further writes run; nothing short of reference counting is.
 """
 
 
-def prune_superseded(files: Iterable[Path], *, keep: Path | None, remove: Callable[[Path], None] = os.unlink) -> None:
+def prune_superseded(
+    files: Iterable[Path], *, keep: Iterable[Path], remove: Callable[[Path], None] = os.unlink
+) -> None:
     """Remove each of *files* that a newer one replaced more than the grace period ago.
 
     A file stopped being current when the next newer file was written, so the next file's mtime
     is that moment, and files must become current in the order of their mtimes: a write that is
-    rolled back sets the restored file's mtime with :func:`make_current`. *keep*, the file the
-    record names, and the newest file are never removed. A file that cannot be removed is logged
-    and tried again on the next write.
+    rolled back sets the restored file's mtime with :func:`make_current`. *keep* is the file the
+    record names and, after a write, the file the record named before it: that file was current
+    until this moment, however old the file after it, which may be one a write that never
+    registered left behind. Those and the newest file are never removed. A file that cannot be
+    removed is logged and tried again on the next write.
     """
+    kept = set(keep)
     ordered = sorted(files, key=lambda path: path.stat().st_mtime)
     now = time.time()
     for older, newer in zip(ordered, ordered[1:], strict=False):
-        if older == keep or now - newer.stat().st_mtime < SUPERSEDED_FILE_GRACE_SECONDS:
+        if older in kept or now - newer.stat().st_mtime < SUPERSEDED_FILE_GRACE_SECONDS:
             continue
         try:
             remove(older)

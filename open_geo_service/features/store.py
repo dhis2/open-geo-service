@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -115,11 +115,10 @@ def collection_files(dataset_id: str) -> list[Path]:
     return sorted(root.glob(f"{dataset_id}.*.parquet")) if root.is_dir() else []
 
 
-def prune_superseded_files(dataset_id: str, *, keep: Path | None) -> None:
+def prune_superseded_files(dataset_id: str, *, keep: Iterable[Path]) -> None:
     """Remove this collection's files that a newer one replaced more than the grace period ago.
 
-    `keep` is the file the current record names after any rollback, or None when the collection
-    has no record. Each file's vector tiles go with it.
+    `keep` is what `shared.versions.prune_superseded` keeps. Each file's vector tiles go with it.
     """
     prune_superseded(collection_files(dataset_id), keep=keep, remove=_remove_version)
 

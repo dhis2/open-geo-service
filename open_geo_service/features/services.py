@@ -121,6 +121,8 @@ def _refresh_feature_collection_locked(
         for record in ingestion_services._load_records()
         if record.dataset_id == dataset_id and record.format == ArtifactFormat.GEOPARQUET
     ]
+    # The file the current record names, which `written` replaces.
+    previous = [Path(str(max(prior_records, key=lambda record: record.created_at).path))] if prior_records else []
     # Refuse before writing anything, so a doomed refresh leaves no file to clean up.
     store.validate_features_for_write(dataset_id=dataset_id, features=features, id_property=id_property)
     written, _count, geometry = store.write_feature_collection(
@@ -153,15 +155,14 @@ def _refresh_feature_collection_locked(
         # becomes the newest again, so `written` goes one grace period after the rollback, and
         # the restored file one grace period after whatever replaces it next.
         _restore_records(dataset_id, prior_records)
-        restored = max(prior_records, key=lambda record: record.created_at) if prior_records else None
-        restored_path = Path(str(restored.path)) if restored is not None else None
-        if restored_path is not None and restored_path.is_file():
-            make_current(restored_path)
-        store.prune_superseded_files(dataset_id, keep=restored_path)
+        for restored in previous:
+            if restored.is_file():
+                make_current(restored)
+        store.prune_superseded_files(dataset_id, keep=previous)
         raise
     # Only now, with the record durable and pointing at `written`, can the files it
     # superseded go. A failure here leaves an orphan, not a wrong answer.
-    store.prune_superseded_files(dataset_id, keep=written)
+    store.prune_superseded_files(dataset_id, keep=[written, *previous])
     # Last, and never raising: a collection that cannot be drawn is still registered.
     tiles.build_archive(written, dataset_id, store_crs)
     write_feature_thumbnail(written, dataset_id)

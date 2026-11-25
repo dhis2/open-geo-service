@@ -168,7 +168,10 @@ def write_rows(
             # No record names the file, so no reader sees it; remove it rather than leave it.
             written.unlink(missing_ok=True)
             raise
-        prune_superseded(_dataset_root(dataset_id).glob("*.parquet"), keep=written)
+        prune_superseded(
+            _dataset_root(dataset_id).glob("*.parquet"),
+            keep=[written, *(Path(path) for path in (existing.asset_paths if existing else []))],
+        )
         return registered
 
 
