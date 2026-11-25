@@ -198,7 +198,7 @@ def _no_catalog_files_on_record_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     rewrite after every write would describe each of them. `client` writes the catalog before a
     `/stac` request instead; `test_catalog_files.py` overrides this fixture to test the rewrite.
     """
-    monkeypatch.setattr(ingestion_services, "_records_changed", lambda: None)
+    monkeypatch.setattr(ingestion_services, "rewrite_catalog", lambda: None)
 
 
 class CatalogWritingClient(TestClient):

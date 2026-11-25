@@ -219,6 +219,8 @@ def test_a_write_is_in_the_files_before_it_returns_and_an_unpublished_folder_has
     )
     written = _documents(catalog)
     assert "./regions/collection.json" in _hrefs(written["vectors/catalog.json"])
+    # Its tiles, style and thumbnail, made after its record, are in the files when the refresh returns.
+    assert set(written["vectors/regions/collection.json"]["assets"]) == {"data", "tiles", "style", "thumbnail"}
     assert written["vectors/regions/collection.json"]["assets"]["data"]["href"] == f"./{Path(str(first.path)).name}"
 
     second = feature_services.refresh_feature_collection(
@@ -238,6 +240,14 @@ def test_the_zarr_asset_follows_the_configured_address(data: Path, monkeypatch: 
         pass
     assert json.loads(collection.read_text())["assets"]["zarr"]["href"] == "https://moved.example.org/zarr/rain"
 
+    # An origin-only address behind a proxy prefix composes as a request-built URL does.
+    monkeypatch.setenv("ROOT_PATH", "/geoservice")
+    catalog_files.write_catalog()
+    assert (
+        json.loads(collection.read_text())["assets"]["zarr"]["href"] == "https://moved.example.org/geoservice/zarr/rain"
+    )
+    monkeypatch.delenv("ROOT_PATH")
+
     # Without one, nothing absolute on the instance is written: no Zarr asset, no host address.
     monkeypatch.delenv("GEOSERVICE_BASE_URL")
     catalog_files.write_catalog()
@@ -246,7 +256,9 @@ def test_the_zarr_asset_follows_the_configured_address(data: Path, monkeypatch: 
     assert [provider.get("url") for provider in written["providers"] if "host" in provider["roles"]] == [None]
 
 
-def test_stac_serves_the_files_and_the_data_of_published_datasets_only(data: Path) -> None:
+def test_stac_serves_the_files_and_the_data_of_published_datasets_only(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     feature_services.refresh_feature_collection(
         template={**DISTRICTS, "id": "regions", "name": "Regions"},
         features={"type": "FeatureCollection", "features": [_box("R1")]},
@@ -260,6 +272,15 @@ def test_stac_serves_the_files_and_the_data_of_published_datasets_only(data: Pat
     data_file = next((data / "catalog" / "vectors" / "districts").glob("*.parquet"))
     ranged = client.get(f"/stac/vectors/districts/{data_file.name}", headers={"Range": "bytes=0-3"})
     assert ranged.status_code == 206 and ranged.content == b"PAR1"
+    # A reader of a store sends a request per chunk; the records are read again only once they change.
+    lookups: list[None] = []
+    lookup = ingestion_services.stac_eligible_artifacts_by_dataset
+    monkeypatch.setattr(
+        ingestion_services, "stac_eligible_artifacts_by_dataset", lambda: lookups.append(None) or lookup()
+    )
+    for _ in range(3):
+        assert client.get(f"/stac/vectors/districts/{data_file.name}").status_code == 200
+    assert lookups == []
 
     unpublished = next((data / "catalog" / "vectors" / "regions").glob("*.parquet"))
     assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 404
@@ -278,3 +299,28 @@ def test_the_client_lists_every_kind_through_the_relative_links(data: Path) -> N
         "vectors/districts",
         "tables/rain_districts",
     ]
+
+
+def test_a_collection_that_cannot_be_described_leaves_no_link_to_it(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The only vector collection fails, so no vector sub-catalog is written, and nothing links to either."""
+    from open_geo_service.stac import documents
+
+    describe = documents.collection_readme
+
+    def failing(kind: layout.Kind, dataset_id: str, request: Any) -> str:
+        if dataset_id == "districts":
+            raise ValueError("an unreadable footer")
+        return describe(kind, dataset_id, request)
+
+    monkeypatch.setattr(documents, "collection_readme", failing)
+    catalog_files.write_catalog()
+    catalog = data / "catalog"
+
+    assert not (catalog / "vectors" / "catalog.json").exists()
+    assert not (catalog / "vectors" / "districts" / "collection.json").exists()
+    for path in catalog.rglob("*.md"):
+        assert "vectors/districts/" not in path.read_text(), path
+        assert "vectors/catalog.json" not in path.read_text(), path
+    assert [finding for finding in _rashid(catalog) if finding["severity"] == "error"] == []

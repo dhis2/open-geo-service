@@ -1205,7 +1205,7 @@ def _build_collection_with_xstac(
 ) -> dict[str, Any]:
     # Keyed on period_type as well as the artifact: correcting a template's cadence
     # changes the payload (an irregular one gains `values`) without producing a new artifact.
-    cache_key = f"{artifact.artifact_id}:{period_type}"
+    cache_key = f"{_written(artifact)}:{period_type}"
     cached_payload = _xstac_collection_cache.get(cache_key)
     if cached_payload is not None:
         return deepcopy(cached_payload)
@@ -1302,7 +1302,7 @@ def _zarr_media_type(artifact: ArtifactRecord) -> str:
     *template*, which is rebuilt on every request — so it sits outside the xstac payload cache.
     See :func:`_cache_by_artifact` for why the key is the artifact id.
     """
-    cached = _zarr_media_type_cache.get(artifact.artifact_id)
+    cached = _zarr_media_type_cache.get(_written(artifact))
     if cached is not None:
         return cached
     try:
@@ -1310,17 +1310,25 @@ def _zarr_media_type(artifact: ArtifactRecord) -> str:
     except HTTPException:
         return ZARR_V3_MEDIA_TYPE
     media_type = zarr_media_type(store_path, icechunk=artifact.format == ArtifactFormat.ICECHUNK)
-    _cache_by_artifact(_zarr_media_type_cache, artifact.artifact_id, media_type)
+    _cache_by_artifact(_zarr_media_type_cache, _written(artifact), media_type)
     return media_type
 
 
-def _cache_by_artifact(cache: dict[str, _V], artifact_id: str, value: _V) -> None:
-    """Store *value* under *artifact_id*, evicting the oldest entry past the size bound.
+def _written(artifact: ArtifactRecord) -> str:
+    """What a cache of one store's metadata is keyed on: the record and when it was written.
 
-    Both per-artifact caches here are keyed on the artifact id rather than the store path: a
-    re-ingest reuses the path, so a path-keyed entry would go stale, while every write produces a
-    new artifact record. Refreshing an existing key keeps its insertion position, so a
-    frequently-rebuilt collection is not treated as newest and does not evict others.
+    Not the store path, which a re-ingest reuses, and not the artifact id alone, which an
+    overwrite or a store replacement keeps (`_upsert_artifact_record`) while the store changes.
+    Each write gives the record a new `created_at`.
+    """
+    return f"{artifact.artifact_id}@{artifact.created_at.isoformat()}"
+
+
+def _cache_by_artifact(cache: dict[str, _V], artifact_id: str, value: _V) -> None:
+    """Store *value* under *artifact_id* (see `_written`), evicting the oldest entry past the size bound.
+
+    Refreshing an existing key keeps its insertion position, so a frequently-rebuilt collection
+    is not treated as newest and does not evict others.
     """
     if artifact_id in cache:
         cache[artifact_id] = value

@@ -24,10 +24,11 @@ from starlette.requests import Request
 
 from open_geo_service import writer_lease
 from open_geo_service.features import tiles
+from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord
 from open_geo_service.shared import layout
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
-from open_geo_service.shared.urls import absolute_base, configured_base
+from open_geo_service.shared.urls import absolute_base, configured_base, configured_root_path
 from open_geo_service.stac import documents, portolan
 from open_geo_service.stac import services as stac_services
 
@@ -69,6 +70,7 @@ def catalog_documents() -> dict[str, portolan.Document]:
     published = stac_services._eligible_artifacts_by_dataset()
     built: dict[str, portolan.Document] = {}
     files: dict[str, str] = {}
+    described: dict[str, ArtifactRecord] = {}
     for dataset_id, artifact in published.items():
         kind = layout.kind_of(artifact.format)
         folder = layout.dataset_key(kind, dataset_id)
@@ -81,7 +83,9 @@ def catalog_documents() -> dict[str, portolan.Document]:
             continue
         built |= {f"{folder}/collection.json": collection, f"{folder}/README.md": readme, f"{folder}/AGENTS.md": agents}
         files |= _data_files(dataset_id, artifact)
-    for kind in stac_services.published_kinds(published):
+        described[dataset_id] = artifact
+    # Only kinds with a collection written, so no sub-catalog is empty.
+    for kind in stac_services.published_kinds(described):
         built |= {
             f"{kind.value}/catalog.json": stac_services.build_subcatalog(kind, request),
             f"{kind.value}/README.md": documents.subcatalog_readme(kind, request),
@@ -94,7 +98,7 @@ def catalog_documents() -> dict[str, portolan.Document]:
     }
     written = set(built)
     return {
-        key: _localized_markdown(document, key, base, files)
+        key: _localized_markdown(document, key, base, files, written)
         if isinstance(document, str)
         else _localized_json(dict(document), key, base, files, written)
         for key, document in built.items()
@@ -102,14 +106,18 @@ def catalog_documents() -> dict[str, portolan.Document]:
 
 
 def _catalog_request() -> Request:
-    """A request for the instance's public address, or for a placeholder host when none is configured."""
+    """A request for the instance's public address, or for a placeholder host when none is configured.
+
+    Under the configured `ROOT_PATH`, as uvicorn serves the app, so an origin-only address gains
+    the same prefix a request-built URL has.
+    """
     return Request(
         {
             "type": "http",
             "scheme": "https",
             "server": (_PLACEHOLDER_HOST, 443),
             "path": "/",
-            "root_path": "",
+            "root_path": configured_root_path(),
             "query_string": b"",
             "headers": [(b"host", _PLACEHOLDER_HOST.encode())],
         }
@@ -212,8 +220,11 @@ def _provider(provider: dict[str, Any], localize: Callable[[str], str | None]) -
     return {**provider, "url": localized}
 
 
-def _localized_markdown(text: str, key: str, base: str, files: dict[str, str]) -> str:
-    """*text* with every URL on the instance localized, and the instance's own address left out without one."""
+def _localized_markdown(text: str, key: str, base: str, files: dict[str, str], written: set[str]) -> str:
+    """*text* with every URL on the instance localized, and the instance's own address left out without one.
+
+    A line linking a document that is not written, a collection left out, is dropped, as its JSON link is.
+    """
     localize = _localizer(key, base, files)
 
     def replace(match: re.Match[str]) -> str:
@@ -223,7 +234,15 @@ def _localized_markdown(text: str, key: str, base: str, files: dict[str, str]) -
         shown = localized if localized is not None else url.removeprefix(base) or "/"
         return shown + match.group(0)[len(url) :]
 
-    return re.sub(re.escape(base) + r"(?:/[^\s)\"'`<>]*)?", replace, text)
+    localized = re.sub(re.escape(base) + r"(?:/[^\s)\"'`<>]*)?", replace, text)
+    here = posixpath.dirname(key)
+
+    def missing(target: str) -> bool:
+        in_folder = target.endswith(".json") and "://" not in target
+        return in_folder and posixpath.normpath(posixpath.join(here, target)) not in written
+
+    lines = localized.split("\n")
+    return "\n".join(line for line in lines if not any(missing(t) for t in re.findall(r"\]\(([^)\s]+)\)", line)))
 
 
 _MEDIA_TYPES = {
@@ -255,5 +274,5 @@ def served_file(path: str) -> tuple[Path, str]:
 def _published_folder(parts: tuple[str, ...]) -> bool:
     if len(parts) < 3:
         return False
-    artifact = stac_services._eligible_artifacts_by_dataset().get(parts[1])
+    artifact = ingestion_services.stac_eligible_artifacts_cached().get(parts[1])
     return artifact is not None and layout.kind_of(artifact.format).value == parts[0]
