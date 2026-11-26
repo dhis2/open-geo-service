@@ -1285,7 +1285,7 @@ def _build_collection_with_xstac(
         extent_bbox = _wgs84_extent_from_store(ds, store_crs or "EPSG:4326", x_dimension, y_dimension)
         if extent_bbox is not None:
             payload.setdefault("extent", {}).setdefault("spatial", {})["bbox"] = [extent_bbox]
-        if time_dimension is not None and period_cadence(period_type) is Cadence.IRREGULAR:
+        if time_dimension is not None and _lists_temporal_values(payload, time_dimension, period_type):
             _add_temporal_values(payload, ds, time_dimension)
         payload.setdefault("assets", {}).setdefault("zarr", {})["bands"] = _store_bands(ds)
         _cache_xstac_collection_payload(cache_key, payload)
@@ -1430,6 +1430,19 @@ def _override_time_step(collection: dict[str, Any], step: str | None, *, cadence
             return
 
 
+def _lists_temporal_values(collection: dict[str, Any], time_dimension: str, period_type: Any) -> bool:
+    """Whether the temporal dimension will be written without a step, so it must list its values.
+
+    An irregular cadence never has one. An unknown one, such as an openEO result saved without a
+    period type, keeps the step xstac inferred, which it leaves out for unevenly spaced timestamps.
+    """
+    cadence = period_cadence(period_type)
+    dim = (collection.get("cube:dimensions") or {}).get(time_dimension)
+    return cadence is Cadence.IRREGULAR or (
+        cadence is Cadence.UNKNOWN and isinstance(dim, dict) and not dim.get("step")
+    )
+
+
 def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimension: str) -> None:
     """List the temporal dimension's actual timestamps as ``values``.
 
@@ -1439,7 +1452,7 @@ def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimens
     with a single position and no slider. This mirrors ``_build_ordinal_dimensions``,
     which lists values for the same reason on a day-of-year axis.
 
-    Only emitted for irregular cadences. A regular one is fully described by extent plus
+    Only emitted when there is no step (`_lists_temporal_values`). A regular one is fully described by extent plus
     duration, and listing every timestamp would add one ISO string per period to a cached
     response for no gain — thousands of entries for a multi-year daily store.
     """

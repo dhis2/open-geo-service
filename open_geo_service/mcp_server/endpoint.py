@@ -50,6 +50,9 @@ class McpEndpoint:
             json_response=True,
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
+        # The server keeps the manager the call above created. Nothing is awaited in between, so
+        # a concurrent request cannot replace it first. Both calls are mcp 2.x API; check them
+        # again when upgrading mcp.
         manager = server.session_manager
         token = current_scope.set(scope)
         try:

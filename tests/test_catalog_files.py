@@ -421,3 +421,42 @@ def test_a_collection_that_cannot_be_described_leaves_no_link_to_it(
         assert "vectors/districts/" not in path.read_text(), path
         assert "vectors/catalog.json" not in path.read_text(), path
     assert [finding for finding in _rashid(catalog) if finding["severity"] == "error"] == []
+
+
+def test_a_raster_without_a_step_lists_its_timestamps(data: Path) -> None:
+    """An openEO result saved without a period type, on uneven dates: xstac infers no step, so
+    the collection lists the dates, which a client needs to step through them or count them."""
+    days = pd.DatetimeIndex(["2026-01-01", "2026-01-03", "2026-02-11"])
+    cube = xr.Dataset(
+        {"precip": (("t", "y", "x"), np.ones((3, 2, 2), dtype="float32"))},
+        coords={"t": days, "y": [1.5, 0.5], "x": [10.5, 11.5]},
+    )
+    store = layout.raster_store("events")
+    downloader.write_to_icechunk_store(cube, store, commit_message="test")
+    ingestion_services.register_artifact_record(
+        ArtifactRecord(
+            artifact_id="e1",
+            dataset_id="events",
+            dataset_name="Events",
+            variable="precip",
+            format=ArtifactFormat.ICECHUNK,
+            path=str(store),
+            asset_paths=[str(store)],
+            variables=["precip"],
+            request_scope=ArtifactRequestScope(),
+            coverage=ArtifactCoverage(
+                temporal=CoverageTemporal(start="2026-01-01", end="2026-02-11"),
+                spatial=CoverageSpatial(xmin=10.0, ymin=0.0, xmax=12.0, ymax=2.0),
+            ),
+            created_at=datetime(2026, 2, 11, tzinfo=UTC),
+            publication=ArtifactPublication(status=PublicationStatus.PUBLISHED, collection_id="events"),
+        ),
+        publish=True,
+    )
+
+    time = json.loads((data / "catalog" / "rasters" / "events" / "collection.json").read_text())["cube:dimensions"]["t"]
+    assert not time.get("step")
+    assert [value[:10] for value in time["values"]] == ["2026-01-01", "2026-01-03", "2026-02-11"]
+    # A regular cadence is described by its step, without listing every date.
+    rain = json.loads((data / "catalog" / "rasters" / "rain" / "collection.json").read_text())["cube:dimensions"]
+    assert "values" not in next(dim for dim in rain.values() if dim.get("type") == "temporal")

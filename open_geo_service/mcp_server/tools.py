@@ -414,6 +414,19 @@ def _cell_centre(collection: dict[str, Any], lon: float, lat: float) -> tuple[fl
     return float(centre_lon), float(centre_lat)
 
 
+def _check_inside(collection: dict[str, Any], lon: float, lat: float) -> None:
+    """Refuse a point outside the dataset's extent, which has no cell to read."""
+    bboxes: list[list[float]] = ((collection.get("extent") or {}).get("spatial") or {}).get("bbox") or []
+    if not bboxes:
+        return
+    west, south, east, north = bboxes[0][:4]
+    if not (west <= lon <= east and south <= lat <= north):
+        raise ToolError(
+            f"({lon}, {lat}) is outside {collection.get('title') or 'this dataset'}, which covers "
+            f"longitude {west:g} to {east:g} and latitude {south:g} to {north:g}."
+        )
+
+
 def _instant(text: str | None) -> pd.Timestamp | None:
     if not text:
         return None
@@ -563,6 +576,7 @@ def build_server() -> MCPServer:
             collection = await _raster(client, dataset_id)
             variable, unit = _raster_variable(collection)
             _check_size(_period_count(collection, start, end))
+            _check_inside(collection, lon, lat)
             centre_lon, centre_lat = _cell_centre(collection, lon, lat)
             e = _POINT_HALF_SIDE
             west, south, east, north = centre_lon - e, centre_lat - e, centre_lon + e, centre_lat + e

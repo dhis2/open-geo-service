@@ -37,6 +37,7 @@ _RAIN_COLLECTION = {
     "id": "rasters/rain",
     "title": "Rain",
     "description": "Synthetic rain.",
+    "extent": {"spatial": {"bbox": [[0.0, 0.0, 4.0, 4.0]]}},
     "assets": {"zarr": {"href": "http://testserver/zarr/rain"}},
     "renders": {"default": {"ogs:variable": "tp"}},
     "cube:variables": {"tp": {"unit": "mm/d"}},
@@ -291,6 +292,9 @@ def test_an_unknown_dataset_is_a_tool_error_not_a_failure(mcp: TestClient, rain:
 
     assert "list_datasets" in result["error"]
     assert "No dataset 'regions/data.parquet'" in path["error"]
+    # A point off the grid is refused before anything runs, with the extent it could ask for.
+    outside = _call(mcp, "get_timeseries", dataset_id="rain", lon=10.0, lat=0.5)
+    assert "longitude 0 to 4 and latitude 0 to 4" in outside["error"]
 
 
 def test_links_carry_the_mount_prefix(
