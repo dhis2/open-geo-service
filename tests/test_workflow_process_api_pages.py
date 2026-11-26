@@ -190,7 +190,8 @@ def test_processes_are_tagged_with_their_origin() -> None:
 
     assert processes["load_collection"]["origin"] == "core"
     assert processes["add"]["origin"] == "core"
-    assert processes["spi"]["origin"] == "geoservice"
+    assert processes["amount2rate"]["origin"] == "geoservice"
+    assert processes["spi"]["origin"] == "xclim"
     assert {"xclim", "earthkit"} <= {p["origin"] for p in processes.values()}
     # OGS first, openEO core last, so the default view leads with what is specific to OGS.
     origins = [p["origin"] for p in processes.values()]

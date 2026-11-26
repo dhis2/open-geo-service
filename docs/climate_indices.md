@@ -33,9 +33,9 @@ Or call `GET /processes` directly and search by keyword. In the [openEO Web Edit
 
 ## Precipitation totals and rates
 
-Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. [SPI](#standardized-precipitation-index-spi) takes them as they are. Two things need a **rate** instead:
+Open Geo Service stores precipitation as **totals**: `mm` per day for daily datasets and `mm` per month for monthly ones. Two things need a **rate** instead:
 
-- **xclim's other precipitation indicators** (SPEI's `water_budget`, dry and wet spells and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
+- **xclim's precipitation indicators** ([SPI](#standardized-precipitation-index-spi), SPEI's `water_budget`, dry and wet spells and the rest), which refuse a total with *"Data units mm are not compatible with requested [precipitation]"*.
 - **Comparisons across periods of different length.** January's total covers 31 days and February's 28 or 29, so a February total looks drier than the same daily rainfall in January. As a rate in mm/d, months compare directly with each other and with daily data.
 
 Convert in the process graph with `amount2rate`, between `load_collection` and whatever needs the rate. In the openEO Python client:
@@ -76,13 +76,13 @@ Totals are what users expect, what reporting products and the Climate App use, a
 
 - **At least 3 regular time steps.** The length of a step is inferred from the time axis, which needs at least 3 steps with none missing. A shorter or gappy cube is refused; widen `temporal_extent`.
 - **Climatologies are not converted.** A normal has a `dayofyear` or `month` axis rather than dates, so it is refused. A rate normal is about the monthly normal total divided by the days in the month, with February counted as 28.25 days as in WMO-No. 1203.
-- **SPI from a rate** over several months (`window` > 1) averages the monthly rates rather than summing the totals, so each month counts equally whatever its length. Pass the stored totals to `spi` instead to get the accumulation SPI.
+- **SPI over several months** (`window` > 1) averages the monthly rates rather than summing the totals, so each month counts equally whatever its length. See [SPI](#standardized-precipitation-index-spi).
 
 ---
 
 ## Standardized Precipitation Index (SPI)
 
-SPI is the primary drought monitoring index. It takes the stored precipitation totals directly, daily or monthly: they are summed to monthly totals, and `window` accumulates those, so SPI-3 is fitted to 3-month totals as [WMO-No. 1090](https://uncclearn.org/resources/library/standardized-precipitation-index-user-guide) defines it. Load whole months, since a partial month at either end sums to too little. A rate, such as the output of `amount2rate`, is accepted too.
+SPI is the primary drought monitoring index. The `spi` process is xclim's [`standardized_precipitation_index`](https://xclim.readthedocs.io/en/stable/indicators.html) as xclim ships it. It takes a precipitation rate, so convert the stored totals with [`amount2rate`](#precipitation-totals-and-rates) first: `load_collection -> amount2rate -> spi`. Daily or monthly data both work; `freq="MS"` gives monthly SPI.
 
 The `window` parameter selects the accumulation timescale:
 
@@ -92,6 +92,8 @@ The `window` parameter selects the accumulation timescale:
 | `spi(pr, window=3)` | SPI-3 — seasonal drought |
 | `spi(pr, window=6)` | SPI-6 — medium-term drought |
 | `spi(pr, window=12)` | SPI-12 — long-term / groundwater recharge |
+
+xclim averages the monthly rates over the window rather than summing monthly totals, so each month counts equally whatever its length. SPI-3 is therefore close to, but not exactly, SPI of 3-month totals as [WMO-No. 1090](https://uncclearn.org/resources/library/standardized-precipitation-index-user-guide) defines it.
 
 ### Python client
 
@@ -105,10 +107,11 @@ precip = conn.load_collection(
     temporal_extent=["2000-01-01", "2023-12-31"],
 )
 
-spi3 = precip.process(
+rate = precip.process("amount2rate", arguments={"data": precip})
+spi3 = rate.process(
     "spi",
     arguments={
-        "pr": precip,
+        "pr": rate,
         "window": 3,
         "freq": "MS",
         "cal_start": "2000-01-01",
@@ -132,10 +135,14 @@ job.start_and_wait()
         "temporal_extent": ["2000-01-01", "2023-12-31"]
       }
     },
+    "rate": {
+      "process_id": "amount2rate",
+      "arguments": { "data": { "from_node": "load" } }
+    },
     "spi": {
       "process_id": "spi",
       "arguments": {
-        "pr": { "from_node": "load" },
+        "pr": { "from_node": "rate" },
         "window": 3,
         "freq": "MS",
         "cal_start": "2000-01-01",
@@ -151,13 +158,18 @@ job.start_and_wait()
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `pr` | datacube | — | Precipitation as stored, daily or monthly totals in mm, or a rate such as mm/d |
+| `pr` | datacube | — | Precipitation rate, such as the mm/d output of `amount2rate` |
 | `window` | integer | `1` | Accumulation window in months (1=SPI-1, 3=SPI-3, 6=SPI-6) |
 | `cal_start` | string | start of record | Calibration period start (YYYY-MM-DD) |
 | `cal_end` | string | end of record | Calibration period end (YYYY-MM-DD) |
-| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input. Totals need `"MS"` |
+| `freq` | string | `"MS"` | Output frequency — `"MS"` = monthly, `None` = pre-aggregated input |
+| `dist`, `method`, `fitkwargs` | | xclim's | The fitted distribution and how it is fitted |
 
 SPI values are standardised: `0` = climatological median, `±1` = moderate anomaly, `±2` = extreme anomaly.
+
+By default xclim fits a two-parameter gamma distribution (`loc` fixed at 0) by maximum likelihood, and gives windows without rain their own probability rather than fitting them. Pass `dist`, `method` and `fitkwargs` to fit otherwise, for example `method: "APP"` with `fitkwargs: {"floc": 0}` for L-moments; `GET /processes` lists the options. When both `dist` and `fitkwargs` are left out, xclim logs a warning that this default changed in xclim 1.0.1; `dist: "gamma"` with `fitkwargs: {"floc": 0}` gives the same fit without it.
+
+The result carries the fit's counts of dry and valid values per month, `number_of_zeros` and `number_of_notnull`, as extra coordinates. They are stored with a published result, which makes its store larger, and stop a result too large for a flat store (over 1024×1024 cells) from being published ([CLIM-2041](https://dhis2.atlassian.net/browse/CLIM-2041)).
 
 ---
 
