@@ -378,6 +378,10 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
     assert [cast(zarr.Array, root[name]).chunks for name in (FETCHED_AT, "t")] == [(3,), (3,)]
 
+    # Fetched after maturity, no period is due again: each was fetched at most twice.
+    assert _sync("2026-01-03").status == "up_to_date"
+    assert plugin.fetched == ["2026-01-01", "2026-01-02", "2026-01-01", "2026-01-02", "2026-01-03"]
+
     # A daily sync once several recent days are preliminary (CLIM-2029): the oldest of them is
     # replaced and a new day added, and a pipeline runs those two alone, not the days in between.
     clock["now"] = datetime(2026, 1, 21, 6, tzinfo=UTC)
@@ -392,10 +396,6 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     assert (response.sync_detail.refresh_start, response.sync_detail.refresh_end) == ("2026-01-11", "2026-01-11")
     assert [p.period for p in response.dataset.provisional_periods] == ["2026-01-12", "2026-01-13", "2026-01-14"]
     assert _pipeline_runs(response) == [[("2026-01-11", "2026-01-11"), ("2026-01-14", "2026-01-14")]]
-
-    # Fetched after maturity, no period is due again: each was fetched at most twice.
-    assert _sync("2026-01-03").status == "up_to_date"
-    assert plugin.fetched == ["2026-01-01", "2026-01-02", "2026-01-01", "2026-01-02", "2026-01-03"]
 
 
 def test_a_store_written_before_fetched_at_gets_it_on_the_next_append(

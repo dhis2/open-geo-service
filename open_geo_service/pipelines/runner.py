@@ -1,8 +1,9 @@
 """The one way a pipeline runs: `start_runs`, whoever asks.
 
 An operator's run, a retry and each range a source dataset update changed all resolve to a
-`RunContext` with an explicit interval and go through `start_runs` (`run_pipeline` for one). It checks the pipeline may run, stores the
-run with its deterministic job id *before* the job exists, then submits the workflow as an
+`RunContext` with an explicit interval and go through `start_runs` (`run_pipeline` for one).
+It checks the pipeline may run, stores the run with its deterministic job id *before* the job
+exists, then submits the workflow as an
 openEO batch job. When the job finishes, `on_job_finished` hands the saved result to the
 export delivery framework, the same path as ``POST /exports/{id}``, under the run's
 idempotency key.
