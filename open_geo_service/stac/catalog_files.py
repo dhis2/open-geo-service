@@ -96,12 +96,35 @@ class _CatalogSink:
         return [key.removeprefix(self._prefix) for key in keys]
 
 
+# Set while the files lag the records after a failed rewrite; the writer retries until one succeeds.
+_behind = threading.Event()
+
+
 def write_catalog_after_change() -> None:
-    """`write_catalog`, logging rather than raising: the records it follows are already written."""
+    """`write_catalog`, logging rather than raising: the records it follows are already written.
+
+    A failure leaves the catalog behind the records until a rewrite succeeds: the next records
+    write, or the writer's retry (`retry_catalog_if_behind`). Until then no replaced version of a
+    vector or table dataset is removed, as the catalog may still advertise it.
+    """
     try:
         write_catalog()
     except Exception:
-        logger.exception("Could not rewrite the STAC catalog in the data folder; /stac is stale until the next write")
+        _behind.set()
+        logger.exception("Could not rewrite the STAC catalog in the data folder; retrying")
+    else:
+        _behind.clear()
+
+
+def catalog_behind() -> bool:
+    """Whether the last rewrite of the catalog failed, so its files may name versions the records replaced."""
+    return _behind.is_set()
+
+
+def retry_catalog_if_behind() -> None:
+    """Rewrite the catalog if the last rewrite failed. Run periodically by the writer."""
+    if _behind.is_set():
+        write_catalog_after_change()
 
 
 def catalog_documents() -> dict[str, portolan.Document]:

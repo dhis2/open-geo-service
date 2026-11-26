@@ -242,8 +242,14 @@ the data again into the new layout; a read-only one logs a warning. Move the dat
    writer writes the catalog in `catalog/` at startup, and a read-only server serves only what
    is there.
 
+It also gives each raster store written before the `ingest` branch existed that branch, and
+makes `main` its published version; until then no server reads the store. If a store fails, it
+says which: run it again, and it continues where it stopped.
+
 It refuses to run while a dataset's id breaks the id rule (lowercase letters, digits, `_` and
 `-`, starting with a letter), and names each one: delete it, or ingest it again under a valid id.
+It refuses when `catalog/`, or a folder in it, is on another disk than the data folder, as it
+moves by renaming: run it with `catalog/` on the same disk, then move `catalog/` or its folders.
 It also refuses on an instance still on the layout before `rasters/` and `vectors/` (with
 `downloads/` or `features/` in the data folder, or `datasets/` in `plugins_dir`): run
 `migrate_layout` of a release from before November 2026 first. Running it again once done

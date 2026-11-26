@@ -62,6 +62,25 @@ data/
   records, never the folder, and `/stac` serves no file in the folder of a dataset not
   published (see below).
 
+## Records and the catalog
+
+The dataset records decide what GeoService advertises. The STAC catalog in `catalog/` is a view
+of them that can be rebuilt from them at any time. The records are kept behind their own
+interface in `ingestions/services.py`, separate from the file storage interface, so they can
+move from `artifacts/records.json` to a database without changing the catalog layout or the
+data formats. Today the file is written through `storage.py` like any other, but it stays on the
+instance's disk when the datasets move to object storage. Code reads the records through that
+interface, not the file; only `migrate_layout` edits the file itself.
+
+- **For an Icechunk raster, `main` moves first and the record follows.** Publishing, a sync of a
+  published store and a rollback move `main`, then write the record. After a crash between the
+  two, `main` wins: the writer brings the record into step with it at startup. A records
+  backend keeps this order.
+- **The catalog follows the records.** Every records write rewrites the catalog before it
+  returns. If the rewrite fails, the records stay written and the catalog lags them: the
+  writer retries every minute, with or without the scheduler, and removes no replaced vector or
+  table file until a rewrite succeeds, so every file the catalog links stays.
+
 ## The catalog
 
 The writer keeps a STAC catalog of the published datasets in `catalog/`, in the shape of a
@@ -75,7 +94,7 @@ server writes none of it, so after an upgrade the writer starts first.
   and data, but no `collection.json`, and no catalog links to it.
 - **Every link stays inside `catalog/`.** Links between documents are relative, and so are the
   data assets: the Icechunk store, the GeoParquet and PMTiles files, the Parquet file, the
-  thumbnail. A copy of `catalog/`, served by any static host, is a complete catalog.
+  thumbnail, so the catalog can be read from any host without GeoService.
 - **What needs the public address is written only with it.** A raster's `zarr` asset, which
   GeoService generates on request, and the host provider's address are written only when
   `GEOSERVICE_BASE_URL` is set. So is a feature collection's MapLibre style, a file in its
@@ -84,17 +103,25 @@ server writes none of it, so after an upgrade the writer starts first.
   Portolan asks for the host's address and for a style beside PMTiles, so a catalog meant to be
   published needs the setting.
 
-`/stac` serves `catalog/` as a static host of it would: the documents and the data files beside
-them. The one difference is a dataset written but not yet published, such as an openEO result
-saved with `publish: false`: `/stac` answers 404 for every file in a folder without a
-`collection.json`, as `/zarr` and `/icechunk` do for an unpublished store, so its data and a
-store's write branch stay on the instance until it is published. A copy of `catalog/` holds those folders too, so publish a copy only when everything in
-it may be read. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way, and
-openEO's `/collections` are still built on request, with absolute links.
+`catalog/` is the instance's live working tree, not a published copy. Beside the published
+datasets it holds those written but not yet published, such as an openEO result saved with
+`publish: false`, and every Icechunk store's write branch, which holds what a sync has written
+before it is published. `/stac` serves `catalog/` as a static host of it would, with one
+difference: it answers 404 for every file in a folder without a `collection.json`, as `/zarr`
+and `/icechunk` do for an unpublished store. A published store is served whole, its write branch
+included, as Icechunk readers open the repository rather than one branch.
+
+So do not serve `catalog/` itself from a static host or a public bucket: it would serve the
+unpublished datasets too. A public copy needs an export of the published datasets, which
+GeoService does not have yet. The documents of an instance that requires sign-in also name its
+sign-in schemes (`auth:schemes`), which a copy hosted elsewhere would advertise. The dataset
+pages and `/datasets/{id}` give the `/zarr` URL either way, and openEO's `/collections` are
+still built on request, with absolute links.
 
 ## Moving an instance to this layout
 
 An instance written by an earlier version keeps its datasets in `rasters/`, `vectors/`,
-`tables/` and `thumbnails/` at the top of the data folder. A writable server refuses to start
-until they are moved, and a read-only one logs a warning. Move them with `migrate_layout`;
-nothing is downloaded again. See [Upgrading](instance_guide.md#moving-to-a-new-data-folder-layout).
+`tables/` and `thumbnails/` at the top of the data folder, and its raster stores without the
+`ingest` write branch: their `main` is the newest write, not the published version. A writable
+server refuses to start until they are moved, and a read-only one logs a warning and reads none
+of those stores. Move them with `migrate_layout`; nothing is downloaded again. See [Upgrading](instance_guide.md#moving-to-a-new-data-folder-layout).

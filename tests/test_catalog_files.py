@@ -39,7 +39,7 @@ from open_geo_service.ingestions.schemas import (
     PublicationStatus,
 )
 from open_geo_service.main import app
-from open_geo_service.shared import layout
+from open_geo_service.shared import layout, versions
 from open_geo_service.stac import catalog_files
 from open_geo_service.stac import services as stac_services
 from open_geo_service.tables import store as table_store
@@ -241,6 +241,43 @@ def test_a_write_is_in_the_files_before_it_returns_and_an_unpublished_folder_has
     )
     data_href = _documents(catalog)["vectors/regions/collection.json"]["assets"]["data"]["href"]
     assert data_href == f"./{Path(str(second.path)).name}", "a refresh rewrites the collection"
+
+
+def test_a_failed_rewrite_is_retried_and_the_files_it_links_are_kept_until_then(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    client = TestClient(app)  # not the fixture that writes the catalog before each request
+    collection = data / "catalog" / "tables" / "rain_districts" / "collection.json"
+
+    def linked_file() -> str:
+        return json.loads(collection.read_text())["assets"]["data"]["href"].removeprefix("./")
+
+    def write(value: float) -> None:
+        table_store.write_rows(
+            dataset_id="rain_districts",
+            collection_id="districts",
+            rows=[{"feature_id": "D1", "period_start": "2026-01-01", "value": value, "reducer": "mean"}],
+        )
+
+    def disk_full() -> Any:
+        raise OSError("the disk is full")
+
+    linked = linked_file()
+    with monkeypatch.context() as failing:
+        failing.setattr(catalog_files, "catalog_documents", disk_full)
+        write(2.0)
+        write(3.0)
+        catalog_files.retry_catalog_if_behind()
+
+    # Two updates replaced the file the catalog links, which is still served.
+    assert linked_file() == linked
+    assert client.get(f"/stac/tables/rain_districts/{linked}").status_code == 200
+    catalog_files.retry_catalog_if_behind()
+    assert not catalog_files.catalog_behind()
+    assert linked_file() != linked
+    write(4.0)  # removes the files replaced while the catalog lagged
+    assert not (collection.parent / linked).exists()
 
 
 def test_the_zarr_asset_and_the_style_follow_the_configured_address(

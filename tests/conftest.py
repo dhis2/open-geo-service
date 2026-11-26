@@ -201,6 +201,13 @@ def _no_catalog_files_on_record_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ingestion_services, "rewrite_catalog", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _catalog_caught_up() -> Generator[None]:
+    """Forget a failed catalog rewrite, which would keep later tests' replaced files."""
+    yield
+    catalog_files._behind.clear()
+
+
 @pytest.fixture
 def restart_writer() -> Generator[Callable[[], None]]:
     """Start the app and stop it, as a writer that restarts does, for what it does at startup.

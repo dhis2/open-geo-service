@@ -55,14 +55,67 @@ def seal_version(store_path: Path, branch: str = WRITE_BRANCH) -> None:
 
 
 def read_snapshot(repo: Any) -> str:
-    """The snapshot readers see: the tip of `main`, or of the write branch for a store not published yet."""
-    return published_snapshot(repo) or str(repo.lookup_branch(WRITE_BRANCH))
+    """The snapshot readers see: the tip of `main`, or of the write branch for a store not published yet.
+
+    Raises icechunk's RefNotFoundError for a store without the write branch: one written before it
+    existed, whose `main` is not the published version until `migrate_layout` moves it.
+    """
+    write_tip = str(repo.lookup_branch(WRITE_BRANCH))
+    return published_snapshot(repo) or write_tip
 
 
 def published_snapshot(repo: Any) -> str | None:
     """The tip of `main`, or None while it is still the repository's initial, empty snapshot."""
     tip = next(iter(repo.ancestry(branch=PUBLISHED_BRANCH)))
     return None if tip.parent_id is None else str(tip.id)
+
+
+# The branch readers opened before `main` became the published version.
+_OLD_PUBLISHED_BRANCH = "published"
+# Holds the old write tip while a store is moved to the current layout, so a move that stopped part
+# way is finished by the next one.
+_ADOPTING_BRANCH = "adopting"
+
+
+def needs_adoption(store_path: Path) -> bool:
+    """Whether the store was written before the write branch existed, with data on `main` to move.
+
+    Such a store's `main` is its old write tip, which readers would take for the published version,
+    so it is not read until `migrate_layout` has moved it (`adopt_write_branch`).
+    """
+    repo = open_or_create_repo(store_path)
+    branches = repo.list_branches()
+    return _ADOPTING_BRANCH in branches or (WRITE_BRANCH not in branches and published_snapshot(repo) is not None)
+
+
+def adopt_write_branch(store_path: Path, published: bool) -> bool:
+    """Move a store written before the write branch existed to the current layout; return whether it did.
+
+    Its writers committed to `main`, and its readers opened `published` once it was published.
+    The write branch takes the tip of `main`, and `main` takes the tip of `published`, or goes back
+    to the initial, empty snapshot when the store was never published. A store published before
+    either branch existed (*published* with no `published` branch) keeps `main` where it is, marked
+    complete so a rollback may return to it. The write branch is created last, so a store that has
+    it is done. Also gives a new store the write branch its creation stopped before.
+    """
+    repo = open_or_create_repo(store_path)
+    branches = repo.list_branches()
+    if WRITE_BRANCH in branches and _ADOPTING_BRANCH not in branches:
+        return False
+    if WRITE_BRANCH not in branches:
+        if _ADOPTING_BRANCH not in branches:
+            if published and _OLD_PUBLISHED_BRANCH not in branches:
+                seal_version(store_path, PUBLISHED_BRANCH)
+            repo.create_branch(_ADOPTING_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
+        if _OLD_PUBLISHED_BRANCH in branches:
+            repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
+            repo.delete_branch(_OLD_PUBLISHED_BRANCH)
+        elif not published:
+            *_, initial = repo.ancestry(branch=PUBLISHED_BRANCH)
+            repo.reset_branch(PUBLISHED_BRANCH, initial.id)
+        repo.create_branch(WRITE_BRANCH, repo.lookup_branch(_ADOPTING_BRANCH))
+    repo.delete_branch(_ADOPTING_BRANCH)
+    return True
 
 
 def publish_snapshot(store_path: Path, snapshot_id: str | None = None) -> str | None:

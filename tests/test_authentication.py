@@ -25,6 +25,7 @@ from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import get_openeo_job_service
+from open_geo_service.stac import catalog_files
 from open_geo_service.stac import documents as stac_documents
 from open_geo_service.stac import services as stac_services
 from open_geo_service.stac.services import AUTHENTICATION_EXTENSION
@@ -217,6 +218,7 @@ def test_a_mount_prefix_does_not_hide_a_gated_route(
     auth_on: None, mounted_client_factory: MountedClientFactory, root_path: str
 ) -> None:
     mounted = mounted_client_factory(root_path)
+    catalog_files.write_catalog()  # served from the files, which this client does not write
 
     assert mounted.get("/jobs").status_code == 401
     assert mounted.get("/stac/catalog.json").status_code == 200

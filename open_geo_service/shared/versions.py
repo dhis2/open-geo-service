@@ -39,7 +39,8 @@ def prune_superseded(
     For that, files must become current in the order of their mtimes: *current* is given the time
     now, which also covers a file restored by a rollback, and the files written after *replaced*
     that never became current (a write killed before its record) are removed at once, as no
-    record ever named them. *current*, *replaced* and the newest file are never removed. A file
+    record ever named them. *current*, *replaced* and the newest file are never removed, and no
+    replaced file is while the STAC catalog lags the records, as it may still link one. A file
     that cannot be removed is logged and tried again on the next write.
     """
     removing = remove or storage.remove
@@ -53,6 +54,10 @@ def prune_superseded(
         for path in never_current:
             _remove(path, removing)
         stamped = [(mtime, path) for mtime, path in stamped if path not in never_current]
+    from open_geo_service.stac.catalog_files import catalog_behind
+
+    if catalog_behind():
+        return  # the catalog may still link a replaced file; removed by a write once it has caught up
     now = time.time()
     for (_, older), (written, _) in zip(stamped, stamped[1:], strict=False):
         if older.resolve() not in kept and now - written >= SUPERSEDED_FILE_GRACE_SECONDS:

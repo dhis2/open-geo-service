@@ -25,13 +25,14 @@ zarr = pytest.importorskip("zarr")
 from fastapi import HTTPException  # noqa: E402
 
 from open_geo_service import config as api_config  # noqa: E402
-from open_geo_service import writer_lease  # noqa: E402
+from open_geo_service import migrate_layout, writer_lease  # noqa: E402
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset  # noqa: E402
 from open_geo_service.data_manager.services import downloader  # noqa: E402
 from open_geo_service.ingestions import services, sync_engine  # noqa: E402
 from open_geo_service.ingestions.schemas import PublicationStatus  # noqa: E402
 from open_geo_service.publications.services import managed_dataset_id_for  # noqa: E402
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period  # noqa: E402
+from open_geo_service.streaming import store as streaming_store  # noqa: E402
 from open_geo_service.streaming.store import published_snapshot  # noqa: E402
 
 NY, NX = 101, 75
@@ -239,11 +240,16 @@ def test_main_decides_what_readers_see(store: dict[str, Any], monkeypatch: pytes
     unpublished = _ingest(store, overwrite=False, end=DAYS[1])
     assert _published(store["path"]) is None, "an unpublished raster has nothing on main"
     assert unpublished.publication.status == PublicationStatus.UNPUBLISHED
-    # Written before the write branch existed, its data moves off `main` at startup, even with no
-    # record, as a first ingestion that stopped part way leaves it.
+    # Written before the write branch existed, its data moves off `main` in the migration, even
+    # with no record, as a first ingestion that stopped part way leaves it. Until then no reader
+    # takes `main`, its old write tip, for the published version, and no writer starts.
     _old_layout(store["path"], published=None)
     services._mutate_records(lambda records: records.clear())
-    assert services.reconcile_published_branches() == 1
+    with pytest.raises(icechunk.IcechunkError):
+        _read(store["path"])
+    assert migrate_layout.pending_migration() is not None
+    assert migrate_layout.main([]) == 0
+    assert migrate_layout.pending_migration() is None
     assert _branches(store["path"]) == {"main", "ingest"}
     assert _published(store["path"]) is None
     assert _read(store["path"]) == (2, 1.0)
@@ -301,7 +307,7 @@ def test_a_store_published_before_either_branch_stays_a_rollback_target(store: d
     _ingest(store, overwrite=False, end=DAYS[1], publish=True)
     _repo(store["path"]).writable_session("ingest").commit("not marked complete", allow_empty=True)
     _old_layout(store["path"], published=None)
-    assert services.reconcile_published_branches() == 1
+    assert migrate_layout.main([]) == 0
     served = _published(store["path"])
     assert served == str(_repo(store["path"]).lookup_branch("ingest"))
 
@@ -312,7 +318,7 @@ def test_a_store_published_before_either_branch_stays_a_rollback_target(store: d
 
 
 @pytest.mark.parametrize("was_published", [False, True], ids=["never published", "published"])
-def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_at_the_next_start(
+def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_by_the_next_run(
     store: dict[str, Any], monkeypatch: pytest.MonkeyPatch, was_published: bool
 ) -> None:
     _ingest(store, overwrite=False, end=DAYS[1], publish=was_published)
@@ -334,11 +340,11 @@ def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_at_the_n
             raise Stopped
 
     with monkeypatch.context() as patched:
-        opened = services.open_or_create_repo
-        patched.setattr(services, "open_or_create_repo", lambda path: StopsBeforeMovingMain(opened(path)))
-        services.reconcile_published_branches()  # logged and skipped, as a process killed here leaves it
+        opened = streaming_store.open_or_create_repo
+        patched.setattr(streaming_store, "open_or_create_repo", lambda path: StopsBeforeMovingMain(opened(path)))
+        assert migrate_layout.main([]) == 1  # as a process killed here leaves it
 
-    assert services.reconcile_published_branches() == 1
+    assert migrate_layout.main([]) == 0
     assert _branches(store["path"]) == {"main", "ingest"}
     assert _published(store["path"]) == published, "readers see only what was published"
     assert next(iter(_repo(store["path"]).ancestry(branch="ingest"))).message == "unmarked"
@@ -348,12 +354,13 @@ def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_at_the_n
 
 def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> None:
     # A store from before the write branch, published, with a sync that failed part way on top:
-    # the write branch takes what `main` held, and `main` what `published` held.
+    # the migration gives the write branch what `main` held, and `main` what `published` held.
     record = _ingest(store, overwrite=False, end=DAYS[1], publish=True)
     published = _published(store["path"])
     _repo(store["path"]).writable_session("ingest").commit("unmarked", allow_empty=True)
     _old_layout(store["path"], published=published)
-    assert services.reconcile_published_branches() == 1
+    assert services.reconcile_published_branches() == 0, "left to the migration"
+    assert migrate_layout.main([]) == 0
     assert _branches(store["path"]) == {"main", "ingest"}
     assert _published(store["path"]) == published
     assert next(iter(_repo(store["path"]).ancestry(branch="ingest"))).message == "unmarked"

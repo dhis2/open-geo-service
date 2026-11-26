@@ -90,8 +90,10 @@ from open_geo_service.shared.urls import path_segment as _segment
 from open_geo_service.streaming.orchestrator import run_static_ingest_sync, run_streaming_ingest_sync
 from open_geo_service.streaming.protocol import IngestionPlugin, StaticIngestionPlugin, close_ingestion_plugin
 from open_geo_service.streaming.store import (
+    adopt_write_branch,
     expire_replaced_snapshots,
     is_store_empty,
+    needs_adoption,
     open_or_create_repo,
     publish_snapshot,
     published_snapshot,
@@ -2192,53 +2194,17 @@ def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
     return _mutate_records(mutate)
 
 
-# The branch readers opened before `main` became the published version.
-_OLD_PUBLISHED_BRANCH = "published"
-# Holds the old write tip while a store is moved to the current layout, so a move that stopped part
-# way is finished by the next one.
-_ADOPTING_BRANCH = "adopting"
-
-
-def _adopt_write_branch(store_path: Path, published: bool) -> bool:
-    """Move a store written before the write branch existed to the current layout; return whether it did.
-
-    Its writers committed to `main`, and its readers opened `published` once it was published.
-    The write branch takes the tip of `main`, and `main` takes the tip of `published`, or goes back
-    to the initial, empty snapshot when the store was never published. A store published before
-    either branch existed (*published* with no `published` branch) keeps `main` where it is, marked
-    complete so a rollback may return to it. The write branch is created last, so a store that has
-    it is done.
-    """
-    repo = open_or_create_repo(store_path)
-    branches = repo.list_branches()
-    if WRITE_BRANCH in branches and _ADOPTING_BRANCH not in branches:
-        return False
-    if WRITE_BRANCH not in branches:
-        if _ADOPTING_BRANCH not in branches:
-            if published and _OLD_PUBLISHED_BRANCH not in branches:
-                seal_version(store_path, PUBLISHED_BRANCH)
-            repo.create_branch(_ADOPTING_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
-        if _OLD_PUBLISHED_BRANCH in branches:
-            repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
-            repo.delete_branch(_OLD_PUBLISHED_BRANCH)
-        elif not published:
-            *_, initial = repo.ancestry(branch=PUBLISHED_BRANCH)
-            repo.reset_branch(PUBLISHED_BRANCH, initial.id)
-        repo.create_branch(WRITE_BRANCH, repo.lookup_branch(_ADOPTING_BRANCH))
-    repo.delete_branch(_ADOPTING_BRANCH)
-    return True
-
-
 def reconcile_published_branches() -> int:
     """Bring each raster store's `main` branch and its records into step; return how many changed.
 
     Run by the writer at startup. Publication and sync move `main` before they write the record,
     so a crash between the two leaves a newest record that is not marked published, or that
     describes an earlier snapshot than `main` holds; the record then follows the branch. A store
-    with a published record and nothing on `main` is published from its write branch. A store
-    written before the write branch existed is moved to the current layout first, including one
-    with no record, such as a first ingestion that stopped part way, so a retry can write to it.
-    There is no unpublishing, so nothing else leaves the two apart.
+    with a published record and nothing on `main` is published from its write branch. A new
+    store whose creation stopped before its write branch, with or without a record, gets it, so a
+    retry can write to it. A store written before the write branch existed is left to
+    `migrate_layout`, which a writer does not start without. There is no unpublishing, so nothing
+    else leaves the two apart.
     """
     by_store: dict[str, list[ArtifactRecord]] = {}
     for record in _load_records():
@@ -2250,9 +2216,10 @@ def reconcile_published_branches() -> int:
         if not (store_path / "repo").exists():
             continue
         try:
+            if needs_adoption(store_path):
+                continue
             any_published = any(r.publication.status == PublicationStatus.PUBLISHED for r in records)
-            if adopted := _adopt_write_branch(store_path, any_published):
-                logger.info("Moved '%s' to the current branch layout", store_path.name)
+            adopted = adopt_write_branch(store_path, published=False)
             tip = published_snapshot(open_or_create_repo(store_path))
             newest = max(records, key=lambda record: record.created_at)
             published = newest.publication.status == PublicationStatus.PUBLISHED
@@ -2277,9 +2244,9 @@ def reconcile_published_branches() -> int:
         if store_path.resolve() in registered or not (store_path / "repo").exists():
             continue
         try:
-            changed += _adopt_write_branch(store_path, published=False)
+            changed += not needs_adoption(store_path) and adopt_write_branch(store_path, published=False)
         except Exception:
-            logger.warning("Could not move '%s' to the current branch layout", store_path, exc_info=True)
+            logger.warning("Could not give '%s' its write branch", store_path, exc_info=True)
     return changed
 
 

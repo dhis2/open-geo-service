@@ -123,6 +123,28 @@ def test_refuses_when_a_dataset_is_already_in_its_new_place(instance: Path, caps
     assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
+@pytest.mark.parametrize("argv", [["--dry-run"], []], ids=["dry run", "run"])
+def test_refuses_to_move_onto_another_filesystem(
+    instance: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    """A rename across filesystems fails, which a dry run must report before a run changes anything."""
+    index = instance / "data" / "artifacts" / "records.json"
+    records = index.read_text()
+    lstat = Path.lstat
+
+    def on_another_disk(path: Path) -> os.stat_result:
+        found = lstat(path)
+        return os.stat_result([*found[:2], found.st_dev + 1, *found[3:10]]) if path.name == "chirps.icechunk" else found
+
+    monkeypatch.setattr(Path, "lstat", on_another_disk)
+
+    assert migrate_layout.main(argv) == 1
+
+    assert "cross filesystems" in capsys.readouterr().err
+    assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
+    assert index.read_text() == records
+
+
 @pytest.mark.parametrize("earlier", ["data/downloads", "plugins/datasets"])
 def test_refuses_on_the_layout_before_rasters_and_vectors(
     instance: Path, capsys: pytest.CaptureFixture[str], earlier: str

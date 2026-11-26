@@ -10,8 +10,11 @@ Every dataset moves from ``rasters/``, ``vectors/``, ``tables/`` and ``thumbnail
 of its own, ``catalog/<kind>/<id>/``, with its thumbnail. Pending-collection markers move to
 ``gc-pending/``; the empty per-store lock files, the old ``.superseded`` markers and thumbnails no
 record owns are deleted. The store paths in ``artifacts/records.json`` and
-``openeo_jobs/jobs.json`` are rewritten to match. It refuses to run while a record's id breaks
-the id rule, which the routes would refuse to serve from its new folder.
+``openeo_jobs/jobs.json`` are rewritten to match. Each raster store written before the ``ingest``
+branch existed then gets it, and ``main`` becomes its published version (``adopt_write_branch``);
+until then no server reads the store. It refuses to run while a record's id breaks the id rule,
+which the routes would refuse to serve from its new folder, and while ``catalog/`` or a folder in
+it is on another filesystem than the folders it moves from, as it moves by renaming.
 
 Open Geo Service reads only the catalog layout, so an instance that has not been migrated starts
 with no stores. Running it again once done changes nothing. It refuses to run when a file or
@@ -65,10 +68,13 @@ class CatalogPlan:
     deletions: list[Path] = field(default_factory=list)
     leftovers: list[Path] = field(default_factory=list)
     old_folders: list[Path] = field(default_factory=list)
+    # Raster stores, at their path after the moves, to adopt the write branch, and whether published.
+    adoptions: list[tuple[Path, bool]] = field(default_factory=list)
+    cross_device: list[tuple[Path, Path]] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        return not (self.records or self.jobs or self.moves or self.deletions or self.old_folders)
+        return not (self.records or self.jobs or self.moves or self.deletions or self.old_folders or self.adoptions)
 
 
 def _catalog_key(key: PurePosixPath) -> PurePosixPath | None:
@@ -138,11 +144,11 @@ def _rewrite_paths(item: Any, keys: tuple[str, ...], root: Path, *, absolute: bo
     return changed
 
 
-def _plan_catalog_records(root: Path, plan: CatalogPlan) -> dict[str, layout.Kind]:
-    """Rewrite the record paths and check the ids; return each dataset's kind."""
+def _plan_catalog_records(root: Path, plan: CatalogPlan) -> tuple[dict[str, layout.Kind], list[Any]]:
+    """Rewrite the record paths and check the ids; return each dataset's kind, and the rewritten records."""
     index = root / "artifacts" / "records.json"
     if not index.is_file():
-        return {}
+        return {}, []
     records = json.loads(index.read_text(encoding="utf-8"))
     kinds: dict[str, layout.Kind] = {}
     changed = False
@@ -154,7 +160,7 @@ def _plan_catalog_records(root: Path, plan: CatalogPlan) -> dict[str, layout.Kin
         changed |= _rewrite_paths(record, _PATH_FIELDS, root, absolute=False)
     if changed:
         plan.records = (index, records)
-    return kinds
+    return kinds, records
 
 
 def _plan_catalog_jobs(root: Path, plan: CatalogPlan) -> None:
@@ -223,6 +229,52 @@ def _plan_catalog_files(root: Path, kinds: dict[str, layout.Kind], plan: Catalog
                 _plan_move(path, catalog / layout.dataset_key(owner, path.stem) / "thumbnail.png", plan)
 
 
+def _plan_adoptions(root: Path, records: list[Any], plan: CatalogPlan) -> None:
+    """Find the raster stores written before the write branch existed: recorded, moved or in the catalog.
+
+    *records* have their paths rewritten for the catalog already.
+    """
+    from open_geo_service.streaming.store import needs_adoption
+
+    stores: set[Path] = set()
+    published: set[Path] = set()
+    for record in records:
+        raw = record.get("path")
+        if record.get("format") != "icechunk" or not isinstance(raw, str) or not raw:
+            continue
+        store = Path(raw) if Path(raw).is_absolute() else root / raw
+        stores.add(store)
+        if (record.get("publication") or {}).get("status") == "published":
+            published.add(store)
+    moved_from = {target: source for source, target in plan.moves}
+    stores |= {target for target in moved_from if target.name.endswith(".icechunk")}
+    catalog_rasters = root / layout.CATALOG / layout.Kind.RASTER.value
+    if catalog_rasters.is_dir():
+        stores |= {store for store in catalog_rasters.glob("*/*.icechunk") if store.is_dir()}
+    for store in sorted(stores):
+        now = moved_from.get(store, store)
+        if (now / "repo").exists() and needs_adoption(now):
+            plan.adoptions.append((store, store in published))
+
+
+def _plan_same_device(plan: CatalogPlan) -> None:
+    """Note the moves a rename cannot make: to `catalog/`, or a folder in it, on another filesystem."""
+    for source, target in plan.moves:
+        existing = target.parent
+        while not existing.exists():
+            existing = existing.parent
+        if source.lstat().st_dev != existing.stat().st_dev:
+            plan.cross_device.append((source, target))
+
+
+def _cross_device_message(moves: list[tuple[Path, Path]]) -> str:
+    listed = ", ".join(f"{source} -> {target}" for source, target in moves)
+    return (
+        f"these moves cross filesystems, which this migration does not copy: {listed}. Run it with "
+        "catalog/ on the data folder's filesystem, then move catalog/ or its folders to the other disk."
+    )
+
+
 # The folders of the layout before ``rasters/`` and ``vectors/`` (CLIM-1253), which the migration
 # of a release from before November 2026 renames.
 EARLIER_DATA_FOLDERS = ("downloads", "features")
@@ -252,9 +304,11 @@ def build_catalog_plan() -> CatalogPlan:
             "Run `python -m open_geo_service.migrate_layout` of a release from before November 2026 first, "
             "then this one."
         )
-    kinds = _plan_catalog_records(root, plan)
+    kinds, records = _plan_catalog_records(root, plan)
     _plan_catalog_jobs(root, plan)
     _plan_catalog_files(root, kinds, plan)
+    _plan_same_device(plan)
+    _plan_adoptions(root, records, plan)
     # Removed once emptied; one holding a leftover stays, and the leftover is named.
     plan.old_folders = [folder for folder in plan.old_folders if all(path.parent != folder for path in plan.leftovers)]
     return plan
@@ -275,16 +329,21 @@ def pending_migration() -> str | None:
     folders = sorted(
         {path.relative_to(plan.root).parts[0] + "/" for path in [*plan.old_folders, *(s for s, _ in plan.moves)]}
     )
-    return f"it holds {', '.join(folders) or 'records'} from the layout before catalog/"
+    if folders or plan.records or plan.jobs:
+        return f"it holds {', '.join(folders) or 'records'} from the layout before catalog/"
+    stores = ", ".join(store.name for store, _ in plan.adoptions)
+    return f"its raster stores {stores} were written before their write branch, and are not read until moved to it"
 
 
 def apply_catalog(plan: CatalogPlan) -> None:
-    """Rewrite the paths, delete, then move, so a run cut short is completed by the next.
+    """Rewrite the paths, delete, move, then adopt the write branch, so a run cut short is completed by the next.
 
     Deleted first, so nothing discarded is carried into ``catalog/`` inside a table's folder.
     """
     if plan.invalid_ids:
         raise MigrationError(_invalid_ids_message(plan.invalid_ids))
+    if plan.cross_device:
+        raise MigrationError(_cross_device_message(plan.cross_device))
     for index, items in filter(None, (plan.records, plan.jobs)):
         storage.write(index, f"{json.dumps(items, indent=2)}\n".encode())
     for path in plan.deletions:
@@ -295,6 +354,19 @@ def apply_catalog(plan: CatalogPlan) -> None:
     for folder in plan.old_folders:
         if folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
+    from open_geo_service.streaming.store import adopt_write_branch
+
+    failed: list[str] = []
+    for store, published in plan.adoptions:
+        try:
+            adopt_write_branch(store, published)
+        except Exception as exc:
+            failed.append(f"{store} ({exc})")
+    if failed:
+        # Each store picks up where it stopped when run again.
+        raise MigrationError(
+            f"could not move {', '.join(failed)} to the write branch; no server reads it until then. Run again."
+        )
 
 
 def _invalid_ids_message(ids: list[str]) -> str:
@@ -314,6 +386,11 @@ def describe_catalog(plan: CatalogPlan) -> list[str]:
     lines = [f"rewrite store paths in {shown(index)}" for index, _ in filter(None, (plan.records, plan.jobs))]
     lines += [f"delete {shown(path)}" for path in plan.deletions]
     lines += [f"move {shown(source)} -> {shown(target)}" for source, target in plan.moves]
+    lines += [
+        f"give {shown(store) if store.is_relative_to(plan.root) else store} its write branch"
+        + (", keeping main as published" if published else "")
+        for store, published in plan.adoptions
+    ]
     return lines
 
 
@@ -331,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
             catalog = build_catalog_plan()
             if catalog.invalid_ids:
                 raise MigrationError(_invalid_ids_message(catalog.invalid_ids))
+            if catalog.cross_device:
+                raise MigrationError(_cross_device_message(catalog.cross_device))
             if catalog.empty:
                 print("Nothing to migrate: this instance already uses the catalog layout.")
             else:
