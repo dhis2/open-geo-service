@@ -92,7 +92,8 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
     stopped_table = table_store._write_file(
         layout.dataset_dir(layout.Kind.TABLE, "rain_districts"), pq.read_table(table), datetime.now(UTC)
     )
-    # A first write stopped the same way, in a folder no record names at all.
+    # A first write stopped the same way, in a folder no record names at all: left, as the
+    # records may be what is missing.
     unrecorded, _count, _geometry = feature_store.write_feature_collection(
         dataset_id="regions",
         features={"type": "FeatureCollection", "features": [_box("R1")]},
@@ -103,12 +104,22 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
     for path in (stopped_vector, stopped_table, unrecorded):
         os.utime(path, (time.time() - 3600, time.time() - 3600))
     fresh, _count, _geometry = feature_store.write_feature_collection(
-        dataset_id="towns", features={"type": "FeatureCollection", "features": [_box("T1")]}, id_property="orgUnitCode"
+        dataset_id="districts",
+        features={"type": "FeatureCollection", "features": [_box("D3")]},
+        id_property="orgUnitCode",
     )
 
     restart_writer()
 
-    assert not stopped_vector.exists() and not stopped_table.exists() and not unrecorded.exists()
+    assert not stopped_vector.exists() and not stopped_table.exists()
+    assert unrecorded.exists(), "a folder no record names is left alone"
     assert fresh.exists(), "a file younger than the grace period waits for the next start"
     assert districts.exists() and table.exists(), "the files the records name stay"
     assert TestClient(app).get("/features/districts/data.parquet").status_code == 200
+
+    # Without the records, as when `catalog/` is restored before them, no file is removed.
+    index = ingestion_services.ARTIFACTS_INDEX_PATH
+    index.rename(index.with_suffix(".away"))
+    files = sorted((data / "catalog").rglob("*.p*"))
+    restart_writer()
+    assert sorted((data / "catalog").rglob("*.p*")) == files

@@ -114,6 +114,20 @@ def test_refuses_when_a_dataset_is_already_in_its_new_place(instance: Path, caps
     assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
 
 
+@pytest.mark.parametrize("earlier", ["data/downloads", "plugins/datasets"])
+def test_refuses_on_the_layout_before_rasters_and_vectors(
+    instance: Path, capsys: pytest.CaptureFixture[str], earlier: str
+) -> None:
+    (instance / earlier).mkdir(parents=True)
+    (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data'}\nplugins_dir: plugins\n")
+    api_config._cache = None
+
+    assert migrate_layout.main(["--dry-run"]) == 1
+
+    assert "release from before November 2026 first" in capsys.readouterr().err
+    assert (instance / "data" / "rasters" / "chirps.icechunk").is_dir(), "nothing was moved"
+
+
 def test_refuses_while_a_writer_runs(instance: Path, capsys: pytest.CaptureFixture[str]) -> None:
     writer = start_other_writer()
     try:
@@ -222,6 +236,8 @@ def test_an_old_data_folder_is_served_from_the_catalog_after_the_migration(old_d
     moved = old_data / "catalog" / "rasters" / "rain" / "rain.icechunk"
     moved.parent.mkdir(parents=True)
     (old_data / "rasters" / "rain.icechunk").rename(moved)
+    # The thumbnail of a removed dataset, which nothing serves, goes with the old folder.
+    (old_data / "thumbnails" / "removed.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     assert migrate_layout.main([]) == 0
 

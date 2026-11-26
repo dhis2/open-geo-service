@@ -23,6 +23,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import icechunk
 import obstore
@@ -143,7 +144,7 @@ class Objects:
         Copied beside the target under a hidden name first, so the last step is still a rename
         within one filesystem and a reader sees the old file or the new one.
         """
-        beside = target.with_name(f".{target.name}.{os.getpid()}.moving")
+        beside = target.with_name(f".{target.name}.{uuid4().hex}.moving")
         try:
             shutil.copyfile(source, beside)
             with open(beside, "rb+") as handle:

@@ -311,6 +311,41 @@ def test_a_store_published_before_either_branch_stays_a_rollback_target(store: d
     assert _published(store["path"]) == served
 
 
+@pytest.mark.parametrize("was_published", [False, True], ids=["never published", "published"])
+def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_at_the_next_start(
+    store: dict[str, Any], monkeypatch: pytest.MonkeyPatch, was_published: bool
+) -> None:
+    _ingest(store, overwrite=False, end=DAYS[1], publish=was_published)
+    published = _published(store["path"])
+    _repo(store["path"]).writable_session("ingest").commit("unmarked", allow_empty=True)
+    _old_layout(store["path"], published=published)
+
+    class Stopped(Exception):
+        pass
+
+    class StopsBeforeMovingMain:
+        def __init__(self, repo: Any) -> None:
+            self._repo = repo
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._repo, name)
+
+        def reset_branch(self, *_args: Any) -> None:
+            raise Stopped
+
+    with monkeypatch.context() as patched:
+        opened = services.open_or_create_repo
+        patched.setattr(services, "open_or_create_repo", lambda path: StopsBeforeMovingMain(opened(path)))
+        services.reconcile_published_branches()  # logged and skipped, as a process killed here leaves it
+
+    assert services.reconcile_published_branches() == 1
+    assert _branches(store["path"]) == {"main", "ingest"}
+    assert _published(store["path"]) == published, "readers see only what was published"
+    assert next(iter(_repo(store["path"]).ancestry(branch="ingest"))).message == "unmarked"
+    (record,) = services.list_artifacts().items
+    assert (record.publication.status == PublicationStatus.PUBLISHED) == was_published
+
+
 def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> None:
     # A store from before the write branch, published, with a sync that failed part way on top:
     # the write branch takes what `main` held, and `main` what `published` held.

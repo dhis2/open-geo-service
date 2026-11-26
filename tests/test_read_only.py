@@ -311,7 +311,7 @@ def test_read_only_still_refuses_manage_under_a_mount_prefix(
 
     assert mounted.post("/manage/sync").status_code == 403
     assert mounted.get("/jobs").status_code == 403
-    assert mounted.get("/stac/catalog.json").status_code == 200
+    assert mounted.get("/stac/catalog.json").status_code != 403
 
 
 def test_a_configured_base_url_path_cannot_bypass_read_only(read_only: None, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -120,21 +120,22 @@ def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portol
     for dataset_id, artifact in published.items():
         kind = layout.kind_of(artifact.format)
         folder = layout.dataset_key(kind, dataset_id)
+        style_key = f"{folder}/{portolan.STYLES}/default.json"
         try:
             collection = stac_services.build_collection_for_artifact(dataset_id, artifact, request)
             readme = documents.collection_readme(kind, dataset_id, request)
             agents = documents.collection_agents(kind, dataset_id, request)
+            data_files = _data_files(dataset_id, artifact)
+            assets = collection.get("assets")
+            if configured_base() and isinstance(assets, dict) and "style" in assets:
+                tiles_url = f"{base}/stac/{data_files[f'/features/{dataset_id}/data.pmtiles']}"
+                styles[style_key] = features_services.published_collection_style_or_404(dataset_id, tiles_url)
+                data_files[f"/features/{dataset_id}/styles/default.json"] = style_key
         except Exception:
             logger.exception("Could not describe '%s' for the catalog; leaving it out", folder)
             continue
         built |= {f"{folder}/collection.json": collection, f"{folder}/README.md": readme, f"{folder}/AGENTS.md": agents}
-        files |= _data_files(dataset_id, artifact)
-        assets = collection.get("assets")
-        if configured_base() and isinstance(assets, dict) and "style" in assets:
-            style_key = f"{folder}/{portolan.STYLES}/default.json"
-            tiles_url = f"{base}/stac/{files[f'/features/{dataset_id}/data.pmtiles']}"
-            styles[style_key] = features_services.published_collection_style_or_404(dataset_id, tiles_url)
-            files[f"/features/{dataset_id}/styles/default.json"] = style_key
+        files |= data_files
         described[dataset_id] = artifact
     # Only kinds with a collection written, so no sub-catalog is empty.
     for kind in stac_services.published_kinds(described):

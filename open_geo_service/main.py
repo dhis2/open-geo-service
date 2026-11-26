@@ -201,7 +201,13 @@ async def _services() -> AsyncGenerator[None]:
     pipeline_recovery: asyncio.Task[None] | None = None
     notification_replay: asyncio.Task[None] | None = None
     derived_refresh: asyncio.Task[None] | None = None
-    old_folders = [f"{name}/" for name in (*layout.Kind, "thumbnails") if (api_config.get_data_root() / name).is_dir()]
+    from open_geo_service.migrate_layout import EARLIER_DATA_FOLDERS
+
+    old_folders = [
+        f"{name}/"
+        for name in (*layout.Kind, "thumbnails", *EARLIER_DATA_FOLDERS)
+        if (api_config.get_data_root() / name).is_dir()
+    ]
     if old_folders:
         logger.warning(
             "The data folder holds %s from an earlier layout, which this version does not read. "

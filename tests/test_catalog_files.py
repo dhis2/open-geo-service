@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
@@ -283,6 +284,14 @@ def test_the_zarr_asset_and_the_style_follow_the_configured_address(
         assert set(render["assets"]) <= set(written["assets"]), render
     assert "renders" in written or stac_services.RENDER_EXTENSION not in written["stac_extensions"]
     assert [provider.get("url") for provider in written["providers"] if "host" in provider["roles"]] == [None]
+    # The raster's AGENTS.md opens the store beside it, run in its folder as it says.
+    agents = (collection.parent / "AGENTS.md").read_text()
+    assert "/zarr/" not in agents
+    example = agents.split("```python\n")[1].split("```")[0]
+    monkeypatch.chdir(collection.parent)
+    namespace: dict[str, Any] = {}
+    exec(example, namespace)
+    assert namespace["values"].shape == (2, 2, 2)
 
 
 def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,8 +340,9 @@ def test_the_client_lists_every_kind_through_the_relative_links(data: Path) -> N
     ]
 
 
+@pytest.mark.parametrize("failing_step", ["readme", "style"])
 def test_a_collection_that_cannot_be_described_leaves_no_link_to_it(
-    data: Path, monkeypatch: pytest.MonkeyPatch
+    data: Path, monkeypatch: pytest.MonkeyPatch, failing_step: str
 ) -> None:
     """The only vector collection fails, so no vector sub-catalog is written, and nothing links to either."""
     from open_geo_service.stac import documents
@@ -344,7 +354,13 @@ def test_a_collection_that_cannot_be_described_leaves_no_link_to_it(
             raise ValueError("an unreadable footer")
         return describe(kind, dataset_id, request)
 
-    monkeypatch.setattr(documents, "collection_readme", failing)
+    def no_style(dataset_id: str, tiles_url: str) -> Any:
+        raise HTTPException(status_code=404, detail="its file is gone")
+
+    if failing_step == "readme":
+        monkeypatch.setattr(documents, "collection_readme", failing)
+    else:
+        monkeypatch.setattr(feature_services, "published_collection_style_or_404", no_style)
     catalog_files.write_catalog()
     catalog = data / "catalog"
 

@@ -50,9 +50,11 @@ data/
   `catalog/` never sees a partial file.
 - **Every file is written through one object interface** (`storage.py`), flushed to disk before
   the write returns. At its start the writer removes the vector and table files a write stopped
-  before their record left behind.
-- **The data folder is one filesystem.** Moving a file from `tmp/` into `catalog/` is atomic
-  only within one filesystem, so do not mount `catalog/` or one of its folders separately.
+  before their record left behind, in a folder whose dataset has a record; a folder no record
+  names is left alone, as when `catalog/` is restored before `artifacts/records.json`.
+- **A folder of `catalog/` may be a mount of its own.** A file moved there from `tmp/` on
+  another filesystem is copied beside its target first, so the last step is still a rename
+  within one filesystem and a reader sees the old file or the new one.
 - **A new version of a vector or table dataset is a new file.** The record names the current
   one. A replaced file is removed once the file that replaced it is a minute old, so a reader
   that has just read the record can still open the file it named.

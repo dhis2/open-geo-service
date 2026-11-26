@@ -987,8 +987,9 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     readme = client.get(f"/stac/rasters/{_DATASET}/README.md").text
     assert "(processor)" in readme and "(host)" in readme
     agents = client.get(f"/stac/rasters/{_DATASET}/AGENTS.md").text
-    # Root-relative without a configured public address: it resolves on the instance serving it.
-    assert f'xr.open_zarr("/zarr/{_DATASET}"' in agents
+    # Without a configured public address, the store beside the file, and no Zarr route.
+    assert f'local_filesystem_storage("./{_DATASET}.icechunk/")' in agents
+    assert "/zarr/" not in agents
     assert client.get(f"/datasets/{source}").json()["provenance"] is None
 
     plugin.available.append("2026-01-03")

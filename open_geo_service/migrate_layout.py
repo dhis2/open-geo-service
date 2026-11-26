@@ -8,16 +8,16 @@ holds none, so during an upgrade stopping the server is up to you:
 
 Every dataset moves from ``rasters/``, ``vectors/``, ``tables/`` and ``thumbnails/`` into a folder
 of its own, ``catalog/<kind>/<id>/``, with its thumbnail. Pending-collection markers move to
-``gc-pending/``; the empty per-store lock files and the old ``.superseded`` markers are deleted.
-The store paths in ``artifacts/records.json`` and ``openeo_jobs/jobs.json`` are rewritten to
-match. It refuses to run while a record's id breaks the id rule, which the routes would refuse
-to serve from its new folder.
+``gc-pending/``; the empty per-store lock files, the old ``.superseded`` markers and thumbnails no
+record owns are deleted. The store paths in ``artifacts/records.json`` and
+``openeo_jobs/jobs.json`` are rewritten to match. It refuses to run while a record's id breaks
+the id rule, which the routes would refuse to serve from its new folder.
 
 Open Geo Service reads only the catalog layout, so an instance that has not been migrated starts
 with no stores. Running it again once done changes nothing. It refuses to run when a file or
 folder it would move to already exists, rather than merging. An instance still on the layout
 before ``rasters/`` and ``vectors/`` (CLIM-1253) runs ``migrate_layout`` of a release from before
-November 2026 first.
+November 2026 first; this one refuses until it has.
 """
 
 from __future__ import annotations
@@ -214,12 +214,29 @@ def _plan_catalog_files(root: Path, kinds: dict[str, layout.Kind], plan: Catalog
         plan.old_folders.append(thumbnails)
         for path in sorted(thumbnails.iterdir()):
             owner = kinds.get(path.stem)
-            if path.name.endswith(_DISCARDED):
-                plan.deletions.append(path)
+            if path.name.endswith(_DISCARDED) or (path.suffix == ".png" and owner is None):
+                plan.deletions.append(path)  # a thumbnail no record owns could never be served
             elif path.suffix != ".png" or owner is None or not is_segment_safe_id(path.stem):
                 plan.leftovers.append(path)
             else:
                 _plan_move(path, catalog / layout.dataset_key(owner, path.stem) / "thumbnail.png", plan)
+
+
+# The folders of the layout before ``rasters/`` and ``vectors/`` (CLIM-1253), which the migration
+# of a release from before November 2026 renames.
+EARLIER_DATA_FOLDERS = ("downloads", "features")
+_EARLIER_PLUGIN_FOLDERS = ("datasets", "features")
+
+
+def _earlier_layout_folders(root: Path) -> list[Path]:
+    """The folders of the layout before CLIM-1253 in the data folder *root* and in ``plugins_dir``."""
+    folders = [root / name for name in EARLIER_DATA_FOLDERS]
+    raw = api_config.get_config().get("plugins_dir")
+    if raw:
+        config_path = api_config.get_config_path()
+        plugins = ((config_path.parent if config_path else Path()) / str(raw)).resolve()
+        folders += [plugins / name for name in _EARLIER_PLUGIN_FOLDERS]
+    return [folder for folder in folders if folder.is_dir()]
 
 
 def build_catalog_plan() -> CatalogPlan:
@@ -228,6 +245,12 @@ def build_catalog_plan() -> CatalogPlan:
     plan = CatalogPlan(root=root)
     if not root.is_dir():
         return plan
+    if earlier := _earlier_layout_folders(root):
+        raise MigrationError(
+            f"{', '.join(str(folder) for folder in earlier)} are from the layout before rasters/ and vectors/. "
+            "Run `python -m open_geo_service.migrate_layout` of a release from before November 2026 first, "
+            "then this one."
+        )
     kinds = _plan_catalog_records(root, plan)
     _plan_catalog_jobs(root, plan)
     _plan_catalog_files(root, kinds, plan)

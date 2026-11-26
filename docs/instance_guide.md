@@ -243,7 +243,10 @@ which renames files on the same disk and downloads nothing:
 
 It refuses to run while a dataset's id breaks the id rule (lowercase letters, digits, `_` and
 `-`, starting with a letter), and names each one: delete it, or ingest it again under a valid id.
-Running it again once done changes nothing.
+It also refuses on an instance still on the layout before `rasters/` and `vectors/` (with
+`downloads/` or `features/` in the data folder, or `datasets/` in `plugins_dir`): run
+`migrate_layout` of a release from before November 2026 first. Running it again once done
+changes nothing.
 
 ### Troubleshooting
 

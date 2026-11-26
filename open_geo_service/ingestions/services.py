@@ -1883,6 +1883,9 @@ def remove_files_no_record_names() -> int:
     a replaced version, which `shared.versions` removes once its grace period has passed. A file
     younger than that grace period is left too: a reader may have resolved a record that named it,
     such as a first publication that failed and was rolled back; the next startup removes it.
+    A folder no record names is left alone: its records may be missing rather than its files
+    unwanted, as when `catalog/` is restored before `artifacts/records.json`. A first write
+    stopped part way is removed by the next write of that dataset instead.
     """
     from open_geo_service.shared.versions import SUPERSEDED_FILE_GRACE_SECONDS
 
@@ -1905,7 +1908,7 @@ def remove_files_no_record_names() -> int:
             current = [listed.modified for listed in files if listed.key in named]
             for listed in files:
                 unnamed = listed.key not in named and listed.modified < settled
-                if unnamed and (not current or listed.modified > max(current)):
+                if unnamed and current and listed.modified > max(current):
                     logger.info("Removing '%s', which a write left without a record", listed.key)
                     objects.delete(listed.key)
                     removed += 1
@@ -2191,6 +2194,9 @@ def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
 
 # The branch readers opened before `main` became the published version.
 _OLD_PUBLISHED_BRANCH = "published"
+# Holds the old write tip while a store is moved to the current layout, so a move that stopped part
+# way is finished by the next one.
+_ADOPTING_BRANCH = "adopting"
 
 
 def _adopt_write_branch(store_path: Path, published: bool) -> bool:
@@ -2200,21 +2206,26 @@ def _adopt_write_branch(store_path: Path, published: bool) -> bool:
     The write branch takes the tip of `main`, and `main` takes the tip of `published`, or goes back
     to the initial, empty snapshot when the store was never published. A store published before
     either branch existed (*published* with no `published` branch) keeps `main` where it is, marked
-    complete so a rollback may return to it.
+    complete so a rollback may return to it. The write branch is created last, so a store that has
+    it is done.
     """
     repo = open_or_create_repo(store_path)
     branches = repo.list_branches()
-    if WRITE_BRANCH in branches:
+    if WRITE_BRANCH in branches and _ADOPTING_BRANCH not in branches:
         return False
-    if published and _OLD_PUBLISHED_BRANCH not in branches:
-        seal_version(store_path, PUBLISHED_BRANCH)
-    repo.create_branch(WRITE_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
-    if _OLD_PUBLISHED_BRANCH in branches:
-        repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
-        repo.delete_branch(_OLD_PUBLISHED_BRANCH)
-    elif not published:
-        *_, initial = repo.ancestry(branch=PUBLISHED_BRANCH)
-        repo.reset_branch(PUBLISHED_BRANCH, initial.id)
+    if WRITE_BRANCH not in branches:
+        if _ADOPTING_BRANCH not in branches:
+            if published and _OLD_PUBLISHED_BRANCH not in branches:
+                seal_version(store_path, PUBLISHED_BRANCH)
+            repo.create_branch(_ADOPTING_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
+        if _OLD_PUBLISHED_BRANCH in branches:
+            repo.reset_branch(PUBLISHED_BRANCH, repo.lookup_branch(_OLD_PUBLISHED_BRANCH))
+            repo.delete_branch(_OLD_PUBLISHED_BRANCH)
+        elif not published:
+            *_, initial = repo.ancestry(branch=PUBLISHED_BRANCH)
+            repo.reset_branch(PUBLISHED_BRANCH, initial.id)
+        repo.create_branch(WRITE_BRANCH, repo.lookup_branch(_ADOPTING_BRANCH))
+    repo.delete_branch(_ADOPTING_BRANCH)
     return True
 
 
@@ -3516,8 +3527,8 @@ def _dataset_links(
     links = [DatasetAccessLink(href=f"/datasets/{_segment(dataset_id)}", rel="self", title="Dataset detail")]
     if published is not None and published.format in LOADABLE_RASTER_FORMATS:
         links.append(DatasetAccessLink(href=f"/zarr/{_segment(dataset_id)}", rel="zarr", title="Zarr store"))
-    # Tracks `stac_eligible_artifacts_by_dataset` exactly, so `/datasets` never offers a
-    # catalogue link the catalogue itself does not serve, nor withholds one it does.
+    # Where the catalog writes the collection of every published dataset. It is missing while the
+    # writer has not yet written it, or when the collection could not be described (logged).
     if published is not None and published.format in CATALOGUED_FORMATS:
         from open_geo_service.stac.services import collection_path
 

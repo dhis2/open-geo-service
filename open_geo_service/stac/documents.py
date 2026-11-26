@@ -17,7 +17,7 @@ from open_geo_service.features import templates as feature_templates
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord
 from open_geo_service.shared import layout
 from open_geo_service.shared.licences import parse_licence
-from open_geo_service.shared.urls import absolute_url, path_segment
+from open_geo_service.shared.urls import absolute_url, configured_base, path_segment
 from open_geo_service.stac import services
 from open_geo_service.stac.media_types import data_group_open_kwargs
 
@@ -64,9 +64,11 @@ def _collection_list(kind: layout.Kind, artifacts: dict[str, ArtifactRecord], re
 
 
 _READING: dict[layout.Kind, str] = {
-    layout.Kind.RASTER: "A **raster** collection has a `zarr` asset: a Zarr v3 store with GeoZarr metadata. Open it "
-    "with the asset's own `xarray:open_kwargs`, which name the full-resolution group of a "
-    'multiscale store: `xr.open_zarr(asset["href"], **asset["xarray:open_kwargs"])`.',
+    layout.Kind.RASTER: "A **raster** collection has an `icechunk` asset: an Icechunk repository of a Zarr v3 store "
+    "with GeoZarr metadata, which its `AGENTS.md` link says how to open. On an instance with a public address it "
+    'also has a `zarr` asset, the same data as a plain Zarr v3 store: `xr.open_zarr(asset["href"], '
+    '**asset["xarray:open_kwargs"])`. Each asset\'s `xarray:open_kwargs` name the full-resolution group of a '
+    "multiscale store.",
     layout.Kind.VECTOR: "A **vector** collection has a `data` asset: one GeoParquet 1.1 file with a `bbox` covering "
     "column, readable with DuckDB, GeoPandas or any Parquet reader. Its `AGENTS.md` link says how.",
     layout.Kind.TABLE: "A **table** collection has a `data` asset: one Parquet file, whose columns `table:columns` "
@@ -182,37 +184,60 @@ def collection_agents(kind: layout.Kind, dataset_id: str, request: Request) -> s
 
 
 def _raster_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) -> str:
-    """How an agent reads one raster collection: the store, how to open it, the variable."""
-    store_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
-    # The same arguments the STAC `zarr` asset carries as `xarray:open_kwargs`.
-    open_kwargs = {
-        **services._zarr_open_kwargs(artifact),
-        **data_group_open_kwargs(services._zarr_media_type(artifact)),
-    }
+    """How an agent reads one raster collection: the store, how to open it, the variable.
+
+    The Icechunk store is in the catalog folder beside this file; the Zarr route only on an
+    instance that knows its public address (see `stac/catalog_files.py`).
+    """
+    # The same arguments the STAC `zarr` and `icechunk` assets carry as `xarray:open_kwargs`.
+    data_group = data_group_open_kwargs(services._zarr_media_type(artifact))
+    open_kwargs = {**services._zarr_open_kwargs(artifact), **data_group}
     arguments = "".join(f", {name}={value!r}" for name, value in open_kwargs.items() if value is not None)
-    return "\n".join(
-        [
-            f"# Reading {artifact.dataset_name}",
+    lines = [
+        f"# Reading {artifact.dataset_name}",
+        "",
+        f"The values are in the variable `{artifact.variable}`, over time, latitude and longitude or the "
+        "store's own projected axes; the store's `spatial:` and `proj:` attributes give the grid. Any "
+        "reader fetches only the chunks it needs.",
+        "",
+    ]
+    if artifact.format == ArtifactFormat.ICECHUNK:
+        icechunk_href = absolute_url(request, f"/icechunk/{path_segment(dataset_id)}")
+        lines += [
+            f"The data is an Icechunk repository of a Zarr v3 store with GeoZarr metadata: {icechunk_href}",
             "",
-            f"The data is a Zarr v3 store with GeoZarr metadata: {store_href}",
+            "With the Icechunk library and xarray, from a copy of this folder; over HTTP, use "
+            "`icechunk.http_storage` with the store's URL instead:",
             "",
-            f"- The values are in the variable `{artifact.variable}`, over time, latitude and longitude "
-            "or the store's own projected axes; the store's `spatial:` and `proj:` attributes give the grid.",
-            "- Any Zarr v3 reader can open it, over HTTP, reading only the chunks it needs.",
+            "```python",
+            "import icechunk",
+            "import xarray as xr",
+            f'repo = icechunk.Repository.open(icechunk.local_filesystem_storage("{icechunk_href}"))',
+            'session = repo.readonly_session("main")',
+            "ds = xr.open_zarr(session.store, consolidated=False"
+            + "".join(f", {name}={value!r}" for name, value in data_group.items())
+            + ")",
+            f'values = ds["{artifact.variable}"]',
+            "```",
             "",
-            "With xarray:",
+        ]
+    if configured_base() or artifact.format != ArtifactFormat.ICECHUNK:
+        store_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
+        lines += [
+            f"The same data as a plain Zarr v3 store, for any Zarr v3 reader over HTTP: {store_href}",
             "",
             "```python",
             "import xarray as xr",
             f'ds = xr.open_zarr("{store_href}"{arguments})',
-            f'values = ds["{artifact.variable}"]',
             "```",
             "",
-            f"The licence, providers and extent are in the STAC collection: "
-            f"{absolute_url(request, services.collection_path(layout.kind_of(artifact.format), dataset_id))}",
-            "",
         ]
-    )
+    lines += [
+        f"The licence, providers and extent are in the STAC collection: "
+        f"{absolute_url(request, services.collection_path(layout.kind_of(artifact.format), dataset_id))}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _feature_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) -> str:
