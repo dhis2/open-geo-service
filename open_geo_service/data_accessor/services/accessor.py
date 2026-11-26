@@ -263,12 +263,9 @@ def open_icechunk_dataset(
         t_dim = None
     time_chunk = _read_time_chunk(probe, t_dim) if t_dim is not None and merge_time else None
     probe.close()
-    if time_chunk is not None and t_dim is not None:
-        ds = _open_zarr_group(session.store, group, chunks={t_dim: time_chunk})
-    elif not merge_time:
-        ds = _open_zarr_group(session.store, group, chunks={})
-    else:
-        ds = _open_zarr_group(session.store, group, chunks="auto")
+    # ``{}`` keeps the stored chunks; "auto" would merge every dimension, space included.
+    chunks = {t_dim: time_chunk} if time_chunk is not None and t_dim is not None else {}
+    ds = _open_zarr_group(session.store, group, chunks=chunks)
     if not with_fetched_at and FETCHED_AT in ds.variables:
         ds = ds.drop_vars(FETCHED_AT)
     if t_dim is not None:
