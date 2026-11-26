@@ -780,6 +780,19 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     assert not any("auth:refs" in link for link in collection["links"][:2])
     assert "auth:refs" not in raster["assets"]["zarr"]
 
+    # Each OIDC provider is a scheme of its own; without named tokens there is no Basic.
+    _configure_oidc(monkeypatch, tokens=[], gate_reads=True)
+    alice = FakeProvider(monkeypatch).bearer("alice")
+    catalog = client.get("/stac/catalog.json", headers=alice).json()
+    assert catalog["auth:schemes"]["oidc-idp"] == {
+        "type": "openIdConnect",
+        "openIdConnectUrl": f"{ISSUER}/.well-known/openid-configuration",
+        "description": "Sign in with Example ID.",
+    }
+    assert list(catalog["auth:schemes"]) == ["bearer", "oidc-idp"]
+    collection = client.get("/stac/rain/collection.json", headers=alice).json()
+    assert collection["assets"]["zarr"]["auth:refs"] == ["bearer", "oidc-idp"]
+
 
 # --- configuration -----------------------------------------------------------------------
 

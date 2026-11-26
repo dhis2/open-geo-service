@@ -181,6 +181,13 @@ DeliveryResult = Literal[
 ]
 
 
+STARTED_BY = (
+    "The principal that started the run, for audit: the caller of a run by hand or a retry, "
+    "`service:pipeline-runner` for a dataset update; none while authentication is off. "
+    "Shown only to operators."
+)
+
+
 class PipelineRun(BaseModel):
     """One invocation of the pipeline's workflow over an explicit interval, and its delivery.
 
@@ -209,6 +216,7 @@ class PipelineRun(BaseModel):
 
     run_id: str
     trigger: RunTrigger = "manual"
+    started_by: str | None = Field(default=None, description=STARTED_BY)
     event_id: str | None = None
     retry_of: str | None = None
     revision: int = 1
@@ -292,6 +300,7 @@ class PipelineRunView(BaseModel):
     failure: RunFailure | None = None
     links: RunLinks
     trigger: RunTrigger
+    started_by: str | None = Field(default=None, description=STARTED_BY)
     event_id: str | None = Field(default=None, description="The dataset update that started the run.")
     retry_of: str | None = None
     revision: int = Field(description="The pipeline revision the run used.")

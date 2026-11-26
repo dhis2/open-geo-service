@@ -411,11 +411,35 @@ Then every read (the pages, STAC, Zarr, Icechunk, GeoParquet, PMTiles, thumbnail
 `/features`, `/processes`) needs a token of either tier, and a signed-out browser is sent to the
 sign-in page. What a client needs to find out how to sign in stays public: openEO capabilities at
 `GET /` with `Accept: application/json`, `/.well-known/openeo`, `/credentials/*`, the API
-reference, `/health` and `/me`. The STAC catalog and collections declare `basic` and `bearer`
-schemes with the STAC Authentication extension. A client may send `Basic` with the token id as
+reference, `/health` and `/me`. The STAC catalog and collections declare how to sign in with the
+STAC Authentication extension: `bearer`, `basic` when tokens are configured, and an
+`openIdConnect` scheme for each OIDC provider. A client may send `Basic` with the token id as
 the username and the secret as the password, which is what QGIS, GDAL (`GDAL_HTTP_USERPWD`) and
-STAC Browser can send; deploy STAC Browser with `authConfig: {type: "http", scheme: "basic"}`,
-since it does not offer a sign-in from the catalog's schemes. Its catalog page loads thumbnails
+STAC Browser can send. STAC Browser does not offer a sign-in from the catalog's schemes, so deploy
+it with one in `authConfig`: `{type: "http", scheme: "basic"}` for tokens, or, for people, the
+provider's scheme as the catalog declares it:
+
+```js
+historyMode: 'history',  // STAC Browser's OpenID Connect sign-in needs it
+authConfig: {
+  type: 'openIdConnect',
+  openIdConnectUrl: 'https://id.example.org/realms/ogs/.well-known/openid-configuration',
+  oidcConfig: {client_id: 'stac-browser'},  // its default
+},
+```
+
+Register that client at the provider as a public client with PKCE and the redirect URI
+`<STAC Browser base URL>/auth`, the base URL including any path STAC Browser is served under
+(`https://example.org/browser/auth`). Then have its access tokens accepted. With Keycloak, give
+the client an audience mapper that adds this instance's `client_id`. Otherwise, list every
+accepted audience: an explicit `audience` replaces the default of `client_id` and
+`openeo_client_id`, so leaving one out refuses its tokens.
+
+```yaml
+      audience: [open-geo-service, openeo, stac-browser]
+```
+
+STAC Browser 3.3.4 then signs in through the provider and sends the access token as `Bearer`. Its catalog page loads thumbnails
 as plain images, which carry no credential, so they stay blank until signed URLs arrive
 (CLIM-1482); a collection's own page shows its thumbnail. Every response is marked
 `Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
