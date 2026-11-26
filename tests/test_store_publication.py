@@ -23,6 +23,7 @@ pytest.importorskip("topozarr")
 zarr = pytest.importorskip("zarr")
 
 from fastapi import HTTPException  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 from open_geo_service import config as api_config  # noqa: E402
 from open_geo_service import migrate_layout, writer_lease  # noqa: E402
@@ -30,6 +31,7 @@ from open_geo_service.data_accessor.services.accessor import open_icechunk_datas
 from open_geo_service.data_manager.services import downloader  # noqa: E402
 from open_geo_service.ingestions import services, sync_engine  # noqa: E402
 from open_geo_service.ingestions.schemas import PublicationStatus  # noqa: E402
+from open_geo_service.main import app  # noqa: E402
 from open_geo_service.publications.services import managed_dataset_id_for  # noqa: E402
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period  # noqa: E402
 from open_geo_service.streaming import store as streaming_store  # noqa: E402
@@ -360,7 +362,11 @@ def test_startup_brings_branch_and_record_into_step(store: dict[str, Any]) -> No
     _repo(store["path"]).writable_session("ingest").commit("unmarked", allow_empty=True)
     _old_layout(store["path"], published=published)
     assert services.reconcile_published_branches() == 0, "left to the migration"
+    # Until then a native Icechunk reader is refused too, as it would open `main`.
+    client = TestClient(app)
+    assert client.get(f"/icechunk/{record.dataset_id}/repo").status_code == 404
     assert migrate_layout.main([]) == 0
+    assert client.get(f"/icechunk/{record.dataset_id}/repo").status_code == 200
     assert _branches(store["path"]) == {"main", "ingest"}
     assert _published(store["path"]) == published
     assert next(iter(_repo(store["path"]).ancestry(branch="ingest"))).message == "unmarked"

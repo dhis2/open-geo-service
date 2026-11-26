@@ -2380,8 +2380,17 @@ def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Not found")
     if not full_path.is_file():
         raise HTTPException(status_code=404, detail=f"Icechunk store file not found: {file_path}")
-
     top = full_path.relative_to(store_root).parts[0]
+    if top == "repo":
+        # Every reader starts at `repo`, which names the branches; refused, as `/zarr` refuses it,
+        # for a store whose `main` is not yet the published version (`read_snapshot`).
+        import icechunk
+
+        try:
+            read_snapshot(icechunk.Repository.open(storage.icechunk_storage(str(store_root))))
+        except icechunk.RefNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Icechunk store has no readable branch") from exc
+
     cache = IMMUTABLE_CACHE if top in IMMUTABLE_ICECHUNK_FOLDERS else "no-cache"
     return FileResponse(full_path, media_type="application/octet-stream", headers={"Cache-Control": cache})
 
