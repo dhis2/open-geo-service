@@ -75,7 +75,7 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
             if max(level["zoom"] for level in report["levels"]) < MIN_MAX_ZOOM:
                 tylertoo.overview(str(source), str(overview), max_zoom=MIN_MAX_ZOOM)
             tylertoo.export_pmtiles(str(overview), str(staging), layer_name=TILE_LAYER)
-        staging.replace(target)
+        layout.move_into_place(staging, target)
     except Exception:
         logger.warning("Could not build vector tiles for feature collection '%s'", collection_id, exc_info=True)
         return None

@@ -8,9 +8,13 @@ to the data folder. A storage backend for object storage replaces that one funct
 
 from __future__ import annotations
 
+import errno
+import os
+import shutil
 from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
+from uuid import uuid4
 
 from open_geo_service import config as api_config
 
@@ -85,14 +89,35 @@ def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
 
 
 def staging_dir() -> Path:
-    """A folder for files being written, which are then moved into place with `os.replace`.
+    """A folder for files being written, which are then moved into place with :func:`move_into_place`.
 
-    In the data folder, so the move stays on one filesystem and is atomic, but outside the
-    catalog, so a reader of the catalog never meets a partial file.
+    Outside the dataset folders, so a reader of them never meets a partial file.
     """
     folder = api_config.get_data_root() / "tmp"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def move_into_place(source: Path, target: Path) -> None:
+    """Move *source*, written in :func:`staging_dir`, over *target*, so a reader sees the old file or the new one.
+
+    When *target* is on another filesystem, as when a folder of the data folder is a mount of
+    its own, *source* is copied beside *target* under a hidden name first, so the last step is
+    still a rename within one filesystem.
+    """
+    try:
+        os.replace(source, target)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    beside = target.with_name(f".{target.name}.{uuid4().hex}.moving")
+    try:
+        shutil.copyfile(source, beside)
+        os.replace(beside, target)
+    finally:
+        beside.unlink(missing_ok=True)
+    source.unlink(missing_ok=True)
 
 
 def collection_marker(dataset_id: str) -> Path:

@@ -241,7 +241,7 @@ def write_feature_collection(
             row_group_size=ROW_GROUP_SIZE,
             compression=geoparquet.PARQUET_COMPRESSION,
         )
-        staging.replace(path)
+        layout.move_into_place(staging, path)
     finally:
         staging.unlink(missing_ok=True)
     return path, len(frame), str(frame.geometry.name)

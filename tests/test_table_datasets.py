@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import math
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,7 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
-from open_geo_service.shared import versions
+from open_geo_service.shared import layout, versions
 from open_geo_service.tables import store
 
 FIRST = datetime(2026, 3, 1, tzinfo=UTC)
@@ -176,23 +178,31 @@ def test_rows_are_filtered_by_collection_period_reducer_and_weights() -> None:
     assert values(collection_id="other") == []
 
 
-def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("own_filesystem", [False, True], ids=["one filesystem", "tables mounted separately"])
+def test_a_reader_during_a_write_sees_the_files_before_it(
+    monkeypatch: pytest.MonkeyPatch, stores: Path, own_filesystem: bool
+) -> None:
     record = _write([_row("D1", 10.0)], written_at=FIRST)
     seen: list[list[float | None]] = []
-    rename = store.os.replace
+    rename = os.replace
 
     def read_then_rename(source: Any, target: Any) -> None:
         # The record index is replaced the same way; only the table's file is under test here.
         if Path(target).suffix == ".parquet":
+            if own_filesystem and Path(source).parent == layout.staging_dir():
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
             # The new file is fully written under its temporary name, and not yet visible.
             assert Path(source).stat().st_size > 0
             seen.append(store.read_rows(record).column("value").to_pylist())
         rename(source, target)
 
-    monkeypatch.setattr(store.os, "replace", read_then_rename)
+    monkeypatch.setattr(os, "replace", read_then_rename)
     updated = _write([_row("D1", 11.0)], written_at=LATER)
 
     assert seen == [[10.0]]
+    # Nothing is left behind in the staging folder, nor hidden beside the dataset's files.
+    assert list(layout.staging_dir().iterdir()) == []
+    assert all(path.suffix == ".parquet" for path in (stores / "precip_districts").iterdir())
     # The new record names the new file only.
     assert store.read_rows(updated).column("value").to_pylist() == [11.0]
     assert updated.asset_paths != record.asset_paths
@@ -201,8 +211,6 @@ def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.Mo
 
 
 def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(stores: Path) -> None:
-    import os
-
     first = _write([_row("D1", 1.0)], written_at=FIRST)
     second = _write([_row("D1", 2.0)], written_at=LATER)
     # The second file replaced the first a while ago; the third write removes the first only.
@@ -262,7 +270,7 @@ def test_a_failed_write_leaves_no_file(monkeypatch: pytest.MonkeyPatch, stores: 
     def fail(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(store.os, "replace", fail)
+    monkeypatch.setattr(os, "replace", fail)
     with pytest.raises(OSError):
         _write([_row("D1", 10.0)])
     assert list((stores / "precip_districts").rglob("*")) == []

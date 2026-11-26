@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
@@ -500,7 +499,7 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
     staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
-        os.replace(staging, path)
+        layout.move_into_place(staging, path)
     finally:
         staging.unlink(missing_ok=True)
     return path
