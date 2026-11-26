@@ -2303,7 +2303,9 @@ def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
     artifact = _get_latest_published_icechunk_artifact(dataset_id)
     store_root = Path(artifact.path or artifact.asset_paths[0]).resolve()
 
-    full_path = (store_root / file_path).resolve()
+    # A client given the asset href, which ends in a slash, asks for `<href>/repo`; without the
+    # strip, `//repo` would name the absolute path /repo.
+    full_path = (store_root / file_path.lstrip("/")).resolve()
     if not full_path.is_relative_to(store_root):
         raise HTTPException(status_code=404, detail="Not found")
     if not full_path.is_file():
