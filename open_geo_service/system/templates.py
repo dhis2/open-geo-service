@@ -349,12 +349,12 @@ def _dataset_view(dataset: Any, template: dict[str, Any] | None) -> dict[str, An
     dataset ingested before thumbnails existed has none until its next sync, and linking a
     missing image would show a broken-image icon rather than the ramp.
     """
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
     colormap = _declared_colormap((template or {}).get("display"))
     status = "published" if dataset.publication.status == "published" else "unpublished"
     try:
-        has_thumbnail = thumbnail_path(dataset.dataset_id).is_file()
+        has_thumbnail = layout.find_thumbnail(dataset.item_type, dataset.dataset_id) is not None
     except OSError:
         has_thumbnail = False
     description = " ".join((dataset.description or "").split())

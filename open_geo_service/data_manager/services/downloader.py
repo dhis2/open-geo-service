@@ -14,20 +14,13 @@ from topozarr import CoarseningMethod
 from topozarr.coarsen import create_pyramid
 from xarray.backends.zarr import FillValueCoder
 
-from open_geo_service import config as api_config
+from open_geo_service.shared import layout
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
 from open_geo_service.shared.provisional import FETCHED_AT
 from open_geo_service.shared.raster_contract import prepare_for_publication
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_download_dir() -> Path:
-    return api_config.get_download_root()
-
-
-DOWNLOAD_DIR = _resolve_download_dir()
 
 
 # A grid larger than this gets overviews. Compared against the *grid* (nx * ny), not the
@@ -637,8 +630,7 @@ def _get_cache_prefix(dataset: dict[str, Any]) -> str:
 
 def get_zarr_path(dataset: dict[str, Any]) -> Path | None:
     """Return the optimised zarr archive path if it exists."""
-    prefix = _get_cache_prefix(dataset)
-    optimized = DOWNLOAD_DIR / f"{prefix}.zarr"
+    optimized = layout.raster_zarr(_get_cache_prefix(dataset))
     if optimized.exists():
         return optimized
     return None
@@ -646,8 +638,7 @@ def get_zarr_path(dataset: dict[str, Any]) -> Path | None:
 
 def get_icechunk_path(dataset: dict[str, Any]) -> Path:
     """Return the Icechunk store path for a dataset."""
-    prefix = _get_cache_prefix(dataset)
-    return DOWNLOAD_DIR / f"{prefix}.icechunk"
+    return layout.raster_store(_get_cache_prefix(dataset))
 
 
 def needs_pyramid(ds: xr.Dataset) -> bool:

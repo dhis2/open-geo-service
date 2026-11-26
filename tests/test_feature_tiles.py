@@ -18,10 +18,11 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service.features import providers as feature_providers
 from open_geo_service.features import services as feature_services
-from open_geo_service.features import store, tiles
 from open_geo_service.features import templates as feature_templates
+from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
+from open_geo_service.shared import layout, versions
 
 TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "code"}
 
@@ -34,9 +35,8 @@ def _no_vector_tiles() -> None:
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Keep collections, records and thumbnails out of the developer's data directory."""
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
+    root = layout.kind_root(layout.Kind.VECTOR)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -174,7 +174,7 @@ def test_a_failed_tile_build_does_not_fail_the_refresh(
 
     assert Path(str(record.path)).is_file()
     assert not tiles.archive_path(Path(str(record.path))).exists()
-    assert not [p for p in _isolated.iterdir() if p.name.endswith(".writing")]
+    assert not list(layout.staging_dir().glob("*.writing"))
     # Nothing advertises or serves an archive that is not there.
     assert client.get("/features/districts/data.pmtiles").status_code == 404
     collection = client.get("/stac/districts/collection.json").json()
@@ -255,9 +255,9 @@ def test_an_unpublished_collection_serves_no_tiles(client: TestClient) -> None:
 
 
 def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
-    _refresh()  # marks the first file superseded
+    _refresh()  # keeps the file it replaces
     current = Path(str(_refresh().path))  # removes it, past a zero grace period
 
     assert not first.exists()
@@ -267,10 +267,10 @@ def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyP
 
 def test_an_archive_that_cannot_be_removed_is_tried_again_later(monkeypatch: pytest.MonkeyPatch) -> None:
     """The archive goes before its Parquet file, so a failure leaves the version discoverable."""
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
     archive = tiles.archive_path(first)
-    _refresh()  # marks the first file superseded
+    _refresh()  # keeps the file it replaces
     archive.unlink()
     archive.mkdir()  # an archive that cannot be unlinked
     (archive / "held").touch()

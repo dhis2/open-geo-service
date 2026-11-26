@@ -186,7 +186,7 @@ from the dimension's metadata, so there's nothing extra to configure.
 
 | Field        | Required | Description                                                                    |
 | ------------ | -------- | ------------------------------------------------------------------------------ |
-| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API             |
+| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API and names the dataset's files (and, for a table, its folder): lowercase letters, digits, `_` and `-`, starting with a letter |
 | `name`       | Yes      | Full human-readable name shown in API responses and STAC metadata              |
 | `short_name` | No       | Short label used in compact displays                                           |
 | `variable`   | Yes      | Name of the data variable in the Zarr store (e.g. `precip`, `t2m`, `rainfall`) |

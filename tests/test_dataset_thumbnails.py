@@ -29,7 +29,7 @@ from matplotlib.colors import to_hex
 
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.ingestions import services as ingestion_services
-from open_geo_service.shared import thumbnails
+from open_geo_service.shared import layout, thumbnails
 from open_geo_service.shared.thumbnails import (
     THUMBNAIL_LONG_SIDE_PIXELS,
     colormap_stops,
@@ -38,7 +38,6 @@ from open_geo_service.shared.thumbnails import (
     representative_slice,
     resolve_colormap,
     stretch_range,
-    thumbnail_path,
     write_dataset_thumbnail,
 )
 
@@ -354,7 +353,7 @@ def test_a_failing_render_does_not_fail_the_ingest(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(thumbnails, "render_png", explode)
 
     assert write_dataset_thumbnail(store, DATASET, now=GENERATED_AT) is None
-    assert not thumbnail_path("thumb_dataset").exists()
+    assert not layout.thumbnail(layout.Kind.RASTER, "thumb_dataset").exists()
 
 
 def test_an_unreadable_store_does_not_fail_the_ingest(tmp_path: Path) -> None:
@@ -653,7 +652,7 @@ def test_one_ingest_produces_exactly_one_render(tmp_path: Path, monkeypatch: pyt
     )
 
     assert len(renders) == 1
-    assert thumbnail_path("thumb_dataset").is_file()
+    assert layout.thumbnail(layout.Kind.RASTER, "thumb_dataset").is_file()
 
 
 # -- how it reaches a client ----------------------------------------------------------------
@@ -724,7 +723,7 @@ def _published(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _write_a_thumbnail() -> Path:
-    path = thumbnail_path("thumb_dataset")
+    path = layout.thumbnail(layout.Kind.RASTER, "thumb_dataset")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\x89PNG\r\n\x1a\n fake but on disk")
     return path
@@ -754,7 +753,7 @@ def test_the_collection_omits_the_thumbnail_when_there_is_none(client: TestClien
     assert "zarr" in payload["assets"]
 
 
-def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
+def test_the_route_serves_the_thumbnail(client: TestClient, _published: None) -> None:
     written = _write_a_thumbnail()
 
     response = client.get("/datasets/thumb_dataset/thumbnail.png")
@@ -766,5 +765,5 @@ def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
     assert client.head("/datasets/thumb_dataset/thumbnail.png").status_code == 200
 
 
-def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient) -> None:
+def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient, _published: None) -> None:
     assert client.get("/datasets/thumb_dataset/thumbnail.png").status_code == 404

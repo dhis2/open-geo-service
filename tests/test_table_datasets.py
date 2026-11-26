@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import math
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ from fastapi.testclient import TestClient
 from open_geo_service import config as api_config
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
+from open_geo_service.shared import layout, versions
 from open_geo_service.tables import store
 
 FIRST = datetime(2026, 3, 1, tzinfo=UTC)
@@ -37,8 +40,7 @@ def _box(code: str, west: float, south: float) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Temporary feature, table and record stores, with a registered 'districts' collection."""
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
-    monkeypatch.setattr(api_config, "get_tables_root", lambda: tmp_path / "tables")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -72,7 +74,13 @@ def _write(rows: list[dict[str, Any]], written_at: datetime = FIRST) -> Any:
 
 
 def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(client: TestClient) -> None:
-    _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    record = _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    # As a table written before the id rule changed: its record keeps a schema id the rule refuses.
+    assert record.table_schema is not None
+    old_rule = record.model_copy(update={"table_schema": {**record.table_schema, "id": "monthly.v1"}})
+    ingestion_services._save_records(
+        [old_rule if r.artifact_id == record.artifact_id else r for r in ingestion_services._load_records()]
+    )
 
     listed = {item["dataset_id"]: item for item in client.get("/datasets").json()["items"]}
     table = listed["precip_districts"]
@@ -106,7 +114,7 @@ def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(c
 def test_a_revised_value_replaces_the_previous_one(
     client: TestClient, stores: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(feature_store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     _write([_row("D1", 10.0), _row("D2", 20.0)], written_at=FIRST)
     _write([_row("D1", 11.0)], written_at=LATER)
 
@@ -115,8 +123,9 @@ def test_a_revised_value_replaces_the_previous_one(
         ("D1", 11.0, "2026-04-01T00:00:00+00:00"),
         ("D2", 20.0, "2026-03-01T00:00:00+00:00"),
     ]
-    # One file holds the dataset; no history is kept.
-    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 1
+    # No history is kept: the file the record names, and the one it replaced for a reader that
+    # resolved the previous record.
+    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 2
 
     # Still one record, however many writes.
     assert (
@@ -169,23 +178,31 @@ def test_rows_are_filtered_by_collection_period_reducer_and_weights() -> None:
     assert values(collection_id="other") == []
 
 
-def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("own_filesystem", [False, True], ids=["one filesystem", "tables mounted separately"])
+def test_a_reader_during_a_write_sees_the_files_before_it(
+    monkeypatch: pytest.MonkeyPatch, stores: Path, own_filesystem: bool
+) -> None:
     record = _write([_row("D1", 10.0)], written_at=FIRST)
     seen: list[list[float | None]] = []
-    rename = store.os.replace
+    rename = os.replace
 
     def read_then_rename(source: Any, target: Any) -> None:
         # The record index is replaced the same way; only the table's file is under test here.
         if Path(target).suffix == ".parquet":
+            if own_filesystem and Path(source).parent == layout.staging_dir():
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
             # The new file is fully written under its temporary name, and not yet visible.
             assert Path(source).stat().st_size > 0
             seen.append(store.read_rows(record).column("value").to_pylist())
         rename(source, target)
 
-    monkeypatch.setattr(store.os, "replace", read_then_rename)
+    monkeypatch.setattr(os, "replace", read_then_rename)
     updated = _write([_row("D1", 11.0)], written_at=LATER)
 
     assert seen == [[10.0]]
+    # Nothing is left behind in the staging folder, nor hidden beside the dataset's files.
+    assert list(layout.staging_dir().iterdir()) == []
+    assert all(path.suffix == ".parquet" for path in (stores / "precip_districts").iterdir())
     # The new record names the new file only.
     assert store.read_rows(updated).column("value").to_pylist() == [11.0]
     assert updated.asset_paths != record.asset_paths
@@ -194,12 +211,10 @@ def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.Mo
 
 
 def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(stores: Path) -> None:
-    import os
-
     first = _write([_row("D1", 1.0)], written_at=FIRST)
     second = _write([_row("D1", 2.0)], written_at=LATER)
     # The second file replaced the first a while ago; the third write removes the first only.
-    replaced = Path(second.asset_paths[0]).stat().st_mtime - feature_store.SUPERSEDED_FILE_GRACE_SECONDS - 1
+    replaced = Path(second.asset_paths[0]).stat().st_mtime - versions.SUPERSEDED_FILE_GRACE_SECONDS - 1
     os.utime(first.asset_paths[0], (replaced - 1, replaced - 1))
     os.utime(second.asset_paths[0], (replaced, replaced))
     third = _write([_row("D1", 3.0)], written_at=datetime(2026, 5, 1, tzinfo=UTC))
@@ -255,7 +270,7 @@ def test_a_failed_write_leaves_no_file(monkeypatch: pytest.MonkeyPatch, stores: 
     def fail(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(store.os, "replace", fail)
+    monkeypatch.setattr(os, "replace", fail)
     with pytest.raises(OSError):
         _write([_row("D1", 10.0)])
     assert list((stores / "precip_districts").rglob("*")) == []

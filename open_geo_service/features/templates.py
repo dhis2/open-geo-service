@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id, require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +188,11 @@ def _parse_entry_point_feature_templates() -> list[tuple[str, dict[str, Any]]]:
                 file_templates = yaml.safe_load(resource.read_text(encoding="utf-8"))
                 if not isinstance(file_templates, list):
                     raise ValueError(f"{plugin_name} ({resource.name}) must contain a list of feature templates")
+                source = f"plugin '{plugin_name}' ({resource.name})"
                 for template in file_templates:
-                    _validate_feature_template(template, source=f"plugin '{plugin_name}' ({resource.name})")
+                    if has_refused_id(template, "feature template", source):
+                        continue
+                    _validate_feature_template(template, source=source)
                     results.append((plugin_name, template))
         except Exception:
             logger.exception("Error loading feature templates from plugin '%s'", plugin_name)
@@ -209,9 +212,14 @@ def _load_from_dir(folder: Path) -> list[dict[str, Any]]:
                 file_templates = yaml.safe_load(f)
                 if not isinstance(file_templates, list):
                     raise ValueError(f"{file_path.name} must contain a list of feature templates")
-                for template in file_templates:
+                kept = [
+                    template
+                    for template in file_templates
+                    if not has_refused_id(template, "feature template", str(file_path))
+                ]
+                for template in kept:
                     _validate_feature_template(template, source=str(file_path))
-                templates.extend(file_templates)
+                templates.extend(kept)
         except Exception:
             logger.exception("Error loading %s", file_path.name)
             raise
