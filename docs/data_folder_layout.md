@@ -8,25 +8,27 @@ The datasets sit in `catalog/`, one folder per dataset, laid out as a
 data/
   catalog/                       the datasets, and the STAC catalog describing them
     catalog.json  README.md  AGENTS.md
-    rasters/
+    rasters/                     a sub-catalog, while one of its datasets is published
       catalog.json  README.md  AGENTS.md
-      <id>/
+      <id>/                      from the dataset's first write
         collection.json  README.md  AGENTS.md
-        <id>.icechunk/           the Icechunk store
+                                 once the dataset is published
+        <id>.icechunk/           the Icechunk store: `repo`, which each commit replaces, and
+                                 snapshots/ manifests/ chunks/ transactions/, written once
         thumbnail.png
     vectors/
       catalog.json  README.md  AGENTS.md
       <id>/
         collection.json  README.md  AGENTS.md
-        <id>.<uuid>.parquet      one GeoParquet file per version
-        <id>.<uuid>.pmtiles      its vector tiles
+        <id>.<uuid>.parquet      the current GeoParquet file; a replaced one stays a minute
+        <id>.<uuid>.pmtiles      the vector tiles of each
         styles/default.json      its MapLibre style, with GEOSERVICE_BASE_URL set
         thumbnail.png
     tables/
       catalog.json  README.md  AGENTS.md
       <id>/
         collection.json  README.md  AGENTS.md
-        <stamp>-<uuid>.parquet   one Parquet file per version
+        <stamp>-<uuid>.parquet   the current Parquet file; a replaced one stays a minute
   artifacts/                     records.json, the dataset records, which name each dataset's
                                  current files, and the locks of their writes
   gc-pending/<id>                stores with unreachable data due for collection
