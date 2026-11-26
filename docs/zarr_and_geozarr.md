@@ -286,6 +286,12 @@ ds = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3, consolidat
 `main` holds the published version: writers commit to the `ingest` branch, and a dataset's readers see a version only
 once it is published (see [the managed data API guide](managed_data_api_guide.md), under versions and rollback).
 
+GDAL's Icechunk driver opens the repository through its `repo` file, since over HTTP it cannot tell that a URL is a directory without a listing. It opens `main` unless given a branch:
+
+```bash
+gdalinfo "ICECHUNK:/vsicurl/https://host/icechunk/era5land_precipitation_daily/repo?branch=published"
+```
+
 Both endpoints are advertised as assets in the STAC collection so clients can choose the appropriate one. Use `/zarr` for web maps and standard xarray workflows; use `/icechunk` when you need versioning or SDK-level access.
 
 ---
