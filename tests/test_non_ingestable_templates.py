@@ -242,3 +242,64 @@ def test_a_derived_template_needs_no_source_page() -> None:
     template = _template(sync={"kind": "static"}, produced_by="climate_normal", license="CC-BY-4.0")
 
     registry._validate_dataset_template(template, source="derived.yaml")  # does not raise
+
+
+# -- a declared plugin that cannot be loaded (CLIM-2043) --------------------------------------
+
+_BROKEN_RASTER = """\
+- id: typo_rainfall
+  name: Rainfall with a typo in its plugin
+  description: A raster template whose plugin path does not import.
+  variable: precip
+  units: mm
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugn}
+"""
+
+_BROKEN_TABLE = """\
+- id: wrong_class_table
+  name: A table whose plugin is not a table plugin
+  description: A table template naming a raster plugin.
+  source_url: https://example.org
+  license: CC-BY-4.0
+  period_type: monthly
+  collection: districts
+  ingestion: {plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugin}
+"""
+
+
+def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Listed as not ingestable with the reason, refused before a job starts, and the page
+    says why instead of offering a form that fails."""
+    from open_geo_service import config as api_config
+    from open_geo_service.extents import services as extent_services
+
+    (tmp_path / "rasters").mkdir()
+    (tmp_path / "rasters" / "typo.yaml").write_text(_BROKEN_RASTER, encoding="utf-8")
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "tables" / "wrong.yaml").write_text(_BROKEN_TABLE, encoding="utf-8")
+    config = api_config.get_config()
+    monkeypatch.setattr(api_config, "get_config", lambda: {**config, "plugins_dir": str(tmp_path)})
+    monkeypatch.setattr(
+        extent_services, "get_extent_or_404", lambda: {"bbox": [-13.5, 6.9, -10.1, 10.0], "country_code": "SLE"}
+    )
+
+    listed = {t["id"]: t for t in client.get("/data-sources").json()}
+    broken = [("typo_rainfall", "cannot be imported"), ("wrong_class_table", "is not a BaseTablePlugin")]
+    for dataset_id, reason in broken:
+        assert listed[dataset_id]["ingestable"] is False
+        assert reason in listed[dataset_id]["ingestion_error"]
+        for headers in ({}, {"Prefer": "respond-async"}):
+            response = client.post("/ingestions", json={"dataset_id": dataset_id}, headers=headers)
+            assert response.status_code == 400, response.text
+            assert reason in response.json()["detail"]
+        page = client.get(f"/data-sources/{dataset_id}", params={"f": "html"}).text
+        assert reason in page
+        assert 'name="start"' not in page
+    assert listed["chirps3_precipitation_daily"]["ingestable"] is True
+    assert "ingestion_error" not in listed["chirps3_precipitation_daily"]

@@ -122,6 +122,8 @@
                 This dataset is not fetched from a provider{% if produced_by %}; it is produced by the
                 <a href="{{ mount }}/workflows/{{ produced_by }}">{{ produced_by }}</a> workflow{% endif %}.
               </p>
+              {% elif plugin_error %}
+              <p class="note">This data source cannot be ingested here: {{ plugin_error }}.</p>
               {% elif sign_in %}
               <p class="note">{{ sign_in_note(mount, "ingest data here") }}</p>
               {% elif read_only %}

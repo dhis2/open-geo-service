@@ -139,7 +139,7 @@ async def manage_ingest(request: Request) -> Response:
     from open_geo_service.data_registry.services import datasets as registry_datasets
     from open_geo_service.extents.services import get_extent_or_404
     from open_geo_service.ingestions.processes import ingest_dataset, record_inline_update
-    from open_geo_service.ingestions.services import ensure_ingestable, get_ingestable_template
+    from open_geo_service.ingestions.services import ensure_ingestable, ensure_plugin_loads, get_ingestable_template
     from open_geo_service.tables.templates import is_table_template
 
     try:
@@ -159,6 +159,8 @@ async def manage_ingest(request: Request) -> Response:
         # event stream, where a refusal arrives as an event after a 200 instead of as the
         # refusal it is. A workflow output has nothing to fetch from...
         ensure_ingestable(template)
+        # ...a plugin that cannot be loaded has no way to fetch...
+        ensure_plugin_loads(template)
         # ...and only a forecast may leave the start blank.
         # A climatology has no start to give: its ids are ordinals and its reference period is
         # fixed by the template, so the form offers no date and the refusal must not demand one.

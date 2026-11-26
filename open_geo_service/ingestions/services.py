@@ -430,6 +430,19 @@ def ensure_ingestable(dataset: dict[str, object]) -> None:
     )
 
 
+def ensure_plugin_loads(dataset: dict[str, Any]) -> None:
+    """Raise 400 when the plugin *dataset* declares cannot be loaded (CLIM-2043).
+
+    Called where a request enters ingestion, before a job is queued or an event stream opens,
+    for the reason `ensure_ingestable` gives. Past that point a plugin that fails to load is
+    reported by the job, as a 500 from `_load_streaming_plugin`.
+    """
+    from open_geo_service.shared.plugin_loader import plugin_load_error
+
+    if (reason := plugin_load_error(dataset)) is not None:
+        raise HTTPException(status_code=400, detail=f"Data source '{dataset['id']}' cannot be ingested: {reason}")
+
+
 def get_ingestable_template(dataset_id: str) -> dict[str, Any] | None:
     """The raster or table template `POST /ingestions` ingests as *dataset_id*, raster first, or None."""
     from open_geo_service.tables.templates import get_table_template

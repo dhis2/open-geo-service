@@ -27,7 +27,8 @@ def _template(template_id: str, **fields: Any) -> dict[str, Any]:
 
 
 def _ingestable(template_id: str, **fields: Any) -> dict[str, Any]:
-    return _template(template_id, ingestion={"plugin": "some.Plugin"}, **fields)
+    plugin = "open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin"
+    return _template(template_id, ingestion={"plugin": plugin}, **fields)
 
 
 class _VisibleText(HTMLParser):

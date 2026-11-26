@@ -74,6 +74,7 @@ def _ingestable_template_or_404(dataset_id: str) -> dict[str, Any]:
         )
     if template is None:
         raise HTTPException(status_code=404, detail=f"Data source '{dataset_id}' not found")
+    services.ensure_plugin_loads(template)
     return template
 
 
