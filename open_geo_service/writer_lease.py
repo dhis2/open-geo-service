@@ -37,6 +37,9 @@ _held: dict[Path, portalocker.Lock] = {}
 _held_mutex = threading.Lock()
 # Set by a read-only server, which must never become the writer, not even when none is running.
 _read_only = False
+# One per feature collection or table dataset written in this process (`dataset_lock`).
+_dataset_locks: dict[str, threading.Lock] = {}
+_dataset_locks_mutex = threading.Lock()
 
 
 class WriterLeaseHeld(RuntimeError):
@@ -76,6 +79,19 @@ def ensure_held(role: str = "a script or notebook") -> None:
         # runs, the server refuses to start.
         level = logging.INFO if role == "server" else logging.WARNING
         logger.log(level, "Took the writer lease of %s for this process, as %s", data_root, role)
+
+
+def dataset_lock(dataset_id: str) -> threading.Lock:
+    """The lock that serializes writes to one feature collection or table dataset, in this process.
+
+    A write puts a new file and then the record naming it, so two writes to one dataset take
+    turns, or one could register a file the other's cleanup removes. Within one process is
+    enough: the lease keeps every other process from writing. Raises :class:`WriterLeaseHeld`,
+    as every write does, when this process may not write.
+    """
+    ensure_held()
+    with _dataset_locks_mutex:
+        return _dataset_locks.setdefault(dataset_id, threading.Lock())
 
 
 def refuse_writes() -> None:

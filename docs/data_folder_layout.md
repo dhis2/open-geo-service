@@ -30,7 +30,7 @@ data/
         collection.json  README.md  AGENTS.md
         <stamp>-<uuid>.parquet   the current Parquet file; a replaced one stays a minute
   artifacts/                     records.json, the dataset records, which name each dataset's
-                                 current files, and the locks of their writes
+                                 current files
   gc-pending/<id>                stores with unreachable data due for collection
   tmp/                           files being written
   cache/                         source downloads kept for reuse
@@ -117,6 +117,20 @@ GeoService does not have yet. The documents of an instance that requires sign-in
 sign-in schemes (`auth:schemes`), which a copy hosted elsewhere would advertise. The dataset
 pages and `/datasets/{id}` give the `/zarr` URL either way, and openEO's `/collections` are
 still built on request, with absolute links.
+
+## Icechunk format version
+
+Raster stores are written in Icechunk spec version 2, the format of every Icechunk 2.x release,
+and the `icechunk>=2.3.1,<3` bound in `pyproject.toml` is what keeps it there. Icechunk 2.x reads
+repositories of spec version 1 and 2, and `icechunk.upgrade_icechunk_repository` migrates one
+from version 1 to 2. Icechunk 2.1 changed the format without a new version number; its
+specification calls that change backwards and forwards compatible.
+
+Icechunk's documentation makes no wider promise about which later versions will read today's
+repositories. So raising that bound to a new major version is a deliberate change: first check
+that the readers of an instance's stores open the new format (icechunk-js in the map viewer and
+DHIS2 Maps, GDAL's Icechunk driver, the QGIS Datacube Viewer), and say in the release notes which
+of them it leaves behind.
 
 ## Moving an instance to this layout
 

@@ -277,39 +277,21 @@ def test_a_failed_write_leaves_no_file(monkeypatch: pytest.MonkeyPatch, stores: 
     assert list((stores / "precip_districts").rglob("*")) == []
 
 
-def test_a_write_waits_for_a_write_in_another_process() -> None:
-    """Another process, a second worker or a CLI run, may be writing the same dataset."""
-    import subprocess
-    import sys
+def test_a_write_waits_for_another_write_to_the_same_dataset() -> None:
+    """Writes to one table take turns in the writer, and leave no lock file: the writer lease
+    keeps other processes out (`test_writer_lease.py`), so the lock is in-process (CLIM-1985)."""
     import threading
 
-    lock = Path(ingestion_services.ARTIFACTS_DIR) / "locks" / "table-precip_districts.lock"
-    lock.parent.mkdir(parents=True)
-    holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import portalocker, sys\n"
-            "handle = open(sys.argv[1], 'a')\n"
-            "portalocker.lock(handle, portalocker.LOCK_EX)\n"
-            "print('locked', flush=True)\n"
-            "sys.stdin.read()",
-            str(lock),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    assert holder.stdout is not None and holder.stdin is not None
-    assert holder.stdout.readline().strip() == "locked"
-    writer = threading.Thread(target=_write, args=([_row("D1", 1.0)],))
-    writer.start()
-    writer.join(timeout=0.5)
-    assert writer.is_alive()
-    holder.stdin.close()
-    holder.wait(timeout=10)
+    from open_geo_service import writer_lease
+
+    with writer_lease.dataset_lock("precip_districts"):
+        writer = threading.Thread(target=_write, args=([_row("D1", 1.0)],))
+        writer.start()
+        writer.join(timeout=0.5)
+        assert writer.is_alive()
     writer.join(timeout=10)
     assert len(store.read_rows(ingestion_services.published_table_artifacts_by_dataset()["precip_districts"])) == 1
+    assert not (Path(ingestion_services.ARTIFACTS_DIR) / "locks").exists()
 
 
 @pytest.mark.parametrize(

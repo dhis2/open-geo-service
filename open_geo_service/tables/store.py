@@ -37,7 +37,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
-from open_geo_service import storage
+from open_geo_service import storage, writer_lease
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -49,7 +49,6 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.shared import layout
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
-from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.urls import require_segment_safe_id
 from open_geo_service.shared.versions import prune_superseded
 from open_geo_service.tables.schemas import DEFAULT_SCHEMA, WRITTEN_AT, TableSchema, declared_schema, get_schema
@@ -88,15 +87,10 @@ def unit_of(record: ArtifactRecord, column: str) -> str | None:
     return None
 
 
-def _dataset_lock(dataset_id: str) -> AbstractContextManager[None]:
-    """Serialize writes to one dataset across processes, so no write's record drops another's file.
-
-    The lock file sits beside the records index, so a refused write leaves the table store as it was.
-    """
-    from open_geo_service.ingestions import services as ingestion_services
-
+def _dataset_lock(dataset_id: str) -> AbstractContextManager[bool]:
+    """Serialize writes to one table dataset (`writer_lease.dataset_lock`), after checking its id."""
     require_segment_safe_id(dataset_id, "table dataset id")
-    return index_lock(Path(ingestion_services.ARTIFACTS_DIR) / "locks" / f"table-{dataset_id}")
+    return writer_lease.dataset_lock(dataset_id)
 
 
 def write_rows(
