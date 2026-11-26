@@ -933,6 +933,18 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
     _write([_row("D1", 1.0)])
     assert client.post("/sync/precip_districts", json={}).status_code == 409
 
+    # A schema file that cannot be read refuses startup, naming the file, rather than failing every listing.
+    from open_geo_service.main import app
+    from open_geo_service.tables.schemas import reset_schema_caches
+    from open_geo_service.tables.templates import reset_table_template_caches
+
+    schema_file = plugins_dir / "plugins" / "tables" / "schemas" / "visits.yaml"
+    schema_file.write_text(VISITS_SCHEMA.replace("unit: visits", "units: visits"), encoding="utf-8")
+    reset_schema_caches()
+    reset_table_template_caches()
+    with pytest.raises(ValueError, match=r"table schema 'district_visits' in .*\(visits.yaml\)"), TestClient(app):
+        pass
+
 
 def test_a_table_template_in_an_installed_plugin_package_is_discovered(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
