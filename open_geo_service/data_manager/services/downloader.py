@@ -452,7 +452,7 @@ class _PyramidLevels:
                     values = np.ascontiguousarray(base_arr[a:b])
                     for group in self.groups[1:]:
                         target = cast(zarr.Array, group[name])
-                        reduced = block_reduce(values, stride, composable_method, target.fill_value, True)
+                        reduced = block_reduce(values, stride, composable_method, target.fill_value)
                         reduced = reduced[(slice(None), *(slice(0, s) for s in target.shape[1:]))]
                         values = np.ascontiguousarray(reduced.astype(target.dtype, copy=False))
                         target[a:b] = values
@@ -840,9 +840,27 @@ def write_to_icechunk_store(
         # levels from native below (see #293 and carbonplan/topozarr#26).
         native_resample = pyramid_method in _NATIVE_RESAMPLE_METHODS
         composable_method = "max" if native_resample else pyramid_method
+        time_coords: list[str] = []
+        if t_dim is not None:
+            # Every sync reads level 0's whole time axis (`t`, `fetched_at`) to plan, so the
+            # coordinates along it are chunked as the root's, not one value per chunk (CLIM-2015).
+            # A fixed chunk rather than the current length: an append keeps the chunk the array
+            # was built with. In memory (1-D, small), so no dask chunk spans two stored ones; the
+            # data variables stay lazy.
+            time_coords = [str(name) for name, coord in ds.coords.items() if coord.dims == (t_dim,)]
+            ds = ds.assign_coords({name: ds.variables[name].compute() for name in time_coords})
         pyramid = create_pyramid(
             ds, levels=levels, x_dim=x_dim, y_dim=y_dim, method=cast(CoarseningMethod, composable_method)
         )
+        # An encoding given to the write replaces the variable's own, so carry its CF keys over:
+        # `fetched_at` is float64 seconds (FETCHED_AT_ENCODING), not whole days.
+        time_coord_encodings = {
+            name: {key: value for key, value in ds[name].encoding.items() if key in ("units", "calendar", "dtype")}
+            for name in time_coords
+        }
+        for level_encoding in pyramid.encoding.values():
+            for name, encoding in time_coord_encodings.items():
+                level_encoding[name] = {**encoding, "chunks": (_ROOT_TIME_COORD_MAX_CHUNK,)}
         # Pyramid.write() writes the root group attributes from ``pyramid.attrs``,
         # so merge the GeoZarr conventions (multiscales / proj / spatial) in here.
         pyramid.attrs.update(geozarr_attrs)
