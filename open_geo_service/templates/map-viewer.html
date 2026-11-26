@@ -305,10 +305,8 @@
       //   senorge_precipitation_daily (2026-08-06, ["y","x"]) -> correct
       //
       // No upstream bug is involved; an earlier report of one was withdrawn
-      // (carbonplan/zarr-layer#88). CLIM-1006 (CHIRPS3 streaks on the Rwanda instance) was
-      // reported against 0.6.1, which never read these attributes, so it is a separate
-      // fault and still open.
-      import { ZarrLayer } from "https://esm.sh/@carbonplan/zarr-layer@0.9.1";
+      // (carbonplan/zarr-layer#88).
+      import { ZarrLayer } from "https://esm.sh/@carbonplan/zarr-layer@0.12.1";
       // A raster is read from its Icechunk repository, the collection's `icechunk` asset, not
       // chunk by chunk through `/zarr` (CLIM-1580). The browser resolves chunks from the
       // manifests itself, so the server only serves files, which a bucket or CDN can serve
