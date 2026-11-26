@@ -210,6 +210,13 @@ async def _services() -> AsyncGenerator[None]:
     api_config.get_snapshot_retention()  # so does a malformed retention, which would stop cleanup
     # After plugins load, so a recipe is checked against the workflows it will run.
     derivations.validate_recipes()
+    # A malformed table schema or template refuses startup, naming its file, as a raster template
+    # does through the recipes above; read on first use instead, it would fail every listing.
+    from open_geo_service.tables.schemas import DEFAULT_SCHEMA, get_schema
+    from open_geo_service.tables.templates import list_table_templates
+
+    get_schema(DEFAULT_SCHEMA)  # reads every schema file, so a bad one is named on its own
+    list_table_templates()
     maintenance: asyncio.Task[None] | None = None
     pipeline_recovery: asyncio.Task[None] | None = None
     notification_replay: asyncio.Task[None] | None = None
