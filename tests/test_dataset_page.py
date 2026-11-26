@@ -247,13 +247,20 @@ def test_a_dataset_with_a_thumbnail_links_it() -> None:
     path = layout.thumbnail(layout.Kind.RASTER, "rendered_dataset")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"png")
+    # Written by the catalog for a published dataset.
+    collection = path.with_name("collection.json")
+    collection.write_text("{}")
     try:
         view = landing._dataset_view(_record("rendered_dataset"), None)
         assert view["has_thumbnail"] is True
         # Linked from the catalog, which serves it without reading the records.
         assert TestClient(app).get(view["thumbnail"]).content == b"png"
+        # Not one not published, which the catalog does not serve.
+        unpublished = _record("rendered_dataset", publication={"status": "unpublished"})
+        assert landing._dataset_view(unpublished, None)["thumbnail"] == "/datasets/rendered_dataset/thumbnail.png"
     finally:
         path.unlink()
+        collection.unlink()
 
 
 def test_the_dataset_page_names_the_workflow_that_produced_it() -> None:

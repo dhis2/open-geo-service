@@ -316,13 +316,20 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
     ranged = client.get(f"/stac/vectors/districts/{data_file.name}", headers={"Range": "bytes=0-3"})
     assert ranged.status_code == 206 and ranged.content == b"PAR1"
     # A reader of a store sends a request per chunk, so a file is served without reading the records.
-    monkeypatch.setattr(ingestion_services, "_load_records", lambda: pytest.fail("a file request read the records"))
-    assert client.get(f"/stac/vectors/districts/{data_file.name}").status_code == 200
+    with monkeypatch.context() as patched:
+        patched.setattr(ingestion_services, "_load_records", lambda: pytest.fail("a file request read the records"))
+        assert client.get(f"/stac/vectors/districts/{data_file.name}").status_code == 200
 
-    # As from any copy of the folder: not ready rather than private, and nothing links to it.
+    # Not served before it is published, as `/zarr` and `/icechunk` serve no unpublished store.
     unpublished = next((data / "catalog" / "vectors" / "regions").glob("*.parquet"))
-    assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 200
+    assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 404
     assert client.get("/stac/vectors/regions/collection.json").status_code == 404
+    feature_services.refresh_feature_collection(
+        template={**DISTRICTS, "id": "regions", "name": "Regions"},
+        features={"type": "FeatureCollection", "features": [_box("R1")]},
+    )
+    published = next((data / "catalog" / "vectors" / "regions").glob("*.parquet"))
+    assert client.get(f"/stac/vectors/regions/{published.name}").status_code == 200
     assert client.get("/stac/../artifacts/records.json").status_code == 404
     assert client.get("/stac/rasters/%2E%2E/%2E%2E/artifacts/records.json").status_code == 404
     # A kind folder on another disk, linked into the catalog, is served as any other.

@@ -58,9 +58,9 @@ data/
 - **A new version of a vector or table dataset is a new file.** The record names the current
   one. A replaced file is removed once the file that replaced it is a minute old, so a reader
   that has just read the record can still open the file it named.
-- **The records decide what is listed.** The listings and the catalog read the records, never
-  the folder. They do not control access: `/stac`, like any static host of `catalog/`, serves a
-  folder no published record names (see below).
+- **The records decide what is listed and served.** The listings and the catalog read the
+  records, never the folder, and `/stac` serves no file in the folder of a dataset not
+  published (see below).
 
 ## The catalog
 
@@ -85,9 +85,11 @@ server writes none of it, so after an upgrade the writer starts first.
   published needs the setting.
 
 `/stac` serves `catalog/` as a static host of it would: the documents and the data files beside
-them, without reading the records. A dataset written but not yet published is reachable by its
-path there, as in any copy of the folder, but nothing links to it: unpublished means not ready,
-not private. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way, and
+them. The one difference is a dataset written but not yet published, such as an openEO result
+saved with `publish: false`: `/stac` answers 404 for every file in a folder without a
+`collection.json`, as `/zarr` and `/icechunk` do for an unpublished store, so its data and a
+store's write branch stay on the instance until it is published. A copy of `catalog/` holds those folders too, so publish a copy only when everything in
+it may be read. The dataset pages and `/datasets/{id}` give the `/zarr` URL either way, and
 openEO's `/collections` are still built on request, with absolute links.
 
 ## Moving an instance to this layout

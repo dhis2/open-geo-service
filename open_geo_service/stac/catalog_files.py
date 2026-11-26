@@ -352,14 +352,17 @@ def cache_control(file: Path) -> str:
 def served_file(path: str) -> tuple[Path, str]:
     """The file at *path* in `catalog/` and its media type, or 404, as a static host of the folder serves it.
 
-    No records are read: a dataset written but not yet published is not ready rather than private,
-    as wherever else the folder is served (`docs/data_folder_layout.md`), and no catalog links to it.
+    Except that a dataset folder is served only once the catalog has its `collection.json`, which
+    is written for a published dataset only: not an openEO result saved with `publish: false`, nor
+    a store's write branch before its first publication (`docs/data_folder_layout.md`). That is a
+    file check, so a store reader's request per chunk does not read the records.
     """
     # Checked on the path as given rather than resolved, so a folder that is a symlink to another
     # disk is served; a `..` segment is what could leave the folder.
     parts = PurePosixPath(path).parts
     target = layout.catalog_root().joinpath(*parts)
-    if path.startswith("/") or "\\" in path or ".." in parts or not target.is_file():
+    unpublished = len(parts) > 2 and not layout.catalog_root().joinpath(*parts[:2], "collection.json").is_file()
+    if path.startswith("/") or "\\" in path or ".." in parts or unpublished or not target.is_file():
         raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
     if target.parent.name == portolan.STYLES and target.suffix == ".json":
         return target, tiles.STYLE_MEDIA_TYPE
