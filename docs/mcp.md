@@ -4,7 +4,7 @@ An instance can serve an [MCP](https://modelcontextprotocol.io) endpoint at `/mc
 
 MCP is an open standard. Any MCP client works: Claude, ChatGPT, GitHub Copilot, Gemini CLI, code editors, or a model running locally. The assistant chooses the dataset and the area; the instance computes every value, and each result includes the openEO process graph that produced it, so an answer can be checked and reproduced without the assistant.
 
-This is a first version, off by default while it settles (CLIM-851).
+This is a first version, off by default. The endpoint will be updated as GeoService develops: tools, their arguments and their results may change between releases, so check them again after an upgrade rather than relying on today's shape.
 
 ## Enable it
 
@@ -23,7 +23,7 @@ Give the client the instance's `/mcp` address:
 - **A client on the same computer** (Claude Code, an editor, a local model) can use `http://localhost:<port>/mcp`. With Claude Code:
 
     ```bash
-    claude mcp add --transport http ocs http://localhost:9000/mcp
+    claude mcp add --transport http geoservice http://localhost:9000/mcp
     ```
 
 - **A cloud client** (claude.ai, ChatGPT) connects from the provider's servers, not from your computer, so it needs the instance at a public HTTPS address. An instance on a laptop needs a tunnel or a hosted deployment for these.
