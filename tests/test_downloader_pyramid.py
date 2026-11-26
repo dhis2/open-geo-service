@@ -56,7 +56,7 @@ def test_write_to_icechunk_store_builds_pyramid(tmp_path: Path) -> None:
     write_to_icechunk_store(ds, store_path, crs="EPSG:4326")
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    store = repo.readonly_session("main").store
+    store = repo.readonly_session("ingest").store
     root = zarr.open_group(store, mode="r")
 
     # Root carries the multiscales metadata, and the level groups exist.
@@ -188,7 +188,7 @@ def test_write_to_icechunk_store_mode_keeps_class_codes(tmp_path: Path) -> None:
     write_to_icechunk_store(ds, store_path, t_dim=None, crs="EPSG:4326", pyramid_method="mode")
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    store = repo.readonly_session("main").store
+    store = repo.readonly_session("ingest").store
 
     # A coarsened level must contain only real class codes — never an averaged value
     # (which is exactly what the previous hardcoded "mean" produced for categorical data).
@@ -254,7 +254,7 @@ def test_pyramid_build_never_materialises_the_source(tmp_path: Path, monkeypatch
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    root = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    root = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
     assert "multiscales" in dict(root.attrs)
     assert {"0", "1"} <= {k for k, _ in root.groups()}
 
@@ -296,7 +296,7 @@ def test_pyramid_levels_carry_the_crs_definition_and_not_just_the_code(tmp_path:
     write_to_icechunk_store(_projected_pyramid_sized_cube(), store_path, crs="EPSG:27700")
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    root = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    root = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
 
     levels = [(f"level {key}", dict(root[key].attrs)) for key in sorted(root.group_keys())]
     for name, attrs in [("root", dict(root.attrs)), *levels]:

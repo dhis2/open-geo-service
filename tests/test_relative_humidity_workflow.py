@@ -12,6 +12,7 @@ import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activat
 import xarray as xr
 from openeo_pg_parser_networkx.process_registry import Process
 
+from open_geo_service import config as api_config
 from open_geo_service.data_registry.services import datasets as registry
 from open_geo_service.openeo import jobs
 from open_geo_service.openeo import workflows as workflow_store
@@ -19,6 +20,7 @@ from open_geo_service.openeo.execution import (
     _augment_with_workflows,
     _new_process_registry,
 )
+from open_geo_service.shared import layout
 
 
 def _cube(celsius: float) -> xr.DataArray:
@@ -109,8 +111,8 @@ def managed_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path / "rasters")
-    (tmp_path / "rasters").mkdir()
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
+    (tmp_path / "catalog" / "rasters").mkdir(parents=True)
     return tmp_path
 
 
@@ -128,8 +130,8 @@ def test_relative_humidity_workflow_publishes_as_percent(managed_instance: Path)
     assert template["units"] == "%"
     assert template["variable"] == "rh"
     assert template["period_type"] == "daily"
-    store_path = managed_instance / "rasters" / "era5land_relative_humidity_daily_estimated.icechunk"
+    store_path = layout.raster_store("era5land_relative_humidity_daily_estimated")
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    stored = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+    stored = xr.open_zarr(repo.readonly_session("ingest").store, consolidated=False)
     assert stored["rh"].attrs["units"] == "%"
     assert np.allclose(stored["rh"].values, 53.82, atol=0.01)

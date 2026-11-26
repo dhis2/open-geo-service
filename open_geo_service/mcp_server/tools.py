@@ -30,9 +30,10 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
 from open_geo_service.mcp_server.endpoint import current_scope
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import iso_step_to_approx_hours
 from open_geo_service.shared.urls import absolute_base, is_segment_safe_id, path_segment
-from open_geo_service.stac.services import collection_path
+from open_geo_service.stac.services import collection_path, subcatalog_path
 
 logger = logging.getLogger(__name__)
 
@@ -201,11 +202,11 @@ def _checked_id(dataset_id: str) -> str:
 
 async def _raster(client: httpx.AsyncClient, dataset_id: str) -> dict[str, Any]:
     """A raster's STAC collection."""
-    collection: dict[str, Any] = await _get_json(client, collection_path(_checked_id(dataset_id)))
+    collection: dict[str, Any] = await _get_json(client, collection_path(layout.Kind.RASTER, _checked_id(dataset_id)))
     return collection
 
 
-def _links(dataset_id: str) -> dict[str, str]:
+def _links(kind: layout.Kind, dataset_id: str) -> dict[str, str]:
     """Links to show the user, at the instance's public address.
 
     Behind a proxy that address may differ from the one the call came in on.
@@ -213,7 +214,7 @@ def _links(dataset_id: str) -> dict[str, str]:
     base = absolute_base(Request(current_scope.get()))
     return {
         "dataset_url": f"{base}/datasets/{path_segment(dataset_id)}",
-        "stac_url": f"{base}{collection_path(dataset_id)}",
+        "stac_url": f"{base}{collection_path(kind, dataset_id)}",
         "map_url": f"{base}/map?dataset={quote(dataset_id, safe='')}",
     }
 
@@ -235,10 +236,12 @@ def _period_dimensions(collection: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], links: dict[str, str]) -> DatasetSummary:
+def _summarise(
+    dataset_id: str, collection: dict[str, Any], kind: Literal["raster", "areas"], links: dict[str, str]
+) -> DatasetSummary:
     summary = DatasetSummary(
-        id=collection["id"],
-        title=collection.get("title") or collection["id"],
+        id=dataset_id,  # the collection's id is `{kind}/{id}`; every tool takes the dataset's own
+        title=collection.get("title") or dataset_id,
         kind=kind,
         description=collection.get("description"),
         dataset_url=links["dataset_url"],
@@ -265,33 +268,46 @@ def _is_areas(record: dict[str, Any]) -> bool:
     return bool(types) and all("Polygon" in kind for kind in types)
 
 
+async def _published(client: httpx.AsyncClient, kind: layout.Kind) -> list[str]:
+    """The ids of the published datasets of *kind*, from its sub-catalog, which exists once one is published."""
+    response = await client.get(subcatalog_path(kind))
+    if response.status_code == 404:
+        return []
+    if not response.is_success:
+        raise ToolError(
+            f"The instance refused {subcatalog_path(kind)} ({response.status_code}): {_error_detail(response)}"
+        )
+    # A child link is `./{id}/collection.json`.
+    links: list[dict[str, Any]] = response.json().get("links", [])
+    return [unquote(str(link["href"]).rsplit("/", 2)[-2]) for link in links if link.get("rel") == "child"]
+
+
 async def _catalogue(client: httpx.AsyncClient) -> list[DatasetSummary]:
-    catalog = await _get_json(client, "/stac/catalog.json")
-    # A child link is `.../stac/{id}/collection.json`.
     ids = [
-        unquote(str(link["href"]).rsplit("/", 2)[-2]) for link in catalog.get("links", []) if link.get("rel") == "child"
+        (kind, dataset_id)
+        for kind in (layout.Kind.RASTER, layout.Kind.VECTOR)
+        for dataset_id in await _published(client, kind)
     ]
     # The records, not the STAC documents, know what each dataset holds and when it was last
     # updated. Tables, and features other than areas, are left out: no tool reads them yet.
     records = {item["dataset_id"]: item for item in (await _get_json(client, "/datasets?f=json")).get("items", [])}
     features = {item["id"]: item for item in (await _get_json(client, "/features")).get("items", [])}
     summaries: list[DatasetSummary] = []
-    for dataset_id in ids:
+    for stored_as, dataset_id in ids:
         record = records.get(dataset_id, {})
-        item_type = record.get("itemType", "coverage")
-        if item_type == "coverage":
+        if stored_as is layout.Kind.RASTER:
             kind: Literal["raster", "areas"] = "raster"
-        elif item_type == "feature" and _is_areas(features.get(dataset_id, {})):
+        elif _is_areas(features.get(dataset_id, {})):
             kind = "areas"
         else:
             continue
         try:
-            collection = await _get_json(client, collection_path(dataset_id))
+            collection = await _get_json(client, collection_path(stored_as, dataset_id))
         except ToolError as error:
             # One broken or just-removed dataset must not hide the rest of the catalogue.
             logger.warning("Leaving %s out of the MCP catalogue: %s", dataset_id, error)
             continue
-        summary = _summarise(collection, kind, _links(dataset_id))
+        summary = _summarise(dataset_id, collection, kind, _links(stored_as, dataset_id))
         summary.last_updated = record.get("last_updated")
         summaries.append(summary)
     return summaries
@@ -579,7 +595,7 @@ def build_server() -> MCPServer:
                 lat=lat,
                 rows=[TimeseriesRow(period=row["period"], value=_number(row["value"])) for row in rows],
                 process_graph=graph,
-                **_links(dataset_id),
+                **_links(layout.Kind.RASTER, dataset_id),
             )
 
     @server.tool(annotations=read_only)
@@ -656,7 +672,7 @@ def build_server() -> MCPServer:
                     for row in rows
                 ],
                 process_graph=graph,
-                **_links(dataset_id),
+                **_links(layout.Kind.RASTER, dataset_id),
             )
 
     return server

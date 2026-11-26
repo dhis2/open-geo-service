@@ -16,7 +16,7 @@ from open_geo_service.data_registry import recipes
 from open_geo_service.ingestions.schemas import parse_declared_artifact_version
 from open_geo_service.shared.provisional import parse_refresh_after
 from open_geo_service.shared.time import SUPPORTED_PERIOD_TYPES
-from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id, require_segment_safe_id
 
 logger = logging.getLogger(__name__)
 
@@ -344,13 +344,37 @@ def _parse_entry_point_datasets() -> list[tuple[str, dict[str, Any]]]:
                 file_datasets = yaml.safe_load(resource.read_text(encoding="utf-8"))
                 if not isinstance(file_datasets, list):
                     raise ValueError(f"{plugin_name} ({resource.name}) must contain a list of dataset templates")
+                source = f"plugin '{plugin_name}' ({resource.name})"
                 for dataset in file_datasets:
-                    _validate_dataset_template(dataset, source=f"plugin '{plugin_name}' ({resource.name})")
+                    if _refuses_an_id(dataset, source):
+                        continue
+                    _validate_dataset_template(dataset, source=source)
                     results.append((plugin_name, dataset))
         except Exception:
             logger.exception("Error loading dataset templates from plugin '%s'", plugin_name)
             raise
     return results
+
+
+def _refuses_an_id(dataset: object, source: str) -> bool:
+    """True when a template from an instance or a plugin names an id the rule refuses, so it is skipped.
+
+    Its own id, or the dataset its recipe is refreshed on: a template written under the earlier,
+    looser rule must not take down every template beside it (`shared.urls.has_refused_id`).
+    """
+    if has_refused_id(dataset, "dataset template", source):
+        return True
+    if not isinstance(dataset, dict):
+        return False
+    produced_by = dataset.get("produced_by")
+    if not isinstance(produced_by, dict):
+        return False
+    arguments = produced_by.get("arguments")
+    refresh_on = produced_by.get("refresh_on")
+    if not isinstance(arguments, dict) or not isinstance(refresh_on, str):
+        return False
+    driver = arguments.get(refresh_on)
+    return has_refused_id({"id": driver}, f"dataset refreshing '{dataset.get('id')}'", source)
 
 
 def _load_from_dir(folder: Path) -> list[dict[str, Any]]:
@@ -366,9 +390,10 @@ def _load_from_dir(folder: Path) -> list[dict[str, Any]]:
                 file_datasets = yaml.safe_load(f)
                 if not isinstance(file_datasets, list):
                     raise ValueError(f"{file_path.name} must contain a list of dataset templates")
-                for dataset in file_datasets:
+                kept = [dataset for dataset in file_datasets if not _refuses_an_id(dataset, str(file_path))]
+                for dataset in kept:
                     _validate_dataset_template(dataset, source=str(file_path))
-                datasets.extend(file_datasets)
+                datasets.extend(kept)
         except Exception:
             logger.exception("Error loading %s", file_path.name)
             raise
@@ -413,7 +438,7 @@ def _validate_dataset_template(dataset: object, *, source: str) -> None:
     if not isinstance(dataset_id, str) or not dataset_id:
         raise ValueError(f"{source} contains a dataset template with a missing or invalid id")
     # The id becomes a path segment in every catalogue link this dataset gets —
-    # `/stac/{id}/collection.json`, `/zarr/{id}`, `/datasets/{id}` — so an id outside this shape
+    # `/stac/{kind}/{id}/collection.json`, `/zarr/{id}`, `/datasets/{id}` — so an id outside this shape
     # publishes links that do not resolve. A `/` is the unfixable case: ASGI decodes the path
     # before routing, so escaping it does not help and no single-segment route matches.
     # Rejected at registration, where a template author sees it, rather than discovered later

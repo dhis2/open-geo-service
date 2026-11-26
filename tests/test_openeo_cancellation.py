@@ -23,7 +23,7 @@ from open_geo_service.openeo import execution
 from open_geo_service.openeo import jobs as openeo_jobs
 from open_geo_service.openeo.execution import SaveResultEnvelope
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
-from open_geo_service.shared import cancellation
+from open_geo_service.shared import cancellation, layout
 from open_geo_service.shared.cancellation import ExecutionCancelled, cancellation_scope, raise_if_cancelled
 from open_geo_service.shared.time import utc_now
 from tests.test_managed_publish_units import managed_instance  # noqa: F401  # pyright: ignore[reportUnusedImport]
@@ -90,7 +90,7 @@ def _commit_messages(store: Path) -> list[str]:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    return [snapshot.message for snapshot in repo.ancestry(branch="main")]
+    return [snapshot.message for snapshot in repo.ancestry(branch="ingest")]
 
 
 def _stored_value(store: Path) -> float:
@@ -110,7 +110,7 @@ def test_cancelling_before_the_commit_publishes_nothing(service: Any, monkeypatc
     assert record is not None and record.status == OpenEOJobStatus.CANCELED
     assert record.publishing is False
     # Nothing was committed, registered or left behind for the dataset.
-    store = downloader.DOWNLOAD_DIR / f"{_DATASET}.icechunk"
+    store = layout.raster_store(_DATASET)
     if store.exists():
         assert _commit_messages(store) == ["Repository initialized"]
     assert [r for r in ingestion_services._load_records() if r.dataset_id == _DATASET] == []
@@ -121,7 +121,7 @@ def test_a_cancelled_republication_keeps_the_previous_data(service: Any, monkeyp
     _publishing_job(service, "first", 5.0, monkeypatch)
     service._execute("first")
     assert openeo_jobs.store_get_job("first").status == OpenEOJobStatus.FINISHED  # type: ignore[union-attr]
-    store = downloader.DOWNLOAD_DIR / f"{_DATASET}.icechunk"
+    store = layout.raster_store(_DATASET)
     before = [r.artifact_id for r in ingestion_services._load_records() if r.dataset_id == _DATASET]
 
     _publishing_job(service, "second", 9.0, monkeypatch)

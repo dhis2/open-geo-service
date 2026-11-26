@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from open_geo_service import config as api_config
 from open_geo_service.ingestions import services, sync_engine
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
@@ -27,6 +28,7 @@ from open_geo_service.ingestions.schemas import (
     SyncKind,
     SyncResponse,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import next_period_string
 
 
@@ -1864,6 +1866,7 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1880,7 +1883,7 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
 
     def fake_write(ds_arg: xr.Dataset, path: Path, *a: object, **kw: object) -> None:
         # Marked before anything is written, so a build killed part way is collected too.
-        assert path.with_name(f"{path.name}.gc-pending").exists()
+        assert services._collection_marker(path).exists()
         written.append((ds_arg, path))
 
     monkeypatch.setattr(downloader, "write_to_icechunk_store", fake_write)
@@ -1890,10 +1893,10 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
     assert len(written) == 1
     # One period per dask chunk, so topozarr keeps one period per time shard (CLIM-1765).
     # With `fetched_at`, which every other reader drops, so the rebuilt levels keep it (CLIM-931).
-    assert opened == [{"merge_time": False, "branch": "main", "with_fetched_at": True}]
+    assert opened == [{"merge_time": False, "branch": "ingest", "with_fetched_at": True}]
     # One commit on the branch it read, in the same store: no copy beside it.
     assert written[0][1] == icechunk_path
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["dataset.icechunk", "dataset.icechunk.gc-pending"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["dataset.icechunk", "gc-pending"]
     assert result.completed is True
     assert result.rewritten is True
 
@@ -1908,6 +1911,7 @@ def test_maybe_build_pyramid_skips_rewrite_for_normalized_flat_store(
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1943,6 +1947,7 @@ def test_maybe_build_pyramid_falls_back_on_build_error(tmp_path: Path, monkeypat
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1963,7 +1968,7 @@ def test_maybe_build_pyramid_falls_back_on_build_error(tmp_path: Path, monkeypat
     assert result.completed is False
     assert result.rewritten is False
     # What the failed build wrote is collected later, even if this store never updates again.
-    assert icechunk_path.with_name(f"{icechunk_path.name}.gc-pending").exists()
+    assert services._collection_marker(icechunk_path).exists()
 
 
 def test_plan_sync_append_for_icechunk_artifact(
@@ -1971,6 +1976,7 @@ def test_plan_sync_append_for_icechunk_artifact(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -2003,7 +2009,7 @@ def test_cleanup_removes_the_branches_a_killed_ingest_left(tmp_path: Path, monke
 
     target = tmp_path / "ds.icechunk"
     repo = open_or_create_repo(target)
-    snapshot = repo.lookup_branch("main")
+    snapshot = repo.lookup_branch("ingest")
     repo.create_branch("ogs-ingest-rollback-first", snapshot)
     repo.create_branch("ogs-ingest-replacement-second", snapshot)
     repo.create_branch("kept", snapshot)
@@ -2017,10 +2023,10 @@ def test_cleanup_removes_the_branches_a_killed_ingest_left(tmp_path: Path, monke
     # One branch that cannot be deleted leaves the others to go, and waits for the next cleanup.
     monkeypatch.setattr(icechunk.Repository, "delete_branch", refuse_first)
     assert clean_up_interrupted_ingest(target) is True
-    assert repo.list_branches() == {"main", "kept", "ogs-ingest-rollback-first"}
+    assert repo.list_branches() == {"main", "ingest", "kept", "ogs-ingest-rollback-first"}
     monkeypatch.undo()
     assert clean_up_interrupted_ingest(target) is True
-    assert repo.list_branches() == {"main", "kept"}
+    assert repo.list_branches() == {"main", "ingest", "kept"}
     assert clean_up_interrupted_ingest(tmp_path / "new.icechunk") is False
 
 
@@ -2037,7 +2043,7 @@ def _commit_days(repo: Any, days: range, message: str) -> None:
             "x": np.arange(64.0),
         },
     )
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     if days.start == 0:
         ds.to_zarr(session.store, mode="w", zarr_format=3, encoding={"tg": {"chunks": (1, 64, 64)}})
     else:
@@ -2050,7 +2056,7 @@ def _chunk_files(target: Path) -> int:
 
 
 def _rolled_back_store(target: Path) -> Any:
-    """A store whose `main` was reset past a committed attempt, as a failed ingest leaves it.
+    """A store whose write branch was reset past a committed attempt, as a failed ingest leaves it.
 
     Chunks are 16 KB of random values, too large to compress below the size Icechunk inlines
     into manifests, so each is a file.
@@ -2059,11 +2065,11 @@ def _rolled_back_store(target: Path) -> Any:
 
     repo = open_or_create_repo(target)
     _commit_days(repo, range(0, 3), "seed")
-    before = repo.lookup_branch("main")
+    before = repo.lookup_branch("ingest")
     repo.create_branch("ogs-ingest-rollback-attempt", before)
     for day in range(3, 13):
         _commit_days(repo, range(day, day + 1), f"append {day}")
-    repo.reset_branch("main", before)
+    repo.reset_branch("ingest", before)
     return repo
 
 
@@ -2076,7 +2082,7 @@ def collect_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_collection_keeps_the_snapshot_a_reader_opened_during_the_attempt(tmp_path: Path) -> None:
-    """Readers take no lock: one that opened `main` mid-attempt keeps reading after the collection."""
+    """Readers take no lock: one that opened the write branch mid-attempt keeps reading after the collection."""
     import numpy as np
     import xarray as xr
 
@@ -2086,11 +2092,11 @@ def test_collection_keeps_the_snapshot_a_reader_opened_during_the_attempt(tmp_pa
     target = tmp_path / "ds.icechunk"
     repo = open_or_create_repo(target)
     _commit_days(repo, range(0, 3), "seed")
-    before = repo.lookup_branch("main")
+    before = repo.lookup_branch("ingest")
     for day in range(3, 6):
         _commit_days(repo, range(day, day + 1), f"append {day}")
-    reader = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3)
-    repo.reset_branch("main", before)
+    reader = xr.open_zarr(repo.readonly_session("ingest").store, zarr_format=3)
+    repo.reset_branch("ingest", before)
 
     collect_unreachable_objects(repo, target)
 
@@ -2114,7 +2120,7 @@ def test_collecting_unreachable_objects_frees_a_rolled_back_attempt(tmp_path: Pa
     collect_unreachable_objects(repo, target)
 
     assert _chunk_files(target) == before - 10  # the ten rolled-back days
-    kept = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3)
+    kept = xr.open_zarr(repo.readonly_session("ingest").store, zarr_format=3)
     assert kept.sizes["t"] == 3
     np.testing.assert_array_equal(kept["tg"].values, np.random.default_rng(0).random((3, 64, 64), dtype="float32"))
 
@@ -2127,11 +2133,11 @@ def test_collection_keeps_what_a_branch_still_reaches(tmp_path: Path, collect_im
     target = tmp_path / "ds.icechunk"
     repo = open_or_create_repo(target)
     _commit_days(repo, range(0, 3), "seed")
-    before = repo.lookup_branch("main")
+    before = repo.lookup_branch("ingest")
     for day in range(3, 6):
         _commit_days(repo, range(day, day + 1), f"append {day}")
-    repo.create_branch("kept", repo.lookup_branch("main"))
-    repo.reset_branch("main", before)
+    repo.create_branch("kept", repo.lookup_branch("ingest"))
+    repo.reset_branch("ingest", before)
     files = _chunk_files(target)
 
     collect_unreachable_objects(repo, target)
@@ -2148,18 +2154,17 @@ def test_cleanup_collects_what_a_killed_ingest_left_unreachable(tmp_path: Path, 
     before = _chunk_files(target)
 
     assert clean_up_interrupted_ingest(target) is True
-    assert repo.list_branches() == {"main"}
+    assert repo.list_branches() == {"main", "ingest"}
     assert _chunk_files(target) == before - 10
 
 
 @pytest.fixture
 def short_retention(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> float:
     """A real retention window, one second long, so a test can wait it out."""
-    from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions import services
 
     monkeypatch.setattr(services, "_GC_RETENTION", timedelta(seconds=1))
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     return 1.1
 
 
@@ -2173,7 +2178,7 @@ def test_a_collection_left_pending_frees_the_attempt_once_due(tmp_path: Path, sh
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     before = _chunk_files(target)
@@ -2186,7 +2191,7 @@ def test_a_collection_left_pending_frees_the_attempt_once_due(tmp_path: Path, sh
     time.sleep(short_retention)
     assert services.collect_pending_garbage_everywhere() == 1
     assert _chunk_files(target) == before - 10
-    assert not (tmp_path / "ds.icechunk.gc-pending").exists()
+    assert not layout.collection_marker("ds").exists()
 
 
 def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retention: float) -> None:
@@ -2194,7 +2199,7 @@ def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retenti
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     before = _chunk_files(target)
@@ -2204,7 +2209,7 @@ def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retenti
     services.clean_up_interrupted_ingest(target)  # first thing every ingest does, under the lock
 
     assert _chunk_files(target) == before - 10
-    assert not (tmp_path / "ds.icechunk.gc-pending").exists()
+    assert not layout.collection_marker("ds").exists()
 
 
 def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention: float) -> None:
@@ -2212,7 +2217,7 @@ def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     services._mark_collection_pending(target)
@@ -2223,4 +2228,4 @@ def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention
         assert services.collect_pending_garbage_everywhere() == 0
     finally:
         lock.release()
-    assert (tmp_path / "ds.icechunk.gc-pending").exists(), "left for the next sweep"
+    assert layout.collection_marker("ds").exists(), "left for the next sweep"

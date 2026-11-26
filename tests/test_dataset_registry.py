@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from open_geo_service import config as api_config
+from open_geo_service import plugin_discovery
 from open_geo_service.data_registry.services import datasets
 
 
@@ -35,6 +36,60 @@ def test_dataset_registry_requires_sync_kind(monkeypatch: pytest.MonkeyPatch, tm
 
     with pytest.raises(ValueError, match="must define sync.kind"):
         datasets.list_datasets()
+
+
+def test_a_template_with_an_id_the_rule_refuses_is_skipped_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, request: pytest.FixtureRequest
+) -> None:
+    """One template written under the older id rule must not take every other one down with it."""
+    (tmp_path / "saved.yaml").write_text(
+        """
+- id: rain.v2
+  name: Saved by openEO under the older rule
+  variable: value
+  sync:
+    kind: static
+- id: rain_v3
+  name: Saved under the current rule
+  variable: value
+  sync:
+    kind: static
+- id: rain_v2_anomaly
+  name: Refreshed on a dataset with an id the rule refuses
+  variable: value
+  sync:
+    kind: static
+  produced_by:
+    workflow: climate_anomaly
+    arguments:
+      observed_dataset_id: rain.v2
+    refresh_on: observed_dataset_id
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(datasets, "CONFIGS_DIR", tmp_path)
+
+    assert [dataset["id"] for dataset in datasets.list_datasets()] == ["rain_v3"]
+    assert "Skipping dataset template 'rain.v2'" in caplog.text
+
+    # And from an installed plugin package, which the full registry loads on its own path.
+    package = tmp_path / "package" / "rasters"
+    package.mkdir(parents=True)
+    (package / "era5.yaml").write_text(
+        "- id: ERA5_t2m\n  name: Upper case\n  variable: t2m\n  sync:\n    kind: static\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        plugin_discovery,
+        "iter_plugin_subdirs",
+        lambda subdir: iter([("era5", "era5", package)] if subdir == "rasters" else []),
+    )
+    monkeypatch.setattr(datasets, "CONFIGS_DIR", None)
+    # Plugin templates are read once per process.
+    datasets.reset_template_caches()
+    request.addfinalizer(datasets.reset_template_caches)
+
+    assert "ERA5_t2m" not in {dataset["id"] for dataset in datasets.list_datasets()}
+    assert "Skipping dataset template 'ERA5_t2m'" in caplog.text
 
 
 def test_dataset_registry_rejects_unsupported_sync_kind(

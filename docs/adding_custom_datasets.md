@@ -186,7 +186,7 @@ from the dimension's metadata, so there's nothing extra to configure.
 
 | Field        | Required | Description                                                                    |
 | ------------ | -------- | ------------------------------------------------------------------------------ |
-| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API             |
+| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API and names the dataset's files (and, for a table, its folder): lowercase letters, digits, `_` and `-`, starting with a letter |
 | `name`       | Yes      | Full human-readable name shown in API responses and STAC metadata              |
 | `short_name` | No       | Short label used in compact displays                                           |
 | `variable`   | Yes      | Name of the data variable in the Zarr store (e.g. `precip`, `t2m`, `rainfall`) |
@@ -604,7 +604,7 @@ curl -s -X POST http://127.0.0.1:9000/ingestions \
 Verify it appears in the STAC catalog:
 
 ```bash
-curl -s http://127.0.0.1:9000/stac/catalog.json | jq '.links[] | select(.rel == "child")'
+curl -s http://127.0.0.1:9000/stac/rasters/catalog.json | jq '.links[] | select(.rel == "child")'
 ```
 
 ## Contributing a data source

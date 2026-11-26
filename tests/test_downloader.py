@@ -15,21 +15,24 @@ from open_geo_service.data_accessor.services.accessor import (
 )
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.ingestions import services as ingestion_services
+from open_geo_service.shared import layout
 
 
-def test_resolve_download_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_raster_stores_live_in_the_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config_file = tmp_path / "geoservice.yaml"
     config_file.write_text("data_dir: ./data\nextent:\n  id: test\n", encoding="utf-8")
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config_file))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert downloader._resolve_download_dir() == tmp_path / "data" / "rasters"
+    assert layout.raster_store("rain") == tmp_path / "data" / "catalog" / "rasters" / "rain" / "rain.icechunk"
 
 
-def test_resolve_download_dir_uses_xdg_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raster_stores_live_under_xdg_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory() as xdg:
         monkeypatch.delenv("GEOSERVICE_CONFIG", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", xdg)
-        assert downloader._resolve_download_dir() == Path(xdg) / "geoservice" / "rasters"
+        assert (
+            layout.raster_store("rain") == Path(xdg) / "geoservice" / "catalog" / "rasters" / "rain" / "rain.icechunk"
+        )
 
 
 def test_resolve_artifacts_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -121,7 +124,8 @@ def test_open_icechunk_dataset_falls_back_to_level_0_when_root_has_no_data_vars(
     store_path = tmp_path / "pyramid.icechunk"
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.create(storage)
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = _make_dataset()
     ds.to_zarr(session.store, group="0", mode="w", zarr_format=3)
     session.commit("seed level 0")
@@ -139,7 +143,8 @@ def test_open_icechunk_dataset_with_root_time_still_opens_level_0(tmp_path: Path
     store_path = tmp_path / "pyramid.icechunk"
     storage = icechunk.local_filesystem_storage(str(store_path))
     repo = icechunk.Repository.create(storage)
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds = _make_dataset()
     ds.to_zarr(session.store, group="0", mode="w", zarr_format=3)
     ds[["t"]].to_zarr(session.store, mode="a", zarr_format=3)
@@ -160,7 +165,8 @@ def _daily_store(path: Path, *, days: int = 20, encoding: dict | None = None, gr
         coords={"t": pd.date_range("2020-01-01", periods=days, freq="D"), "y": np.arange(16.0), "x": np.arange(16.0)},
     )
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     chunking = {"tg": encoding or {"chunks": (1, 8, 8)}}
     ds.to_zarr(session.store, group=group, mode="w", zarr_format=3, encoding=chunking)
     session.commit("seed")
@@ -254,7 +260,8 @@ def test_open_icechunk_dataset_without_time_keeps_stored_chunks(tmp_path: Path) 
         {"elev": (["y", "x"], np.ones((16, 16), dtype="float32"))}, coords={"y": np.arange(16.0), "x": np.arange(16.0)}
     )
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(tmp_path / "static.icechunk")))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     ds.to_zarr(session.store, mode="w", zarr_format=3, encoding={"elev": {"chunks": (8, 8)}})
     session.commit("seed")
     result = open_icechunk_dataset(tmp_path / "static.icechunk")
@@ -419,16 +426,17 @@ def test_ensure_time_coordinate_chunking_rechunks_appended_store(tmp_path: Path)
     # which leaves the `t` coordinate chunked at size 1 (one chunk per day).
     store_path = tmp_path / "daily.icechunk"
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(store_path)))
+    repo.create_branch("ingest", repo.lookup_branch("main"))
     times = pd.date_range("2020-01-01", periods=40, freq="D")
 
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     xr.Dataset(
         {"v": (("t", "y", "x"), np.zeros((1, 2, 2), "float32"))},
         coords={"t": times[:1], "y": [1.0, 2.0], "x": [1.0, 2.0]},
     ).to_zarr(session.store, mode="w", zarr_format=3, encoding={"t": {"chunks": (1,)}})
     session.commit("seed")
     for i in range(1, len(times)):
-        s = repo.writable_session("main")
+        s = repo.writable_session("ingest")
         xr.Dataset(
             {"v": (("t", "y", "x"), np.full((1, 2, 2), i, "float32"))},
             coords={"t": times[i : i + 1], "y": [1.0, 2.0], "x": [1.0, 2.0]},
@@ -440,18 +448,18 @@ def test_ensure_time_coordinate_chunking_rechunks_appended_store(tmp_path: Path)
         assert isinstance(node, zarr.Array)
         return node
 
-    before = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    before = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
     assert arr(before, "t").chunks == (1,)  # precondition: one chunk per timestep
     data_chunks = arr(before, "v").chunks
 
     changed = downloader.ensure_time_coordinate_chunking(store_path, "t")
     assert changed is True
 
-    after = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    after = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
     assert arr(after, "t").chunks == (40,)  # 40 < cap -> a single coordinate chunk
     assert arr(after, "v").chunks == data_chunks  # data variable untouched
 
-    ds = xr.open_zarr(repo.readonly_session("main").store, consolidated=False)
+    ds = xr.open_zarr(repo.readonly_session("ingest").store, consolidated=False)
     assert list(ds.t.values) == list(times)  # values + datetime decode preserved
     assert float(ds.v.isel(t=39, y=0, x=0)) == 39.0
 
@@ -479,7 +487,7 @@ def test_write_to_icechunk_store_writes_a_flat_time_axis_as_one_chunk(tmp_path: 
     downloader.write_to_icechunk_store(ds, store, commit_message="test")
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    group = zarr.open_group(repo.readonly_session("main").store, mode="r")
+    group = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
     t = group["t"]
     assert isinstance(t, zarr.Array)
     assert t.chunks == (441,)
@@ -540,7 +548,7 @@ def test_write_to_icechunk_store_stores_a_computed_result_one_step_per_chunk(tmp
         source.close()
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    tg = zarr.open_group(repo.readonly_session("main").store, mode="r")["tg"]
+    tg = zarr.open_group(repo.readonly_session("ingest").store, mode="r")["tg"]
     assert isinstance(tg, zarr.Array)
     assert tg.chunks == (1, 8, 8)
     out = open_icechunk_dataset(store)
@@ -574,7 +582,7 @@ def _republished(source: xr.Dataset, tmp_path: Path) -> tuple[zarr.Array, xr.Dat
     store = tmp_path / "republished.icechunk"
     downloader.write_to_icechunk_store(source.assign_attrs({"proj:code": "EPSG:4326"}), store, commit_message="test")
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    array = zarr.open_group(repo.readonly_session("main").store, mode="r")["v"]
+    array = zarr.open_group(repo.readonly_session("ingest").store, mode="r")["v"]
     assert isinstance(array, zarr.Array)
     return array, open_icechunk_dataset(store)
 
@@ -670,7 +678,8 @@ def _two_variable_store(path: Path, shards: tuple[int, int]) -> None:
         coords=coords,
     )
     repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     encoding = {
         "a": {"chunks": (1, 8, 8), "shards": (shards[0], 16, 16)},
         "b": {"chunks": (1, 8, 8), "shards": (shards[1], 16, 16)},

@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from open_geo_service.shared import geoparquet
+from open_geo_service import storage
+from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.crs import canonical_crs_code
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
 
     **Never raises.** A collection that cannot be tiled is still registered.
 
-    Written beside the target and moved into place, so the route never serves a partial
+    Written in the staging folder and moved into place, so the route never serves a partial
     archive. tylertoo reads WGS 84 or Web Mercator; a collection stored in another CRS is
     reprojected into a temporary copy first.
 
@@ -65,17 +66,19 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
     zoom are still left out. Points and lines keep the budget.
     """
     target = archive_path(collection_path)
-    staging = target.with_name(f"{target.name}.{uuid4().hex}.writing")
+    staging: Path | None = None
     try:
         import tylertoo
 
+        staging = layout.staging_dir() / f"{target.name}.{uuid4().hex}.writing"
         with tempfile.TemporaryDirectory(prefix="geoservice-tiles-") as scratch:
             source = collection_path
             if canonical_crs_code(crs) not in _TILEABLE_CRS:
                 import geopandas as gpd
 
                 source = Path(scratch) / "wgs84.parquet"
-                gpd.read_parquet(collection_path).to_crs("EPSG:4326").to_parquet(source)
+                frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
+                frame.to_crs("EPSG:4326").to_parquet(source)
             overview = Path(scratch) / "overview.parquet"
             # GeoParquet may say "Polygon Z"; the dimension does not change how it is tiled.
             geometry_types = {name.split(" ")[0] for name in geoparquet.stored_geometry_types(collection_path)}
@@ -84,12 +87,13 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
             if max(level["zoom"] for level in report["levels"]) < MIN_MAX_ZOOM:
                 tylertoo.overview(str(source), str(overview), max_zoom=MIN_MAX_ZOOM, density_drop=density_drop)
             tylertoo.export_pmtiles(str(overview), str(staging), layer_name=TILE_LAYER)
-        staging.replace(target)
+        storage.write_file(target, staging)
     except Exception:
         logger.warning("Could not build vector tiles for feature collection '%s'", collection_id, exc_info=True)
         return None
     finally:
-        staging.unlink(missing_ok=True)
+        if staging is not None:
+            staging.unlink(missing_ok=True)
     return target
 
 

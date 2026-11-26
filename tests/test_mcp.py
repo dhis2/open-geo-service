@@ -17,6 +17,7 @@ from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.main import app
 from open_geo_service.mcp_server import tools
 from open_geo_service.openeo import execution
+from open_geo_service.stac import catalog_files
 from open_geo_service.stac import services as stac_services
 from tests.test_authentication import (
     CLIENT_SECRET,
@@ -33,7 +34,7 @@ _HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "ap
 
 # What the STAC builder would derive from the synthetic store, which it cannot open.
 _RAIN_COLLECTION = {
-    "id": "rain",
+    "id": "rasters/rain",
     "title": "Rain",
     "description": "Synthetic rain.",
     "assets": {"zarr": {"href": "http://testserver/zarr/rain"}},
@@ -73,14 +74,15 @@ def rain(monkeypatch: pytest.MonkeyPatch, regions: ArtifactRecord) -> None:  # n
 
     eligible = stac_services._eligible_artifacts_by_dataset  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: {**eligible(), "rain": record})
-    build_collection = stac_services.build_collection
+    build = stac_services.build_collection_for_artifact
     monkeypatch.setattr(
         stac_services,
-        "build_collection",
-        lambda dataset_id, request: (
-            dict(_RAIN_COLLECTION) if dataset_id == "rain" else build_collection(dataset_id, request)
+        "build_collection_for_artifact",
+        lambda dataset_id, artifact, request, **kwargs: (
+            dict(_RAIN_COLLECTION) if dataset_id == "rain" else build(dataset_id, artifact, request, **kwargs)
         ),
     )
+    catalog_files.write_catalog()  # `/stac` serves the written files
 
 
 @pytest.fixture
@@ -182,6 +184,8 @@ def test_list_datasets_reports_rasters_and_area_collections(mcp: TestClient, rai
     assert datasets["rain"]["time_start"] == "2025-01-01T00:00:00Z"
     assert datasets["rain"]["dataset_url"] == "http://testserver/datasets/rain"
     assert datasets["rain"]["map_url"] == "http://testserver/map?dataset=rain"
+    assert datasets["rain"]["stac_url"] == "http://testserver/stac/rasters/rain/collection.json"
+    assert datasets["regions"]["stac_url"] == "http://testserver/stac/vectors/regions/collection.json"
     assert datasets["regions"]["kind"] == "areas"
     assert datasets["regions"]["area_count"] == 2
     # From the dataset records, which the STAC documents do not carry.
@@ -191,15 +195,19 @@ def test_list_datasets_reports_rasters_and_area_collections(mcp: TestClient, rai
 def test_a_dataset_that_fails_is_left_out_of_the_catalogue(
     mcp: TestClient, rain: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A store that is missing or corrupt makes STAC answer 500; the rest stays discoverable."""
+    """A store that is missing or corrupt leaves its collection out of the catalog; the rest stays discoverable."""
+    build = stac_services.build_collection_for_artifact
 
-    def broken(dataset_id: str, request: Any) -> dict[str, Any]:
-        raise RuntimeError("corrupt store")
+    def broken(dataset_id: str, artifact: Any, request: Any, **kwargs: Any) -> dict[str, Any]:
+        if dataset_id == "rain":
+            raise RuntimeError("corrupt store")
+        return build(dataset_id, artifact, request, **kwargs)
 
-    monkeypatch.setattr(stac_services, "build_collection", broken)
+    monkeypatch.setattr(stac_services, "build_collection_for_artifact", broken)
+    catalog_files.write_catalog()
 
-    assert _call(mcp, "list_datasets")["result"] == []
-    assert "500" in _call(mcp, "get_timeseries", dataset_id="rain", lon=0.5, lat=0.5)["error"]
+    assert [dataset["id"] for dataset in _call(mcp, "list_datasets")["result"]] == ["regions"]
+    assert "Use list_datasets" in _call(mcp, "get_timeseries", dataset_id="rain", lon=0.5, lat=0.5)["error"]
 
 
 def test_list_areas_narrows_by_name(mcp: TestClient, rain: None, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -12,7 +12,9 @@ import pytest
 import xarray as xr
 from fastapi import HTTPException
 
+from open_geo_service import config as api_config
 from open_geo_service.ingestions import services
+from open_geo_service.shared import layout
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period
 
 _PERIODS = [f"2026-01-{day:02d}" for day in range(1, 7)]
@@ -69,7 +71,7 @@ def _create(ingestion: dict[str, Any], end: str = "2026-01-06") -> Any:
 
 def _committed_messages(store_path: Path) -> list[str]:
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    return [snapshot.message for snapshot in repo.ancestry(branch="main")]
+    return [snapshot.message for snapshot in repo.ancestry(branch="ingest")]
 
 
 def _conflict_on_the_third_period(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -172,7 +174,7 @@ def test_publishing_a_managed_dataset_waits_for_the_store_writer(
     from open_geo_service.data_registry.services import datasets as registry_datasets
     from open_geo_service.openeo import jobs as openeo_jobs
 
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr(
         registry_datasets,
         "get_dataset",
@@ -184,7 +186,7 @@ def test_publishing_a_managed_dataset_waits_for_the_store_writer(
         {"precip": (("t", "y", "x"), np.ones((1, 2, 2), dtype="float32"))},
         coords={"t": np.array(["2026-01-01"], dtype="datetime64[ns]"), "y": [3.5, 2.5], "x": [1.5, 2.5]},
     )
-    lock = services._acquire_store_lock(tmp_path / "derived_precip.icechunk")
+    lock = services._acquire_store_lock(layout.raster_store("derived_precip"))
     assert lock.acquire(blocking=False)
     try:
         with pytest.raises(RuntimeError, match="is being written by an ingestion, sync, or another job"):

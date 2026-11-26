@@ -26,6 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
+from open_geo_service.shared import layout
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.classes import class_colors, classification_from_template
 from open_geo_service.shared.display import display_midpoint
 
@@ -47,16 +50,6 @@ THUMBNAIL_LONG_SIDE_PIXELS = 1024
 _DEFAULT_COLORMAP = "viridis"
 
 _HEX_COLOUR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
-
-
-def thumbnails_dir() -> Path:
-    """Directory holding published thumbnails, one per dataset id."""
-    return api_config.get_data_root() / "thumbnails"
-
-
-def thumbnail_path(dataset_id: str) -> Path:
-    """On-disk location of *dataset_id*'s thumbnail, whether or not it exists yet."""
-    return thumbnails_dir() / f"{dataset_id}.png"
 
 
 def resolve_colormap(spec: object) -> Any:
@@ -375,8 +368,8 @@ def write_dataset_thumbnail(
 
         # Closed as soon as the pixels are in hand, so a sync run does not leave Icechunk and
         # Zarr backend resources open behind every dataset it touches.
-        # `main`: the writer renders what it just committed, before publishing it.
-        with closing(open_icechunk_dataset(store_path, branch="main")) as ds:
+        # The write branch: the writer renders what it just committed, before publishing it.
+        with closing(open_icechunk_dataset(store_path, branch=WRITE_BRANCH)) as ds:
             variable = str(dataset.get("variable") or "")
             if variable not in ds.data_vars:
                 variable = str(next(iter(ds.data_vars), ""))
@@ -399,6 +392,7 @@ def write_dataset_thumbnail(
         )
 
         return _publish_thumbnail(
+            layout.Kind.RASTER,
             dataset_id,
             lambda pending: render_png(
                 chosen,
@@ -414,26 +408,24 @@ def write_dataset_thumbnail(
         return None
 
 
-def _publish_thumbnail(dataset_id: str, render: Callable[[Path], object]) -> Path:
-    """Run *render* against a sibling file and move the result over the published thumbnail.
+def _publish_thumbnail(kind: layout.Kind, dataset_id: str, render: Callable[[Path], object]) -> Path:
+    """Run *render* against a staging file and move the result over the published thumbnail.
 
-    Rendered to a sibling and moved into place, never written over the published file. That
-    path is served by HTTP, so writing in place would let a request read a half-written PNG,
-    and a savefig that failed part way would truncate a previously good thumbnail — the
-    opposite of the leave-the-old-one-alone rule the writers follow. `os.replace` within one
-    directory is atomic, so a reader sees the old file or the new one and never something in
-    between.
+    Rendered to a staging file and moved into place, never written over the published file.
+    That path is served by HTTP, so writing in place would let a request read a half-written
+    PNG, and a savefig that failed part way would truncate a previously good thumbnail — the
+    opposite of the leave-the-old-one-alone rule the writers follow.
     """
     import os
 
-    published = thumbnail_path(dataset_id)
+    published = layout.thumbnail(kind, dataset_id)
     published.parent.mkdir(parents=True, exist_ok=True)
     # `.png` last: matplotlib picks the output format from the extension, so a plain `.tmp`
     # suffix would be rejected rather than written.
-    pending = published.with_name(f".{published.stem}.{os.getpid()}.tmp.png")
+    pending = layout.staging_dir() / f"{dataset_id}.{os.getpid()}.tmp.png"
     try:
         render(pending)
-        os.replace(pending, published)
+        storage.write_file(published, pending)
     finally:
         pending.unlink(missing_ok=True)
     return published
@@ -534,7 +526,7 @@ def write_feature_thumbnail(collection_path: str | Path, collection_id: str) -> 
     try:
         import geopandas as gpd
 
-        frame = gpd.read_parquet(collection_path)
+        frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
         frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty]
         if frame.empty:
             logger.warning("Feature collection '%s' has no geometry to draw; no thumbnail", collection_id)
@@ -542,6 +534,7 @@ def write_feature_thumbnail(collection_path: str | Path, collection_id: str) -> 
         # Drawn in the instance CRS, the projection the instance's rasters are stored in.
         frame = frame.to_crs(api_config.get_crs())
         return _publish_thumbnail(
+            layout.Kind.VECTOR,
             collection_id,
             lambda pending: render_features_png(frame, pending, long_side=THUMBNAIL_LONG_SIDE_PIXELS),
         )

@@ -44,6 +44,7 @@ from open_geo_service.pipelines.schemas import (
     ValidationResult,
     WorkflowReference,
 )
+from open_geo_service.shared import layout
 
 from .conftest import MountedClientFactory, WebhookReceiver
 
@@ -3590,10 +3591,8 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
     )
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    (tmp_path / "managed" / "rasters").mkdir()
-    monkeypatch.setattr(
-        "open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path / "managed" / "rasters"
-    )
+    (tmp_path / "managed" / "catalog" / "rasters").mkdir(parents=True)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "managed")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "artifacts" / "records.json")
 
@@ -3626,7 +3625,7 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
         if id == "rain_normal_monthly":
             return normal()
         if id == derived:  # what the anomaly job published, read back from its store
-            store = tmp_path / "managed" / "rasters" / f"{derived}.icechunk"
+            store = layout.raster_store(derived)
             with open_icechunk_dataset(str(store)) as ds:
                 return ds["precip"].load()
         raise AssertionError(f"unexpected collection {id}")

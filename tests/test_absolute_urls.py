@@ -176,26 +176,20 @@ def test_the_capabilities_json_still_carries_the_configured_origin(https_client:
     assert history["title"]
 
 
-def test_the_stac_self_link_uses_the_configured_scheme(https_client: TestClient) -> None:
+def test_the_self_link_uses_the_configured_scheme(https_client: TestClient) -> None:
     """`self` was built from the raw request URL while its sibling links already used the
     configured base — so one link in the document disagreed with the rest."""
-    links = {link["rel"]: link["href"] for link in https_client.get("/stac/catalog.json").json()["links"]}
+    links = {link["rel"]: link["href"] for link in https_client.get("/collections").json()["links"]}
 
-    assert links["self"] == f"{_CONFIGURED}/stac/catalog.json"
-    assert links["root"] == f"{_CONFIGURED}/stac/catalog.json"
-
-
-def test_the_catalog_json_self_link_names_its_own_path(https_client: TestClient) -> None:
-    links = {link["rel"]: link["href"] for link in https_client.get("/stac/catalog.json").json()["links"]}
-
-    assert links["self"] == f"{_CONFIGURED}/stac/catalog.json"
+    assert links["self"] == f"{_CONFIGURED}/collections"
+    assert links["root"] == f"{_CONFIGURED}/"
 
 
 def test_no_served_document_leaks_the_internal_origin(https_client: TestClient) -> None:
     """A sweep rather than a list, so a new absolute URL built from the request is caught here
     instead of on a deployment. Non-browser STAC clients do not implement HSTS, so an `http`
     link is followed as written."""
-    for path in ("/", "/map", "/stac/catalog.json", "/collections", "/processes"):
+    for path in ("/", "/map", "/collections", "/processes"):
         response = https_client.get(path, headers={"Accept": "application/json"} if path == "/" else {})
         assert response.status_code == 200, path
         assert "http://testserver" not in response.text, path
@@ -275,7 +269,7 @@ def test_an_origin_only_base_url_composes_with_the_asgi_prefix(mounted_client: T
     and openEO href named the origin root: one document, two service roots, and the absolute
     half 404s at the proxy.
     """
-    payload = mounted_client.get("/stac/catalog.json").json()
+    payload = mounted_client.get("/collections").json()
     for link in payload["links"]:
         # `describedby` and `agents` are relative, so they resolve under any base.
         assert link["href"].startswith((f"{_CONFIGURED}/geoservice/", "./")), link
@@ -367,8 +361,8 @@ def test_the_app_reads_the_root_path_itself(monkeypatch: pytest.MonkeyPatch) -> 
     client = TestClient(create_app())
 
     assert 'action="/geoservice/manage/ingest"' in client.get(_SOURCE_PAGE).text
-    self_href = next(link["href"] for link in client.get("/stac/catalog.json").json()["links"] if link["rel"] == "self")
-    assert self_href == "http://testserver/geoservice/stac/catalog.json"
+    self_href = next(link["href"] for link in client.get("/collections").json()["links"] if link["rel"] == "self")
+    assert self_href == "http://testserver/geoservice/collections"
     # A proxy that strips the prefix before forwarding, as the Nepal demo's does (CLIM-1975).
     assert client.get("/datasets/", follow_redirects=False).headers["location"] == "/geoservice/datasets"
     # A workflow id may hold a space; the redirect keeps it escaped.
@@ -419,9 +413,9 @@ def test_the_self_link_keeps_the_prefix_of_an_embedding_mount(monkeypatch: pytes
 
     monkeypatch.delenv(BASE_URL_ENV, raising=False)
     outer = Starlette(routes=[Mount("/geoservice", app=inner)])
-    payload = TestClient(outer).get("/geoservice/stac/catalog.json").json()
+    payload = TestClient(outer).get("/geoservice/collections").json()
     self_href = next(link["href"] for link in payload["links"] if link["rel"] == "self")
-    assert self_href == "http://testserver/geoservice/stac/catalog.json"
+    assert self_href == "http://testserver/geoservice/collections"
 
 
 def test_stripping_a_prefix_respects_segment_boundaries() -> None:
@@ -454,9 +448,9 @@ def test_the_self_link_does_not_double_a_configured_path_under_an_embedding_moun
 
     monkeypatch.setenv(BASE_URL_ENV, "https://public.example/geoservice")
     outer = Starlette(routes=[Mount("/geoservice", app=inner)])
-    payload = TestClient(outer).get("/geoservice/stac/catalog.json").json()
+    payload = TestClient(outer).get("/geoservice/collections").json()
     self_href = next(link["href"] for link in payload["links"] if link["rel"] == "self")
-    assert self_href == "https://public.example/geoservice/stac/catalog.json"
+    assert self_href == "https://public.example/geoservice/collections"
 
 
 def test_every_link_of_one_document_agrees_under_an_embedding_mount(
@@ -475,7 +469,7 @@ def test_every_link_of_one_document_agrees_under_an_embedding_mount(
 
     monkeypatch.delenv(BASE_URL_ENV, raising=False)
     outer = Starlette(routes=[Mount("/geoservice", app=inner)])
-    payload = TestClient(outer).get("/geoservice/stac/catalog.json").json()
+    payload = TestClient(outer).get("/geoservice/collections").json()
 
     for link in payload["links"]:
         assert link["href"].startswith(("http://testserver/geoservice/", "./")), link

@@ -27,7 +27,7 @@ import pyarrow as pa
 import yaml
 
 from open_geo_service import config as api_config
-from open_geo_service.shared.urls import is_segment_safe_id
+from open_geo_service.shared.urls import has_refused_id
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,10 @@ def _parse_files(files: Iterable[Any], *, source: str) -> list[TableSchema]:
         declared = yaml.safe_load(file.read_text(encoding="utf-8"))
         if not isinstance(declared, list):
             raise ValueError(f"{source} ({file.name}) must contain a list of table schemas")
-        schemas += [parse_schema(item, source=f"{source} ({file.name})") for item in declared]
+        where = f"{source} ({file.name})"
+        schemas += [
+            parse_schema(item, source=where) for item in declared if not has_refused_id(item, "table schema", where)
+        ]
     return schemas
 
 
@@ -227,8 +230,10 @@ def parse_schema(declared: object, *, source: str) -> TableSchema:
     """A schema from its declaration, or ValueError naming *source* and what is wrong."""
     if not isinstance(declared, dict):
         raise ValueError(f"{source} contains a table schema that is not a mapping")
+    # The id rule is the schema files' loader's (`has_refused_id`): a declaration stored with a
+    # table written under the earlier, looser rule must still read.
     schema_id = declared.get("id")
-    if not isinstance(schema_id, str) or not is_segment_safe_id(schema_id):
+    if not isinstance(schema_id, str) or not schema_id.strip():
         raise ValueError(f"{source} contains a table schema with a missing or invalid id {schema_id!r}")
     where = f"table schema '{schema_id}' in {source}"
     columns = tuple(_column(item, where) for item in _list(declared, "columns", where))

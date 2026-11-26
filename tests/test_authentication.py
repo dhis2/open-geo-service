@@ -24,6 +24,8 @@ from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.main import app
 from open_geo_service.openeo.jobs import get_openeo_job_service
+from open_geo_service.stac import catalog_files
+from open_geo_service.stac import documents as stac_documents
 from open_geo_service.stac import services as stac_services
 from open_geo_service.stac.services import AUTHENTICATION_EXTENSION
 from open_geo_service.system.templates import actions_closed
@@ -215,6 +217,7 @@ def test_a_mount_prefix_does_not_hide_a_gated_route(
     auth_on: None, mounted_client_factory: MountedClientFactory, root_path: str
 ) -> None:
     mounted = mounted_client_factory(root_path)
+    catalog_files.write_catalog()  # served from the files, which this client does not write
 
     assert mounted.get("/jobs").status_code == 401
     assert mounted.get("/stac/catalog.json").status_code == 200
@@ -517,14 +520,20 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
         "assets": {"zarr": {"href": "https://testserver/zarr/rain"}},
     }
     synced = datetime(2026, 1, 1, tzinfo=UTC)
-    published = {"rain": SimpleNamespace(dataset_name="Rain", format=ArtifactFormat.ICECHUNK, created_at=synced)}
+    published = {
+        "rain": SimpleNamespace(dataset_name="Rain", format=ArtifactFormat.ICECHUNK, created_at=synced, path=None)
+    }
     monkeypatch.setattr(stac_services, "_eligible_artifacts_by_dataset", lambda: published)
     monkeypatch.setattr(stac_services, "_build_raster_collection", lambda *_: raster)
+    monkeypatch.setattr(stac_documents, "collection_readme", lambda *_: "# Rain\n")
+    monkeypatch.setattr(stac_documents, "collection_agents", lambda *_: "# Reading Rain\n")
+    # The written catalog carries the Zarr URL only with the instance's public address configured.
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "https://testserver")
     catalog = client.get("/stac/catalog.json", headers=_bearer(CLIENT_SECRET)).json()
     assert set(catalog["auth:schemes"]) == {"basic", "bearer"}
     assert AUTHENTICATION_EXTENSION in catalog["stac_extensions"]
     assert all(link["auth:refs"] == ["basic", "bearer"] for link in catalog["links"])
-    collection = client.get("/stac/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
+    collection = client.get("/stac/rasters/rain/collection.json", headers=_bearer(CLIENT_SECRET)).json()
     assert collection["assets"]["zarr"]["auth:refs"] == ["basic", "bearer"]
     assert not any("auth:refs" in link for link in collection["links"][:2])
     assert "auth:refs" not in raster["assets"]["zarr"]

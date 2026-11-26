@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service.data_registry.services import datasets as registry_datasets
+from open_geo_service.main import app
 from open_geo_service.system import templates as landing
 
 
@@ -241,15 +242,25 @@ def test_a_dataset_without_a_thumbnail_gets_the_colormap_ramp(monkeypatch: pytes
 
 
 def test_a_dataset_with_a_thumbnail_links_it() -> None:
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
-    path = thumbnail_path("rendered_dataset")
+    path = layout.thumbnail(layout.Kind.RASTER, "rendered_dataset")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"png")
+    # Written by the catalog for a published dataset.
+    collection = path.with_name("collection.json")
+    collection.write_text("{}")
     try:
-        assert landing._dataset_view(_record("rendered_dataset"), None)["has_thumbnail"] is True
+        view = landing._dataset_view(_record("rendered_dataset"), None)
+        assert view["has_thumbnail"] is True
+        # Linked from the catalog, which serves it without reading the records.
+        assert TestClient(app).get(view["thumbnail"]).content == b"png"
+        # Not one not published, which the catalog does not serve.
+        unpublished = _record("rendered_dataset", publication={"status": "unpublished"})
+        assert landing._dataset_view(unpublished, None)["thumbnail"] == "/datasets/rendered_dataset/thumbnail.png"
     finally:
         path.unlink()
+        collection.unlink()
 
 
 def test_the_dataset_page_names_the_workflow_that_produced_it() -> None:

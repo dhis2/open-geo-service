@@ -39,11 +39,9 @@ Operational note:
 - `GET /tables/{dataset_id}/rows`
 - `GET /tables/{dataset_id}/data.parquet`
 - `GET /stac/catalog.json`
-- `GET /stac/{dataset_id}/collection.json`
-- `GET /stac/README.md`
-- `GET /stac/AGENTS.md`
-- `GET /stac/{dataset_id}/README.md`
-- `GET /stac/{dataset_id}/AGENTS.md`
+- `GET /stac/{kind}/catalog.json`
+- `GET /stac/{kind}/{dataset_id}/collection.json`
+- `GET /stac/README.md`, `GET /stac/AGENTS.md`, and the same beside each sub-catalog and collection
 - `GET /zarr/{dataset_id}`
 - `GET /zarr/{dataset_id}/{relative_path}`
 - `GET /icechunk/{dataset_id}/{path}`
@@ -369,10 +367,12 @@ for both.
 import icechunk, xarray as xr
 
 repo = icechunk.Repository.open(icechunk.http_storage("http://127.0.0.1:9000/icechunk/chirps3_precipitation_daily"))
-ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, consolidated=False)
+ds = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3, consolidated=False)
 ```
 
-Open the `published` branch, which is what GeoService serves; `main` can hold a sync in progress.
+`main` holds the published version, which is what GeoService serves; the `ingest` branch can hold a sync in progress.
+
+GDAL opens it through its `repo` file: `gdalinfo "ICECHUNK:/vsicurl/http://127.0.0.1:9000/icechunk/chirps3_precipitation_daily/repo"`.
 
 Both endpoints are advertised as `assets` in the STAC collection:
 
@@ -384,8 +384,8 @@ Both endpoints are advertised as `assets` in the STAC collection:
     "xarray:open_kwargs": { "consolidated": true }
   },
   "icechunk": {
-    "href": "https://host/icechunk/chirps3_precipitation_daily",
-    "type": "application/octet-stream",
+    "href": "https://host/icechunk/chirps3_precipitation_daily/",
+    "type": "application/vnd.zarr+icechunk",
     "xarray:open_kwargs": { "zarr_format": 3, "consolidated": false }
   },
   "thumbnail": {
@@ -443,14 +443,27 @@ STAC examples:
 
 ```bash
 curl -s "http://127.0.0.1:9000/stac/catalog.json" | jq
-curl -s "http://127.0.0.1:9000/stac/chirps3_precipitation_daily/collection.json" | jq
+curl -s "http://127.0.0.1:9000/stac/rasters/catalog.json" | jq
+curl -s "http://127.0.0.1:9000/stac/rasters/chirps3_precipitation_daily/collection.json" | jq
 ```
+
+The root catalog links one sub-catalog per kind of dataset, `rasters`, `vectors` and `tables`, and
+each sub-catalog links its collections. A collection's id is its path in the catalog,
+`{kind}/{dataset_id}` (`rasters/chirps3_precipitation_daily`); in openEO `/collections` it is the
+dataset id alone.
+
+`/stac` serves the catalog the instance writes into its data folder (see
+[Data folder layout](data_folder_layout.md#the-catalog)), so its links are relative and resolve
+against the document's own URL: a collection's `data` asset is the file beside its
+`collection.json`, served under `/stac` too. The `zarr` and `style` assets are there only when
+`GEOSERVICE_BASE_URL` is set; without it, take the Zarr URL from `/datasets/{dataset_id}` or
+openEO's `/collections/{dataset_id}`, as the Python client does, and the style from the route below.
 
 What this means:
 
 - `/stac` is the public STAC discovery surface for published datasets, raster and vector alike
 - `/collections` is the openEO collection listing, not a second STAC catalogue
-- dataset responses include `/stac/{dataset_id}/collection.json`
+- dataset responses include `/stac/{kind}/{dataset_id}/collection.json`
 
 ### Raster and feature collections are described differently
 
@@ -571,9 +584,10 @@ collection has no `tiles` asset.
 
 `GET /features/{collection_id}/styles/default.json` serves the MapLibre style the map viewer
 draws a collection with: its tiles as filled areas, lines and points, with the collection's
-attribution on the source. The STAC collection lists it as its `style` asset, and names the
-archive and its layer in a `pmtiles` link (web-map-links extension), whenever the collection has
-tiles.
+attribution on the source. Whenever the collection has tiles, openEO's collection lists this
+route as its `style` asset, and the written STAC collection the same style as a file in its
+`styles/` folder (with `GEOSERVICE_BASE_URL` set); both name the archive and its layer in a
+`pmtiles` link (web-map-links extension).
 
 ## 12. Read table datasets
 
@@ -898,40 +912,43 @@ Expected planning response:
 `append` here means Open Geo Service reuses the planner's source-available delta and
 writes only missing periods to the existing Icechunk store. A rollback branch keeps the
 version before the append until normalization and artifact registration succeed, and a
-failure after that point resets `main` to it.
+failure after that point resets the `ingest` branch to it.
 Progress counts the new periods in this append, excluding already committed history.
 
 If a complete store has lost its artifact record, repeating `/ingest` reconstructs the
 record from the store without querying or fetching historical source data. Recovery
 validates and normalizes the store and honors the request's publication setting.
 
-Writers commit to `main`; readers open the `published` branch, which publishing moves. Every
-reader opens it: `/zarr`, `/icechunk`, openEO, STAC, and tools outside GeoService such as GDAL
-(`ICECHUNK:<path>?branch=published`). A dataset not published yet has no `published` branch,
-and GeoService's own pages read `main` for it.
+Writers commit to the `ingest` branch; readers open `main`, which publishing moves. Every reader
+opens it: `/zarr`, `/icechunk`, openEO, STAC, and tools outside GeoService. `main` is the branch
+Icechunk readers open by default, so GDAL (`ICECHUNK:<path>`), the Icechunk libraries and QGIS
+get the published version without being told a branch. Until a dataset is first published, `main`
+is the repository's initial, empty snapshot, and GeoService's own pages read `ingest` for it.
 
-- **An ingest or sync** commits each period to `main` as it is fetched, as one snapshot per run:
+- **An ingest or sync** commits each period to `ingest` as it is fetched, as one snapshot per run:
   later periods amend the run's first commit. When the update is complete and recorded,
-  `published` moves to it, so readers never see a sync half done. A sync that fails part way
-  keeps the periods it committed on `main` for the next attempt to resume from, and readers
+  `main` moves to it, so readers never see a sync half done. A sync that fails part way
+  keeps the periods it committed on `ingest` for the next attempt to resume from, and readers
   keep the version they had.
-- **A rematerialization or an overwrite** is built on a temporary branch, from `main`, and
-  `main` moves to it in one step once it is fetched, validated and normalized. A pyramid rebuild
+- **A rematerialization or an overwrite** is built on a temporary branch, from `ingest`, and
+  `ingest` moves to it in one step once it is fetched, validated and normalized. A pyramid rebuild
   is one commit. A killed ingest leaves only its temporary branches, which the next ingest of
   that store removes. If rollback itself fails, the job reports it and names the rollback branch,
   which still points at the version before the ingest.
-- **Publication decides, the record follows.** Publishing moves `published` first and then marks
+- **Publication decides, the record follows.** Publishing moves `main` first and then marks
   the record published, and a sync of a published dataset moves the branch with it. The record
   notes the snapshot it describes. A writer started after a crash between the two marks the
-  record published, or describes the branch's version on it when the snapshots differ, and gives
-  a store from before the branch existed one at the tip of `main`. Whatever `published` moves
-  to is marked complete, so a rollback may return to any version readers were served.
+  record published, or describes the branch's version on it when the snapshots differ. Whatever
+  `main` moves to is marked complete, so a rollback may return to any version readers were served.
+- **A store written when writers committed to `main`** and readers opened a `published` branch is
+  moved to this layout when the writer starts: `ingest` takes what `main` held, and `main` what
+  `published` held, or the initial snapshot for a dataset never published.
 
-**Versions and rollback.** Each sync leaves one snapshot in the history of `main`: its periods,
+**Versions and rollback.** Each sync leaves one snapshot in the history of `ingest`: its periods,
 pyramid levels and other normalization in one commit, marked complete once the sync has finished.
 The snapshots of the last `snapshot_retention_days` (default 30, see the
 [instance guide](instance_guide.md)) are kept, also across an overwrite, and older ones are
-expired at the next update of the store. A sync that fails part way leaves its periods on `main`
+expired at the next update of the store. A sync that fails part way leaves its periods on `ingest`
 for the retry, unmarked.
 
 A dataset can be rolled back to any kept, complete version by publishing it again. It writes to
@@ -945,8 +962,8 @@ record = get_latest_artifact_for_dataset_or_404("chirps3_precipitation_daily")
 publish_artifact_record(record.artifact_id, snapshot_id="<snapshot id>")
 ```
 
-The record then describes that version, its coverage and statistics, while `main` keeps the
-newer ones. The next sync publishes `main` again, also when nothing new is due, and the record
+The record then describes that version, its coverage and statistics, while `ingest` keeps the
+newer ones. The next sync publishes `ingest` again, also when nothing new is due, and the record
 describes it again; so does publishing without a snapshot id. The
 thumbnail and the size still describe the store as a whole, and no update event is sent. A
 snapshot that is not a complete, kept version of the store is refused.
@@ -962,7 +979,7 @@ before it became unreachable can finish; one still reading it after that can fai
 not found" and has to reopen the dataset.
 
 Collection runs right after a rollback or a replacement, and when the next ingest finds the
-branches of a killed one. What the hour kept is marked in `<store>.gc-pending` and collected once
+branches of a killed one. What the hour kept is marked in `<data_dir>/gc-pending/<id>` and collected once
 the hour has passed: at the next ingest of that store, at startup, and every 15 minutes on a
 writable instance.
 

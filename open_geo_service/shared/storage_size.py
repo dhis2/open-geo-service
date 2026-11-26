@@ -12,6 +12,8 @@ import logging
 import os
 from pathlib import Path
 
+from open_geo_service import storage
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +33,7 @@ def stored_bytes(path: str | Path) -> int:
         try:
             import icechunk
 
-            repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(root)))
+            repo = icechunk.Repository.open(storage.icechunk_storage(str(root)))
             return int(repo.chunk_storage_stats().non_virtual_bytes())
         except Exception:
             logger.warning("Could not read the size of '%s' from Icechunk; measuring its files", root, exc_info=True)

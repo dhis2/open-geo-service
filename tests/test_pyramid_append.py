@@ -107,7 +107,7 @@ def _ingest(state: dict[str, Any], end: str, refresh_periods: list[str] | None =
 
 def _root(store_path: Path) -> Any:
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    return zarr.open_group(repo.readonly_session("main").store, mode="r")
+    return zarr.open_group(repo.readonly_session("ingest").store, mode="r")
 
 
 def _assert_same_store(synced: Path, rebuilt: Path, *, fetched_at_from_level_0: bool = False) -> None:
@@ -240,7 +240,7 @@ def test_a_climatology_appends_along_its_own_time_dim(tmp_path: Path, monkeypatc
     synced, rebuilt = tmp_path / "synced.icechunk", tmp_path / "rebuilt.icechunk"
     downloader.write_to_icechunk_store(full.isel(dayofyear=slice(0, 3)), synced, crs="EPSG:4326")
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(synced)))
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     full.isel(dayofyear=slice(3, 4)).to_zarr(session.store, group="0", append_dim="dayofyear", zarr_format=3)
     session.commit("day 4")
 
@@ -257,10 +257,10 @@ def test_a_sync_with_nothing_new_leaves_the_store_alone(pyramid_sync: dict[str, 
     state = pyramid_sync
     _ingest(state, "2026-01-03")
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(state["store"])))
-    before = repo.lookup_branch("main")
+    before = repo.lookup_branch("ingest")
 
     assert downloader.append_pyramid_levels(state["store"]) == 0
-    assert repo.lookup_branch("main") == before
+    assert repo.lookup_branch("ingest") == before
 
 
 def test_a_sync_holds_back_empty_newest_periods_and_appends_them_once_filled(pyramid_sync: dict[str, Any]) -> None:
@@ -359,7 +359,9 @@ def test_every_level_of_an_ingested_pyramid_has_one_period_per_shard_and_a_fill_
     root = _root(state["store"])
     levels = sorted(root.group_keys())
     assert len(levels) >= 3, "precondition: a pyramid with several levels"
-    session = icechunk.Repository.open(icechunk.local_filesystem_storage(str(state["store"]))).readonly_session("main")
+    session = icechunk.Repository.open(icechunk.local_filesystem_storage(str(state["store"]))).readonly_session(
+        "ingest"
+    )
     for level in levels:
         tg = root[level]["tg"]
         assert tg.shape[0] == 3, level

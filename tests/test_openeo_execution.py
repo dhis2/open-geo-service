@@ -18,6 +18,7 @@ import xarray as xr
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from open_geo_service import config as api_config
 from open_geo_service.ingestions.schemas import ArtifactFormat
 from open_geo_service.openeo.execution import (
     SaveResultEnvelope,
@@ -469,7 +470,7 @@ def test_result_assets_managed_dataset_exposes_links(monkeypatch: pytest.MonkeyP
         lambda: {"my_aggregate": object()},
     )
     published = _result_assets(_record("managed://my_aggregate"))
-    assert published["stac"]["href"] == "/stac/my_aggregate/collection.json"
+    assert published["stac"]["href"] == "/stac/rasters/my_aggregate/collection.json"
 
 
 def _store_finished_job(job_id: str) -> None:
@@ -583,9 +584,15 @@ def test_a_failed_job_links_to_logs_that_carry_its_error(client: TestClient) -> 
     assert [entry["level"] for entry in entries] == ["error"]
     assert entries[0]["message"].startswith("failed: HTTPException: 404: Collection 'no_such_dataset'")
     assert client.get(logs_href, params={"offset": entries[0]["id"]}).json()["logs"] == []
-    # A client polling from the first failure still sees the second one after a re-run.
-    run_until_failed()
-    after_rerun = client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
+    # A client polling from the first failure still sees the second one after a re-run. Waited
+    # for by its log entry: the status reads "error" from the first run until the re-run starts.
+    assert client.post(f"/jobs/{job_id}/results").status_code == 202
+    deadline = time.monotonic() + 30
+    while not (
+        after_rerun := client.get(logs_href, params={"level": "error", "offset": entries[0]["id"]}).json()["logs"]
+    ):
+        assert time.monotonic() < deadline, "the re-run did not fail within 30 s"
+        time.sleep(0.05)
     assert [entry["level"] for entry in after_rerun] == ["error"]
     assert after_rerun[0]["id"] != entries[0]["id"]
 
@@ -1647,7 +1654,7 @@ def test_persist_result_writes_icechunk_when_dataset_id_in_options(
     ds = _small_dataset()
     envelope = SaveResultEnvelope(ds, "Zarr", {"dataset_id": "my_aggregate"})
 
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     registered: list[Any] = []
     monkeypatch.setattr(
@@ -1658,7 +1665,11 @@ def test_persist_result_writes_icechunk_when_dataset_id_in_options(
     result = job_service._persist_result("job-managed", envelope)
 
     assert result == "managed://my_aggregate"
-    assert (tmp_path / "my_aggregate.icechunk").exists()
+    # The dataset's folder holds its store and nothing GeoService keeps for itself.
+    assert sorted(path.name for path in (tmp_path / "catalog" / "rasters" / "my_aggregate").iterdir()) == [
+        "my_aggregate.icechunk",
+        "thumbnail.png",
+    ]
     assert len(registered) == 1
     record, publish_flag = registered[0]
     assert record.dataset_id == "my_aggregate"
@@ -1675,7 +1686,7 @@ def test_persist_result_covers_a_projected_result_in_its_own_crs(
 
     ds = _small_dataset().assign_coords(x=500000 + _small_dataset().x * 1000, y=6000000 + _small_dataset().y * 1000)
     envelope = SaveResultEnvelope(ds.rio.write_crs("EPSG:32633"), "Zarr", {"dataset_id": "utm_aggregate"})
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     registered: list[Any] = []
     monkeypatch.setattr(
@@ -1705,7 +1716,7 @@ def test_persist_result_stamps_cf_attrs_from_template(
             "cell_methods": "time: sum",
         }
 
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _cf_template)
     monkeypatch.setattr(
         "open_geo_service.ingestions.services.register_artifact_record",
@@ -1715,7 +1726,7 @@ def test_persist_result_stamps_cf_attrs_from_template(
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": "cf_aggregate", "publish": False})
     job_service._persist_result("job-cf", envelope)
 
-    written = open_icechunk_dataset(str(tmp_path / "cf_aggregate.icechunk"))
+    written = open_icechunk_dataset(str(tmp_path / "catalog" / "rasters" / "cf_aggregate" / "cf_aggregate.icechunk"))
     try:
         attrs = written["precip"].attrs
         assert attrs.get("units") == "mm"
@@ -1754,7 +1765,7 @@ def test_persist_result_replaces_a_process_s_labels_with_the_template_s(
     )
     result["wbgt_max"] = result["precip"].copy(deep=True)
     result["wbgt_max"].attrs = {"units": "degC", "standard_name": "air_temperature", "long_name": "Daily maximum WBGT"}
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _template)
     monkeypatch.setattr(
         "open_geo_service.ingestions.services.register_artifact_record",
@@ -1764,7 +1775,7 @@ def test_persist_result_replaces_a_process_s_labels_with_the_template_s(
     options = {"dataset_id": "heat_days", "variable": "precip", "publish": False}
     job_service._persist_result("job-labels", SaveResultEnvelope(result, "Zarr", options))
 
-    written = open_icechunk_dataset(str(tmp_path / "heat_days.icechunk"))
+    written = open_icechunk_dataset(str(tmp_path / "catalog" / "rasters" / "heat_days" / "heat_days.icechunk"))
     try:
         attrs = written["precip"].attrs
         assert attrs["long_name"] == "Heat-stress days, WBGT max above 30 degrees C"
@@ -1782,7 +1793,7 @@ def test_persist_result_does_not_publish_when_publish_false(
     job_service: OpenEOJobService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": "ds", "publish": False})
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     registered: list[Any] = []
     monkeypatch.setattr(
@@ -1800,7 +1811,7 @@ def test_persist_result_publishes_to_stac_when_publish_true(
     job_service: OpenEOJobService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": "ds", "publish": True})
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     registered: list[Any] = []
     monkeypatch.setattr(
@@ -1844,7 +1855,7 @@ def test_persist_result_uses_icechunk_when_pyramid_needed(
         "open_geo_service.data_manager.services.downloader._write_root_time_coordinate",
         lambda *a, **kw: None,
     )
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     registered: list[Any] = []
     monkeypatch.setattr(
@@ -1860,7 +1871,7 @@ def test_persist_result_uses_icechunk_when_pyramid_needed(
 
     record, _ = registered[0]
     assert record.format == ArtifactFormat.ICECHUNK
-    assert record.path == str(tmp_path / "big_dataset.icechunk")
+    assert record.path == str(tmp_path / "catalog" / "rasters" / "big_dataset" / "big_dataset.icechunk")
 
 
 def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
@@ -1876,7 +1887,8 @@ def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(
 # Path separators, ids that name one file but not one URL segment (shared.urls),
 # and supplied ids that are empty or not text.
 @pytest.mark.parametrize(
-    "bad_id", ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "", None, 0]
+    "bad_id",
+    ["../etc/passwd", "a/b", "../../secret", "/abs/path", "rain?west", "a b", "-rain", "Rain", "rain.v2", "", None, 0],
 )
 def test_persist_result_rejects_dataset_id_that_is_not_one_url_segment(
     job_service: OpenEOJobService, bad_id: object
@@ -1930,7 +1942,7 @@ def test_persist_result_auto_registers_missing_template(
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config_file))
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     registered: list[Any] = []
     monkeypatch.setattr(
         "open_geo_service.ingestions.services.register_artifact_record",
@@ -1981,7 +1993,7 @@ def test_persist_result_reloads_template_after_concurrent_create(
     monkeypatch.setattr(api_config, "_cache", None)
     monkeypatch.setattr(dataset_registry, "CONFIGS_DIR", None)
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config_file))
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
 
     real_get_dataset = dataset_registry.get_dataset
     real_write_dataset_template = dataset_registry.write_dataset_template
@@ -2028,7 +2040,7 @@ def test_persist_result_rejects_non_boolean_publish_option(
     job_service: OpenEOJobService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writes: list[int] = []
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr("open_geo_service.data_registry.services.datasets.get_dataset", _stub_get_dataset)
     monkeypatch.setattr(
         "open_geo_service.data_manager.services.downloader.write_to_icechunk_store",

@@ -14,20 +14,15 @@ from topozarr import CoarseningMethod
 from topozarr.coarsen import create_pyramid
 from xarray.backends.zarr import FillValueCoder
 
-from open_geo_service import config as api_config
+from open_geo_service import storage
+from open_geo_service.shared import layout
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.crs import store_crs_attrs
 from open_geo_service.shared.geozarr import check_grid_description, grid_geometry, write_gdal_geotransform
 from open_geo_service.shared.provisional import FETCHED_AT
 from open_geo_service.shared.raster_contract import prepare_for_publication
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_download_dir() -> Path:
-    return api_config.get_download_root()
-
-
-DOWNLOAD_DIR = _resolve_download_dir()
 
 
 # A grid larger than this gets overviews. Compared against the *grid* (nx * ny), not the
@@ -478,7 +473,7 @@ def _open_pyramid_levels(
     from open_geo_service.stac.media_types import attributes_declare_multiscales
 
     method = _normalize_resampling_method(pyramid_method)
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     session = repo.writable_session(branch)
     root = zarr.open_group(session.store, mode="r+")
     root_attrs = dict(root.attrs)
@@ -515,7 +510,7 @@ def append_pyramid_levels(
     t_dim: str | None = None,
     x_dim: str = "x",
     y_dim: str = "y",
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
 ) -> int | None:
     """Extend every coarser level of a pyramid store on *branch* to the periods level 0 has gained.
@@ -598,7 +593,7 @@ def rewrite_pyramid_levels(
     t_dim: str | None = None,
     x_dim: str = "x",
     y_dim: str = "y",
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
 ) -> int | None:
     """Rewrite every coarser level of the periods at ``indices`` after level 0 replaced them.
@@ -637,8 +632,7 @@ def _get_cache_prefix(dataset: dict[str, Any]) -> str:
 
 def get_zarr_path(dataset: dict[str, Any]) -> Path | None:
     """Return the optimised zarr archive path if it exists."""
-    prefix = _get_cache_prefix(dataset)
-    optimized = DOWNLOAD_DIR / f"{prefix}.zarr"
+    optimized = layout.raster_zarr(_get_cache_prefix(dataset))
     if optimized.exists():
         return optimized
     return None
@@ -646,8 +640,7 @@ def get_zarr_path(dataset: dict[str, Any]) -> Path | None:
 
 def get_icechunk_path(dataset: dict[str, Any]) -> Path:
     """Return the Icechunk store path for a dataset."""
-    prefix = _get_cache_prefix(dataset)
-    return DOWNLOAD_DIR / f"{prefix}.icechunk"
+    return layout.raster_store(_get_cache_prefix(dataset))
 
 
 def needs_pyramid(ds: xr.Dataset) -> bool:
@@ -656,7 +649,7 @@ def needs_pyramid(ds: xr.Dataset) -> bool:
 
 
 def ensure_time_coordinate_chunking(
-    store_path: Path, time_dim: str, *, branch: str = "main", amend: bool = False
+    store_path: Path, time_dim: str, *, branch: str = WRITE_BRANCH, amend: bool = False
 ) -> bool:
     """Re-chunk an existing Icechunk store's 1-D time coordinates to a bounded chunk size.
 
@@ -673,7 +666,7 @@ def ensure_time_coordinate_chunking(
     """
     import icechunk
 
-    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
+    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
     read_group = zarr.open_group(repo.readonly_session(branch).store, mode="r")
     fine: list[zarr.Array] = []
     for name in (time_dim, FETCHED_AT):
@@ -722,7 +715,7 @@ def write_to_icechunk_store(
     pyramid_method: str = "mean",
     commit_message: str = "Materialized dataset",
     before_commit: Callable[[], None] | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
     amend: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> str:
@@ -744,7 +737,6 @@ def write_to_icechunk_store(
     ``grid_mapping`` per variable, then ``proj.assign_crs`` again because
     ``rio.write_crs`` destroys xproj CRS detection.
     """
-    import icechunk
     import rioxarray as _rxr  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio accessor
 
     # Bring the cube up to the published-store contract, and resolve the CRS that describes it,
@@ -809,8 +801,9 @@ def write_to_icechunk_store(
     ds = ds.rio.write_crs(crs)
     ds = ds.proj.assign_crs(spatial_ref=crs)
 
-    storage = icechunk.local_filesystem_storage(str(store_path))
-    repo = icechunk.Repository.open_or_create(storage)
+    from open_geo_service.streaming.store import open_or_create_repo
+
+    repo = open_or_create_repo(store_path)
     session = repo.writable_session(branch)
 
     if _needs_pyramid(ds, x_dim, y_dim):

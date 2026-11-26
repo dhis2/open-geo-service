@@ -134,6 +134,19 @@ async def _refresh_derived_datasets_periodically() -> None:
             logger.exception("Derived dataset reconciliation failed; retrying at the next interval")
 
 
+# How often the writer retries a failed rewrite of the STAC catalog; between retries it lags the records.
+_CATALOG_RETRY_INTERVAL_S = 60
+
+
+async def _retry_catalog_periodically() -> None:
+    """Rewrite the STAC catalog after a failed rewrite, for as long as the app runs, scheduler or not."""
+    from open_geo_service.stac.catalog_files import retry_catalog_if_behind
+
+    while True:
+        await asyncio.sleep(_CATALOG_RETRY_INTERVAL_S)
+        await asyncio.to_thread(retry_catalog_if_behind)  # logs its own failure
+
+
 async def _warm_process_registry() -> None:
     """Load the openEO process implementations in a worker thread, once, at startup.
 
@@ -203,6 +216,17 @@ async def _services() -> AsyncGenerator[None]:
     pipeline_recovery: asyncio.Task[None] | None = None
     notification_replay: asyncio.Task[None] | None = None
     derived_refresh: asyncio.Task[None] | None = None
+    catalog_retry: asyncio.Task[None] | None = None
+    from open_geo_service.migrate_layout import pending_migration
+
+    if (reason := pending_migration()) is not None:
+        message = (
+            f"The data folder needs `python -m open_geo_service.migrate_layout`: {reason}. Records still "
+            "name the old paths, while ingests and syncs write to catalog/. Stop every server on it and run it."
+        )
+        if not api_config.is_read_only():
+            raise RuntimeError(message)
+        logger.warning(message)
     if not api_config.is_read_only():
         # A read-only instance may share its data directory with a writing one, so it leaves
         # the stores alone.
@@ -210,12 +234,17 @@ async def _services() -> AsyncGenerator[None]:
             clean_up_interrupted_ingests,
             collect_pending_garbage_everywhere,
             reconcile_published_branches,
+            remove_files_no_record_names,
         )
 
         try:
             clean_up_interrupted_ingests()
         except Exception:
             logger.exception("Could not clean up interrupted ingests; continuing startup")
+        try:
+            remove_files_no_record_names()
+        except Exception:
+            logger.exception("Could not remove files left without a record; continuing startup")
         try:
             reconcile_published_branches()
         except Exception:
@@ -224,10 +253,16 @@ async def _services() -> AsyncGenerator[None]:
             collect_pending_garbage_everywhere()
         except Exception:
             logger.exception("Could not run pending store collections; continuing startup")
+        # Every document again: an upgrade, a changed template or public address changes them
+        # without changing a record. Logged rather than raised, as a record write does.
+        from open_geo_service.stac.catalog_files import write_catalog_after_change
+
+        write_catalog_after_change()
         maintenance = asyncio.create_task(_collect_pending_garbage_periodically())
         pipeline_recovery = asyncio.create_task(_recover_pipeline_runs_periodically())
         notification_replay = asyncio.create_task(_replay_notifications_periodically())
         derived_refresh = asyncio.create_task(_refresh_derived_datasets_periodically())
+        catalog_retry = asyncio.create_task(_retry_catalog_periodically())
     job_service = get_job_service()
     # Recovery requeues and takes over jobs, which only the writer runs.
     if not api_config.is_read_only():
@@ -299,6 +334,8 @@ async def _services() -> AsyncGenerator[None]:
             notification_replay.cancel()
         if derived_refresh is not None:
             derived_refresh.cancel()
+        if catalog_retry is not None:
+            catalog_retry.cancel()
         job_service.set_event_consumer(None)
         pipeline_runner.set_event_consumer(None)
         openeo_service.set_event_consumer(None)

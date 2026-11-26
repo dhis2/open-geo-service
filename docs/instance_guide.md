@@ -228,6 +228,34 @@ open-geo-service = { git = "https://github.com/dhis2/open-geo-service.git", rev 
 
 Pinning to a released version (`==X.Y.Z`) is recommended over tracking `main`: a release is reproducible, whereas `main`'s dependency tree shifts over time and can change under you between syncs.
 
+### Moving to a new data folder layout
+
+A release that changes the [data folder layout](data_folder_layout.md) reads only the new one.
+A writable server refuses to start until the data is moved, as its syncs would otherwise download
+the data again into the new layout; a read-only one logs a warning. Move the data with
+`migrate_layout`, which renames files on the same disk and downloads nothing:
+
+1. Stop every server on the data folder, the read-only ones too.
+2. Back up the data folder.
+3. From the directory the instance's `.env` is in, see what would change:
+   `uv run python -m open_geo_service.migrate_layout --dry-run`
+4. Run it without `--dry-run`, then start the writable server before any read-only one: the
+   writer writes the catalog in `catalog/` at startup, and a read-only server serves only what
+   is there.
+
+It also gives each raster store written before the `ingest` branch existed that branch, and
+makes `main` its published version; until then no server reads the store. If a store fails, it
+says which: run it again, and it continues where it stopped.
+
+It refuses to run while a dataset's id breaks the id rule (lowercase letters, digits, `_` and
+`-`, starting with a letter), and names each one: delete it, or ingest it again under a valid id.
+It refuses when `catalog/`, or a folder in it, is on another disk than the data folder, as it
+moves by renaming: run it with `catalog/` on the same disk, then move `catalog/` or its folders.
+It also refuses on an instance still on the layout before `rasters/` and `vectors/` (with
+`downloads/` or `features/` in the data folder, or `datasets/` in `plugins_dir`): run
+`migrate_layout` of a release from before November 2026 first. Running it again once done
+changes nothing.
+
 ### Troubleshooting
 
 - **Always run inside the synced environment** — use `make run` or `uv run uvicorn …`, never a bare `uvicorn`/`python`. If a stray virtual environment is activated (`echo $VIRTUAL_ENV`), deactivate it; uv warns when `VIRTUAL_ENV` doesn't match the project's `.venv`.

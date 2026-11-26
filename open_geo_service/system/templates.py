@@ -349,12 +349,12 @@ def _dataset_view(dataset: Any, template: dict[str, Any] | None) -> dict[str, An
     dataset ingested before thumbnails existed has none until its next sync, and linking a
     missing image would show a broken-image icon rather than the ramp.
     """
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
     colormap = _declared_colormap((template or {}).get("display"))
     status = "published" if dataset.publication.status == "published" else "unpublished"
     try:
-        has_thumbnail = thumbnail_path(dataset.dataset_id).is_file()
+        has_thumbnail = layout.find_thumbnail(dataset.item_type, dataset.dataset_id) is not None
     except OSError:
         has_thumbnail = False
     description = " ".join((dataset.description or "").split())
@@ -369,6 +369,11 @@ def _dataset_view(dataset: Any, template: dict[str, Any] | None) -> dict[str, An
         "coverage": _coverage_label(dataset.extent.temporal.start, dataset.extent.temporal.end, dataset.period_type),
         "status": status,
         "has_thumbnail": has_thumbnail,
+        # From the catalog, as a static host serves it, so a page of cards reads no records; it
+        # serves no folder of a dataset not published, whose route reads its record instead.
+        "thumbnail": f"/stac/{layout.dataset_key(layout.kind_of(dataset.item_type), dataset.dataset_id)}/thumbnail.png"
+        if status == "published"
+        else f"/datasets/{dataset.dataset_id}/thumbnail.png",
         "ramp": _colormap_ramp(colormap),
         "kind": {"feature": "vector", "table": "table"}.get(dataset.item_type, "raster"),
     }

@@ -193,7 +193,7 @@ def managed_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path / "rasters")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     (tmp_path / "rasters").mkdir()
     return configs
 
@@ -318,7 +318,7 @@ def test_absolute_anomaly_publishes_with_the_observed_unit_end_to_end(
     store = icechunk.Repository.open(
         icechunk.local_filesystem_storage(str(downloader.get_icechunk_path({"id": options["dataset_id"]})))
     )
-    assert len(list(store.ancestry(branch="main"))) == 2, "the current version, over the empty first"
+    assert len(list(store.ancestry(branch="ingest"))) == 2, "the current version, over the empty first"
 
 
 # -- `units` in the save_result options is a declaration, not an escape hatch (CLIM-918) ------

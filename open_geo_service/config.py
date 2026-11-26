@@ -210,41 +210,13 @@ def get_data_root() -> Path:
 
     ``get_data_dir`` returns None when no config file is present. Every consumer that
     needs a concrete directory then repeats the same XDG fallback, so it lives here
-    instead. Subdirectories (``rasters``, ``vectors``, ``artifacts``, ``jobs``) hang off this root.
+    instead. `shared.layout` says where each file under it lives.
     """
     data_dir = get_data_dir()
     if data_dir is not None:
         return data_dir
     xdg_data = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return xdg_data / "geoservice"
-
-
-def get_download_root() -> Path:
-    """Return the directory holding managed artifact stores."""
-    return get_data_root() / "rasters"
-
-
-def get_features_root() -> Path:
-    """Return the one directory holding feature collections, as GeoParquet.
-
-    One location, not a second answer to where features live: a collection is either here or
-    it does not exist. It sits beside `rasters/` rather than inside it because the two hold
-    different things — a raster store is a directory an Icechunk repository owns, a feature
-    collection is a single file this service writes.
-
-    Being the store directory does not make it an inbox. A record is what brings a collection
-    into existence, so a file dropped in here that nothing registered is ignored by every
-    listing (CLIM-836).
-    """
-    return get_data_root() / "vectors"
-
-
-def get_tables_root() -> Path:
-    """Return the directory holding table datasets, one folder per dataset (CLIM-1553).
-
-    Like `vectors/`, not an inbox: a table exists because a record names its folder.
-    """
-    return get_data_root() / "tables"
 
 
 def get_utc_offset_hours() -> float:

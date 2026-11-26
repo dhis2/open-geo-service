@@ -68,6 +68,7 @@ nav:
   - Concepts:
       - Architecture: architecture.md
       - Zarr and GeoZarr: zarr_and_geozarr.md
+      - Data folder layout: data_folder_layout.md
       - Raster conventions: conventions.md
       - Project overview: project_description.md
       - Authentication: authentication.md

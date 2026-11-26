@@ -32,6 +32,7 @@ from open_geo_service.openeo import execution
 from open_geo_service.openeo import jobs as openeo_jobs
 from open_geo_service.openeo.execution import SaveResultEnvelope
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import utc_now
 from tests.test_managed_publish_units import managed_instance  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
@@ -140,14 +141,14 @@ def _job(
 
 
 def _store() -> Path:
-    return downloader.DOWNLOAD_DIR / f"{_DATASET}.icechunk"
+    return layout.raster_store(_DATASET)
 
 
 def _head() -> str:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    return str(repo.lookup_branch("main"))
+    return str(repo.lookup_branch("ingest"))
 
 
 def _commits(job_id: str) -> list[str]:
@@ -155,7 +156,9 @@ def _commits(job_id: str) -> list[str]:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    mine = [s.id for s in repo.ancestry(branch="main") if s.message.startswith(f"Published from openEO job {job_id} ")]
+    mine = [
+        s.id for s in repo.ancestry(branch="ingest") if s.message.startswith(f"Published from openEO job {job_id} ")
+    ]
     return list(reversed(mine))
 
 
@@ -552,8 +555,9 @@ def test_startup_recovery_retries_after_the_store_lock_is_released(
     finally:
         lock.release()
 
+    # Wait for the event, not the status: the watcher hands the event over after it saves the job.
     deadline = time.monotonic() + 5
-    while _record("job-1").status != OpenEOJobStatus.FINISHED and time.monotonic() < deadline:
+    while not received and time.monotonic() < deadline:
         time.sleep(0.01)
 
     assert received == [_assert_one_published_event("job-1")]
@@ -689,8 +693,9 @@ def test_failed_publication_completion_keeps_retrying_after_startup(
     assert _record("job-1").publication is not None
     failing.on = False
 
+    # Wait for the event, not the status: the watcher hands the event over after it saves the job.
     deadline = time.monotonic() + 5
-    while _record("job-1").status != OpenEOJobStatus.FINISHED and time.monotonic() < deadline:
+    while not received and time.monotonic() < deadline:
         time.sleep(0.01)
 
     assert received == [_assert_one_published_event("job-1")]
@@ -888,7 +893,6 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     import jsonschema
 
     from open_geo_service import __version__
-    from open_geo_service import config as api_config
     from tests.test_feature_store import _register
     from tests.test_initial_ingestion_event import _Plugin
 
@@ -908,7 +912,6 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     read = openeo_jobs.store_head(Path(str(input_artifact.path)))
     recorded = {**_EVIDENCE["sources"][0], "collection_id": source, "artifact_id": input_artifact.artifact_id}
     # A feature collection keeps its artifact id when refreshed and has no snapshot to compare.
-    monkeypatch.setattr(api_config, "get_features_root", lambda: Path(str(input_artifact.path)).parent / "vectors")
     boundaries = {"collection_id": "districts", "artifact_id": _register().artifact_id, "snapshot_id": None}
     evidence = {**_EVIDENCE, "sources": [{**recorded, "snapshot_id": read}] * 2 + [boundaries]}
     monkeypatch.setattr(sys.modules[__name__], "_EVIDENCE", evidence)
@@ -918,7 +921,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     def shown() -> tuple[dict[str, Any], str, dict[str, Any]]:
         detail = client.get(f"/datasets/{_DATASET}").json()["provenance"]
         page = client.get(f"/datasets/{_DATASET}", headers={"Accept": "text/html"}).text
-        return detail, page, client.get(f"/stac/{_DATASET}/collection.json").json()
+        return detail, page, client.get(f"/stac/rasters/{_DATASET}/collection.json").json()
 
     detail, page, collection = shown()
     # One input, though the graph read it twice; only ids leave the execution evidence.
@@ -952,8 +955,8 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     assert 'href="/jobs/job-1"' in page and f'href="/datasets/{source}"' in page
     assert "updated since" not in page
     assert [link["href"] for link in collection["links"] if link["rel"] == "derived_from"] == [
-        f"http://testserver/stac/{source}/collection.json",
-        "http://testserver/stac/districts/collection.json",
+        f"../{source}/collection.json",
+        "../../vectors/districts/collection.json",
     ]
     # The openEO copy links the same inputs at their openEO collections, so following
     # provenance from openEO stays in openEO.
@@ -970,7 +973,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # the relative README and AGENTS among them, answers HEAD; `proj:code` is declared at v2.0.0;
     # and the Portolan profile is declared.
     assert [provider["roles"] for provider in collection["providers"]][-2:] == [["processor"], ["host"]]
-    collection_url = f"http://testserver/stac/{_DATASET}/collection.json"
+    collection_url = f"http://testserver/stac/rasters/{_DATASET}/collection.json"
     for link in collection["links"]:
         href = urljoin(collection_url, link["href"])
         if href.startswith("http://testserver/"):
@@ -981,10 +984,12 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # The input's producer made the data and this instance hosts it, so the collection is a
     # Portolan mirror, which records when it was last updated.
     assert collection["updated"].endswith("Z")
-    readme = client.get(f"/stac/{_DATASET}/README.md").text
+    readme = client.get(f"/stac/rasters/{_DATASET}/README.md").text
     assert "(processor)" in readme and "(host)" in readme
-    agents = client.get(f"/stac/{_DATASET}/AGENTS.md").text
-    assert f'xr.open_zarr("http://testserver/zarr/{_DATASET}"' in agents
+    agents = client.get(f"/stac/rasters/{_DATASET}/AGENTS.md").text
+    # Without a configured public address, the store beside the file, and no Zarr route.
+    assert f'local_filesystem_storage("./{_DATASET}.icechunk/")' in agents
+    assert "/zarr/" not in agents
     assert client.get(f"/datasets/{source}").json()["provenance"] is None
 
     plugin.available.append("2026-01-03")
@@ -1002,7 +1007,7 @@ def test_the_writer_returns_the_committed_snapshot(tmp_path: Path) -> None:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    assert snapshot == repo.lookup_branch("main")
+    assert snapshot == repo.lookup_branch("ingest")
 
 
 # --- finding the commit after a restart ------------------------------------------------------
