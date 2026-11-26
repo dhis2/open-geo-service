@@ -9,34 +9,44 @@ answer can be reproduced without the assistant.
 import csv
 import io
 import json
+import logging
 import math
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
+import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow.types as pa_types
+import shapely
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
+from pyproj import CRS, Transformer
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
 from open_geo_service.mcp_server.endpoint import current_scope
-from open_geo_service.shared.urls import absolute_base
+from open_geo_service.shared.time import iso_step_to_approx_hours
+from open_geo_service.shared.urls import absolute_base, is_segment_safe_id, path_segment
 from open_geo_service.stac.services import collection_path
 
+logger = logging.getLogger(__name__)
+
 # A result is read by a model, so its size is bounded by what fits usefully in a context window
-# rather than by what the server can compute. A daily series for a few months over a hundred
-# districts is about this size.
+# rather than by what the server can compute: a daily series of about three weeks over a hundred
+# districts, or of five years at one point.
 MAX_ROWS = 2000
 
 # Half the side of the square a point query aggregates over, in degrees: far smaller than any
-# grid cell, so the square falls inside one cell and its weighted mean is that cell's value.
-# A square rather than a point because the weighted aggregation takes polygons only.
+# grid cell, so a square around a cell's centre returns that cell's value. A square rather than
+# a point because the weighted aggregation takes polygons only.
 _POINT_HALF_SIDE = 1e-5
+
+Bounds = tuple[float, float, float, float]
 
 Statistic = Literal["mean", "sum", "min", "max", "median"]
 
@@ -154,7 +164,8 @@ async def _ocs() -> AsyncGenerator[httpx.AsyncClient]:
     request = Request(scope)
     url = request.url
     authorization = request.headers.get("authorization")
-    transport = httpx.ASGITransport(app=scope["app"], root_path=prefix)
+    # A route that fails comes back as its 500 response, reported like any other refusal.
+    transport = httpx.ASGITransport(app=scope["app"], root_path=prefix, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
         base_url=f"{url.scheme}://{url.netloc}{prefix}",
@@ -181,6 +192,19 @@ async def _get_json(client: httpx.AsyncClient, path: str) -> Any:
     return response.json()
 
 
+def _checked_id(dataset_id: str) -> str:
+    """An id the assistant passed, refused when no dataset can have it: each id is one URL segment."""
+    if not is_segment_safe_id(dataset_id):
+        raise ToolError(f"No dataset {dataset_id!r}. Use list_datasets to see what this instance holds.")
+    return dataset_id
+
+
+async def _raster(client: httpx.AsyncClient, dataset_id: str) -> dict[str, Any]:
+    """A raster's STAC collection."""
+    collection: dict[str, Any] = await _get_json(client, collection_path(_checked_id(dataset_id)))
+    return collection
+
+
 def _links(dataset_id: str) -> dict[str, str]:
     """Links to show the user, at the instance's public address.
 
@@ -188,9 +212,9 @@ def _links(dataset_id: str) -> dict[str, str]:
     """
     base = absolute_base(Request(current_scope.get()))
     return {
-        "dataset_url": f"{base}/datasets/{dataset_id}",
+        "dataset_url": f"{base}/datasets/{path_segment(dataset_id)}",
         "stac_url": f"{base}{collection_path(dataset_id)}",
-        "map_url": f"{base}/map?dataset={dataset_id}",
+        "map_url": f"{base}/map?dataset={quote(dataset_id, safe='')}",
     }
 
 
@@ -200,6 +224,15 @@ def _raster_variable(collection: dict[str, Any]) -> tuple[str, str | None]:
     render = (collection.get("renders") or {}).get("default") or {}
     variable = render.get("ogs:variable") or next(iter(variables), "")
     return variable, (variables.get(variable) or {}).get("unit")
+
+
+def _period_dimensions(collection: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """A raster's dimensions other than space and bands: what a result has one row per value of."""
+    return {
+        key: dim
+        for key, dim in (collection.get("cube:dimensions") or {}).items()
+        if dim.get("type") not in ("spatial", "bands", "geometry")
+    }
 
 
 def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], links: dict[str, str]) -> DatasetSummary:
@@ -216,11 +249,7 @@ def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], lin
         summary.area_count = collection.get("table:row_count")
         return summary
     summary.variable, summary.unit = _raster_variable(collection)
-    dimensions = {
-        key: dim
-        for key, dim in (collection.get("cube:dimensions") or {}).items()
-        if dim.get("type") not in ("spatial", "bands", "geometry")
-    }
+    dimensions = _period_dimensions(collection)
     summary.dimensions = list(dimensions)
     # Stores keep their source's name for time: `t`, or `time` and `valid_time` for ERA5.
     time: dict[str, Any] = next((dim for dim in dimensions.values() if dim.get("type") == "temporal"), {})
@@ -230,6 +259,12 @@ def _summarise(collection: dict[str, Any], kind: Literal["raster", "areas"], lin
     return summary
 
 
+def _is_areas(record: dict[str, Any]) -> bool:
+    """Whether a feature collection holds areas: polygons, which a raster can be aggregated over."""
+    types: list[str] = record.get("geometry_types") or []
+    return bool(types) and all("Polygon" in kind for kind in types)
+
+
 async def _catalogue(client: httpx.AsyncClient) -> list[DatasetSummary]:
     catalog = await _get_json(client, "/stac/catalog.json")
     # A child link is `.../stac/{id}/collection.json`.
@@ -237,50 +272,165 @@ async def _catalogue(client: httpx.AsyncClient) -> list[DatasetSummary]:
         unquote(str(link["href"]).rsplit("/", 2)[-2]) for link in catalog.get("links", []) if link.get("rel") == "child"
     ]
     # The records, not the STAC documents, know what each dataset holds and when it was last
-    # updated. Table datasets are left out: no tool reads them yet.
+    # updated. Tables, and features other than areas, are left out: no tool reads them yet.
     records = {item["dataset_id"]: item for item in (await _get_json(client, "/datasets?f=json")).get("items", [])}
-    kinds: dict[str, Literal["raster", "areas"]] = {"coverage": "raster", "feature": "areas"}
+    features = {item["id"]: item for item in (await _get_json(client, "/features")).get("items", [])}
     summaries: list[DatasetSummary] = []
     for dataset_id in ids:
         record = records.get(dataset_id, {})
-        kind = kinds.get(record.get("itemType", "coverage"))
-        if kind is None:
+        item_type = record.get("itemType", "coverage")
+        if item_type == "coverage":
+            kind: Literal["raster", "areas"] = "raster"
+        elif item_type == "feature" and _is_areas(features.get(dataset_id, {})):
+            kind = "areas"
+        else:
             continue
-        collection = await _get_json(client, collection_path(dataset_id))
+        try:
+            collection = await _get_json(client, collection_path(dataset_id))
+        except ToolError as error:
+            # One broken or just-removed dataset must not hide the rest of the catalogue.
+            logger.warning("Leaving %s out of the MCP catalogue: %s", dataset_id, error)
+            continue
         summary = _summarise(collection, kind, _links(dataset_id))
         summary.last_updated = record.get("last_updated")
         summaries.append(summary)
     return summaries
 
 
-async def _areas(client: httpx.AsyncClient, collection_id: str) -> list[Area]:
-    record = await _get_json(client, f"/features/{collection_id}")
-    response = await client.get(f"/features/{collection_id}/data.parquet")
+async def _area_file(client: httpx.AsyncClient, collection_id: str) -> tuple[dict[str, Any], bytes]:
+    """An area collection's record and its GeoParquet file."""
+    segment = path_segment(_checked_id(collection_id))
+    record = await _get_json(client, f"/features/{segment}")
+    if not _is_areas(record):
+        held = ", ".join(record.get("geometry_types") or ["no geometries"])
+        raise ToolError(f"{collection_id} holds {held}, not areas. Use list_datasets for the area collections.")
+    response = await client.get(f"/features/{segment}/data.parquet")
     if not response.is_success:
         raise ToolError(
             f"The instance refused the areas of {collection_id} ({response.status_code}): {_error_detail(response)}"
         )
-    table = pq.read_table(io.BytesIO(response.content))
+    return record, response.content
+
+
+def _read_areas(content: bytes, record: dict[str, Any]) -> list[Area]:
+    """The areas in a collection's GeoParquet file, sorted by name, without decoding a geometry."""
+    file = pq.ParquetFile(io.BytesIO(content))
+    schema = file.schema_arrow
     id_property = record["id_property"]
-    names = table.column_names
-    name_property = next((name for name in ("name", "displayName") if name in names), id_property)
+    name_property = next((name for name in ("name", "displayName") if name in schema.names), id_property)
     scalar = [
-        name
-        for name, field_type in zip(names, table.schema.types, strict=True)
-        if name not in (id_property, name_property, record.get("primary_geometry"))
-        and not pa_types.is_nested(field_type)  # structs such as Overture's bbox
-        and not pa_types.is_binary(field_type)
+        field.name
+        for field in schema
+        if field.name not in (id_property, name_property, record.get("primary_geometry"))
+        and not pa_types.is_nested(field.type)  # structs such as Overture's bbox
+        and not pa_types.is_binary(field.type)
     ]
-    rows = table.select([id_property, name_property, *scalar]).to_pylist()
+    rows = file.read(columns=list(dict.fromkeys([id_property, name_property, *scalar]))).to_pylist()
     areas = [
-        Area(
-            id=str(row[id_property]),
-            name=str(row[name_property]),
-            properties={key: row[key] for key in scalar},
-        )
+        Area(id=str(row[id_property]), name=str(row[name_property]), properties={key: row[key] for key in scalar})
         for row in rows
     ]
     return sorted(areas, key=lambda area: area.name)
+
+
+def _bounds(content: bytes, record: dict[str, Any], ids: set[str]) -> Bounds:
+    """The bounds of the areas with these ids, in WGS 84, the CRS a collection is stored in."""
+    id_property, geometry = record["id_property"], record["primary_geometry"]
+    columns = pq.read_table(io.BytesIO(content), columns=[id_property, geometry]).to_pydict()
+    selected = [wkb for key, wkb in zip(columns[id_property], columns[geometry], strict=True) if str(key) in ids]
+    west, south, east, north = shapely.total_bounds(shapely.from_wkb(selected))
+    return float(west), float(south), float(east), float(north)
+
+
+def _grid(collection: dict[str, Any]) -> tuple[Any, dict[str, Any], dict[str, Any]] | None:
+    """A raster's CRS and its x and y dimensions, or None when the collection does not give its grid.
+
+    Each dimension has a numeric `step` and an `extent` from the first cell centre to the last.
+    """
+    dimensions: dict[str, Any] = collection.get("cube:dimensions") or {}
+    axes = {dim.get("axis"): dim for dim in dimensions.values() if dim.get("type") == "spatial"}
+    x, y = axes.get("x") or {}, axes.get("y") or {}
+    for dim in (x, y):
+        extent = dim.get("extent")
+        if not isinstance(dim.get("step"), int | float) or not isinstance(extent, list) or len(extent) != 2:
+            return None
+    return x.get("reference_system", 4326), x, y
+
+
+def _raster_extent(collection: dict[str, Any], bounds: Bounds) -> dict[str, Any] | None:
+    """WGS 84 bounds as a `load_collection` spatial extent in the raster's own CRS, one cell wider.
+
+    `load_collection` keeps the cells whose centres lie in the extent; the margin keeps every
+    cell the bounds touch. None when the collection does not give its grid: the whole raster is
+    then read.
+    """
+    grid = _grid(collection)
+    if grid is None:
+        return None
+    crs, x, y = grid
+    transformer = Transformer.from_crs(4326, CRS.from_user_input(crs), always_xy=True)
+    west, south, east, north = transformer.transform_bounds(*bounds)
+    x_step, y_step = abs(x["step"]), abs(y["step"])
+    extent = {"west": west - x_step, "south": south - y_step, "east": east + x_step, "north": north + y_step}
+    return extent if crs == 4326 else {**extent, "crs": crs}
+
+
+def _cell_centre(collection: dict[str, Any], lon: float, lat: float) -> tuple[float, float]:
+    """The centre of the grid cell a point falls in, in WGS 84; the point itself without a grid.
+
+    A point within a thousandth of a cell of an edge takes the cell to its north-east. Stored
+    coordinates carry float noise, so a point given on an edge, as one with two decimals often
+    is, would otherwise fall a hair to either side of it, or between cells.
+    """
+    grid = _grid(collection)
+    if grid is None:
+        return lon, lat
+    crs, x, y = grid
+    transformer = Transformer.from_crs(4326, CRS.from_user_input(crs), always_xy=True)
+    centre: list[float] = []
+    for value, dim in zip(transformer.transform(lon, lat), (x, y), strict=True):
+        first, last = sorted(dim["extent"])
+        # STAC rounds the step; the extent's cell count gives it back exactly.
+        cells = round((last - first) / abs(dim["step"]))
+        step = (last - first) / cells if cells else abs(dim["step"])
+        centre.append(first + math.floor(round((value - first) / step + 0.5, 3)) * step)
+    centre_lon, centre_lat = transformer.transform(centre[0], centre[1], direction="INVERSE")
+    return float(centre_lon), float(centre_lat)
+
+
+def _instant(text: str | None) -> pd.Timestamp | None:
+    if not text:
+        return None
+    stamp = pd.Timestamp(text)
+    return stamp.tz_convert(None) if stamp.tzinfo else stamp
+
+
+def _period_count(collection: dict[str, Any], start: str | None, end: str | None) -> int | None:
+    """About how many periods a query from start to end covers; None when the dimensions do not say."""
+    count = 1
+    for dim in _period_dimensions(collection).values():
+        values = dim.get("values")
+        if dim.get("type") != "temporal":
+            if not isinstance(values, list):
+                return None
+            count *= len(values)
+            continue
+        extent = dim.get("extent") or [None, None]
+        try:
+            lower = max((t for t in (_instant(extent[0]), _instant(start)) if t is not None), default=None)
+            upper = min((t for t in (_instant(extent[1]), _instant(end)) if t is not None), default=None)
+            if isinstance(values, list):
+                instants = [t for t in (_instant(str(value)) for value in values) if t is not None]
+                count *= sum(1 for t in instants if (lower is None or t >= lower) and (upper is None or t <= upper))
+                continue
+            step = dim.get("step")
+            if lower is None or upper is None or not isinstance(step, str):
+                return None
+            hours = (upper - lower).total_seconds() / 3600
+            count *= max(0, math.floor(hours / iso_step_to_approx_hours(step)) + 1)
+        except ValueError:
+            return None
+    return count
 
 
 def _number(text: str) -> float | None:
@@ -313,16 +463,19 @@ async def _execute_table(
     return period_column, rows
 
 
-def _check_size(rows: int) -> None:
-    if rows > MAX_ROWS:
+def _check_size(rows: int | None) -> None:
+    """Refuse a result too large to read. Checked on the estimate before computing, and on the result."""
+    if rows is not None and rows > MAX_ROWS:
         raise ToolError(
             f"That is {rows} rows, more than the {MAX_ROWS} a result may hold. "
             "Narrow the period with start and end, or ask for fewer areas."
         )
 
 
-def _load(dataset_id: str, start: str | None, end: str | None) -> dict[str, Any]:
+def _load(dataset_id: str, start: str | None, end: str | None, spatial_extent: dict[str, Any] | None) -> dict[str, Any]:
     arguments: dict[str, Any] = {"id": dataset_id}
+    if spatial_extent:
+        arguments["spatial_extent"] = spatial_extent
     if start or end:
         arguments["temporal_extent"] = [start, end]
     return {"process_id": "load_collection", "arguments": arguments}
@@ -354,14 +507,28 @@ def build_server() -> MCPServer:
             return await _catalogue(client)
 
     @server.tool(annotations=read_only)
-    async def list_areas(collection_id: str) -> AreaList:
+    async def list_areas(
+        collection_id: str,
+        name: str | None = Field(
+            default=None, description="Part of an area's name, any case, to narrow a long collection."
+        ),
+    ) -> AreaList:
         """List the areas in an area collection, by name and id.
 
         Each comes with attributes such as its parent region. Pick an area by name here, then pass
         its id to get_zonal_statistics.
         """
         async with _ocs() as client:
-            return AreaList(collection_id=collection_id, areas=await _areas(client, collection_id))
+            record, content = await _area_file(client, collection_id)
+        areas = await run_in_threadpool(_read_areas, content, record)
+        if name:
+            areas = [area for area in areas if name.casefold() in area.name.casefold()]
+        if len(areas) > MAX_ROWS:
+            raise ToolError(
+                f"{collection_id} has {len(areas)} areas, more than the {MAX_ROWS} a result may hold. "
+                "Pass part of the name you are looking for."
+            )
+        return AreaList(collection_id=collection_id, areas=areas)
 
     @server.tool(annotations=read_only)
     async def get_timeseries(
@@ -373,16 +540,20 @@ def build_server() -> MCPServer:
     ) -> TimeseriesResult:
         """Values of a raster dataset at one location over time.
 
-        The value of the grid cell the point falls in, for each period between start and end.
+        The value of the grid cell the point falls in, for each period between start and end. A
+        point on the edge between cells takes the cell to its north-east.
         """
         async with _ocs() as client:
-            collection = await _get_json(client, collection_path(dataset_id))
+            collection = await _raster(client, dataset_id)
             variable, unit = _raster_variable(collection)
+            _check_size(_period_count(collection, start, end))
+            centre_lon, centre_lat = _cell_centre(collection, lon, lat)
             e = _POINT_HALF_SIDE
-            ring = [[lon - e, lat - e], [lon + e, lat - e], [lon + e, lat + e], [lon - e, lat + e], [lon - e, lat - e]]
+            west, south, east, north = centre_lon - e, centre_lat - e, centre_lon + e, centre_lat + e
+            ring = [[west, south], [east, south], [east, north], [west, north], [west, south]]
             point = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [ring]}}
             graph = {
-                "load": _load(dataset_id, start, end),
+                "load": _load(dataset_id, start, end, _raster_extent(collection, (west, south, east, north))),
                 "point": {
                     "process_id": "aggregate_spatial_weighted",
                     "arguments": {
@@ -427,16 +598,30 @@ def build_server() -> MCPServer:
         Covers each period between start and end. Area-weighted: a grid cell counts in proportion
         to how much of it lies in the area.
         """
+        if area_ids is not None and not area_ids:
+            raise ToolError("area_ids is empty. Omit it for every area, or pass ids from list_areas.")
         async with _ocs() as client:
-            collection = await _get_json(client, collection_path(dataset_id))
+            collection = await _raster(client, dataset_id)
             variable, unit = _raster_variable(collection)
-            names = {area.id: area.name for area in await _areas(client, collection_id)}
-            unknown = sorted(set(area_ids or []) - names.keys())
+            record, content = await _area_file(client, collection_id)
+            names = {area.id: area.name for area in await run_in_threadpool(_read_areas, content, record)}
+            wanted = set(area_ids or names)
+            unknown = sorted(wanted - names.keys())
             if unknown:
                 raise ToolError(f"No area {', '.join(unknown)} in {collection_id}. Use list_areas for the ids.")
+            periods = _period_count(collection, start, end)
+            _check_size(None if periods is None else periods * len(wanted))
+            # Areas asked for by id are computed with only their neighbours, over only the part
+            # of the raster they cover; every area is computed over the whole raster.
+            areas: dict[str, Any] = {"id": collection_id}
+            raster_extent = None
+            if area_ids:
+                bounds = await run_in_threadpool(_bounds, content, record, wanted)
+                areas["spatial_extent"] = dict(zip(("west", "south", "east", "north"), bounds, strict=True))
+                raster_extent = _raster_extent(collection, bounds)
             graph = {
-                "load": _load(dataset_id, start, end),
-                "areas": {"process_id": "load_collection", "arguments": {"id": collection_id}},
+                "load": _load(dataset_id, start, end, raster_extent),
+                "areas": {"process_id": "load_collection", "arguments": areas},
                 "zonal": {
                     "process_id": "aggregate_spatial_weighted",
                     "arguments": {
@@ -452,9 +637,7 @@ def build_server() -> MCPServer:
                 },
             }
             period_column, rows = await _execute_table(client, graph, variable)
-            if area_ids:
-                wanted = set(area_ids)
-                rows = [row for row in rows if row["feature_id"] in wanted]
+            rows = [row for row in rows if row["feature_id"] in wanted]
             _check_size(len(rows))
             return ZonalResult(
                 dataset_id=dataset_id,
@@ -467,7 +650,7 @@ def build_server() -> MCPServer:
                     ZonalRow(
                         period=row["period"],
                         area_id=row["feature_id"],
-                        area_name=names.get(row["feature_id"], row["feature_id"]),
+                        area_name=names[row["feature_id"]],
                         value=_number(row["value"]),
                     )
                     for row in rows

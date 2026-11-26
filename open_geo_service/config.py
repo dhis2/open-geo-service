@@ -306,8 +306,8 @@ def is_read_only() -> bool:
 def is_mcp_enabled() -> bool:
     """Return True when the instance serves its MCP endpoint at `/mcp` (CLIM-851).
 
-    Set ``mcp: true`` in geoservice.yaml. Off by default while the tools settle. Read per
-    request like `read_only`, so it can be flipped without rebuilding the app.
+    Set ``mcp: true`` in geoservice.yaml. Off by default while the tools settle. The config is
+    read once per process, so a change takes a restart.
     """
     raw = get_config().get("mcp", False)
     if not isinstance(raw, bool):

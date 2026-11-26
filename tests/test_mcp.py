@@ -42,8 +42,9 @@ _RAIN_COLLECTION = {
     "cube:dimensions": {
         # Named as ERA5 stores name it; not every store calls time `t`.
         "time": {"type": "temporal", "extent": ["2025-01-01T00:00:00Z", "2025-02-01T00:00:00Z"], "step": "P1M"},
-        "x": {"type": "spatial"},
-        "y": {"type": "spatial"},
+        # From the first cell centre to the last, as STAC gives a grid.
+        "x": {"type": "spatial", "axis": "x", "extent": [0.5, 3.5], "step": 1.0, "reference_system": 4326},
+        "y": {"type": "spatial", "axis": "y", "extent": [0.5, 3.5], "step": -1.0, "reference_system": 4326},
     },
 }
 
@@ -187,6 +188,27 @@ def test_list_datasets_reports_rasters_and_area_collections(mcp: TestClient, rai
     assert datasets["regions"]["last_updated"]
 
 
+def test_a_dataset_that_fails_is_left_out_of_the_catalogue(
+    mcp: TestClient, rain: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that is missing or corrupt makes STAC answer 500; the rest stays discoverable."""
+
+    def broken(dataset_id: str, request: Any) -> dict[str, Any]:
+        raise RuntimeError("corrupt store")
+
+    monkeypatch.setattr(stac_services, "build_collection", broken)
+
+    assert _call(mcp, "list_datasets")["result"] == []
+    assert "500" in _call(mcp, "get_timeseries", dataset_id="rain", lon=0.5, lat=0.5)["error"]
+
+
+def test_list_areas_narrows_by_name(mcp: TestClient, rain: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tools, "MAX_ROWS", 1)
+
+    assert "Pass part of the name" in _call(mcp, "list_areas", collection_id="regions")["error"]
+    assert [area["id"] for area in _call(mcp, "list_areas", collection_id="regions", name="eas")["areas"]] == ["EAST"]
+
+
 def test_zonal_statistics_are_computed_per_area_and_period(mcp: TestClient, rain: None) -> None:
     result = _call(mcp, "get_zonal_statistics", dataset_id="rain", collection_id="regions")
 
@@ -210,7 +232,11 @@ def test_zonal_statistics_narrow_to_the_areas_asked_for(mcp: TestClient, rain: N
     )
 
     assert [(row["period"], row["area_id"], row["value"]) for row in result["rows"]] == [("2025-02-01", "EAST", 3.0)]
-    assert result["process_graph"]["load"]["arguments"]["temporal_extent"] == ["2025-02-01", None]
+    load, areas = result["process_graph"]["load"]["arguments"], result["process_graph"]["areas"]["arguments"]
+    assert load["temporal_extent"] == ["2025-02-01", None]
+    # Only the area asked for and its neighbours, over the cells around it, one cell wide.
+    assert areas["spatial_extent"] == {"west": 2.0, "south": 0.0, "east": 4.0, "north": 4.0}
+    assert load["spatial_extent"] == {"west": 1.0, "south": -1.0, "east": 5.0, "north": 5.0}
 
 
 def test_an_unknown_area_points_the_caller_at_list_areas(mcp: TestClient, rain: None) -> None:
@@ -218,20 +244,31 @@ def test_an_unknown_area_points_the_caller_at_list_areas(mcp: TestClient, rain: 
 
     assert "No area NORTH in regions" in result["error"]
     assert "list_areas" in result["error"]
+    empty = _call(mcp, "get_zonal_statistics", dataset_id="rain", collection_id="regions", area_ids=[])
+    assert "area_ids is empty" in empty["error"]
 
 
 def test_a_timeseries_is_the_value_of_the_cell_the_point_falls_in(mcp: TestClient, rain: None) -> None:
     west = _call(mcp, "get_timeseries", dataset_id="rain", lon=0.5, lat=1.5)
     east = _call(mcp, "get_timeseries", dataset_id="rain", lon=3.2, lat=2.7)
+    # On the edge between a 1.0 and a 3.0 cell: the cell to the north-east, not their mean, also
+    # a hair west of it, as float32 coordinates put CHIRPS's edges.
+    edge = _call(mcp, "get_timeseries", dataset_id="rain", lon=2.0, lat=2.0)
+    noisy = _call(mcp, "get_timeseries", dataset_id="rain", lon=1.9999975, lat=2.0)
 
     assert [(row["period"], row["value"]) for row in west["rows"]] == [("2025-01-01", 1.0), ("2025-02-01", 1.0)]
     assert [row["value"] for row in east["rows"]] == [3.0, 3.0]
+    assert [row["value"] for row in edge["rows"]] == [3.0, 3.0]
+    assert [row["value"] for row in noisy["rows"]] == [3.0, 3.0]
+    assert west["process_graph"]["load"]["arguments"]["spatial_extent"]["west"] == pytest.approx(-0.5, abs=1e-4)
 
 
 def test_a_result_too_large_to_read_is_refused_with_how_to_narrow_it(
     mcp: TestClient, rain: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Refused from the collection's dimensions, before anything is computed."""
     monkeypatch.setattr(tools, "MAX_ROWS", 3)
+    monkeypatch.setattr(execution, "_open_artifact", lambda _: pytest.fail("computed before refusing"))
 
     result = _call(mcp, "get_zonal_statistics", dataset_id="rain", collection_id="regions")
 
@@ -241,8 +278,11 @@ def test_a_result_too_large_to_read_is_refused_with_how_to_narrow_it(
 
 def test_an_unknown_dataset_is_a_tool_error_not_a_failure(mcp: TestClient, rain: None) -> None:
     result = _call(mcp, "get_timeseries", dataset_id="nope", lon=0.5, lat=0.5)
+    # Not a path segment, so no dataset has it; escaping alone would route it to the parquet file.
+    path = _call(mcp, "list_areas", collection_id="regions/data.parquet")
 
     assert "list_datasets" in result["error"]
+    assert "No dataset 'regions/data.parquet'" in path["error"]
 
 
 def test_links_carry_the_mount_prefix(

@@ -1149,6 +1149,8 @@ def _build_collection_with_xstac(
                 temporal_dimension=time_dimension,
                 x_dimension=x_dimension,
                 y_dimension=y_dimension,
+                x_step=_regular_step(ds[x_dimension].values),
+                y_step=_regular_step(ds[y_dimension].values),
                 # The store's own CRS, not a constant: these axes are in whatever the store
                 # uses, and seNorge's are UTM33 metres. See reference_system_for.
                 reference_system=reference_system_for(store_crs),
@@ -1385,13 +1387,28 @@ def reference_system_for(store_crs: str | int | None) -> int | str:
     return parsed.to_wkt()
 
 
+def _regular_step(values: Any) -> float | None:
+    """The step between a grid axis's coordinates, or None when they are not evenly spaced.
+
+    Within a thousandth of a cell: float coordinates such as WorldPop's are not exactly even,
+    and xstac publishes a step only when they are, which leaves a client unable to place a cell.
+    """
+    coords = np.asarray(values, dtype="float64")
+    if coords.size < 2:
+        return None
+    step = float((coords[-1] - coords[0]) / (coords.size - 1))
+    if step == 0 or not np.allclose(np.diff(coords), step, rtol=0, atol=abs(step) / 1000):
+        return None
+    return step
+
+
 def _build_static_cube_dimensions(ds: xr.Dataset, x_dim: str, y_dim: str) -> dict[str, Any]:
     """Build minimal cube:dimensions for a dataset with no time axis."""
     crs = reference_system_for(ds.attrs.get("proj:code"))
     x_vals = ds[x_dim].values
     y_vals = ds[y_dim].values
-    x_step = float(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else None
-    y_step = float(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else None
+    x_step = _regular_step(x_vals)
+    y_step = _regular_step(y_vals)
     return {
         x_dim: {
             "type": "spatial",
