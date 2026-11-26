@@ -186,7 +186,7 @@ from the dimension's metadata, so there's nothing extra to configure.
 
 | Field        | Required | Description                                                                    |
 | ------------ | -------- | ------------------------------------------------------------------------------ |
-| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API             |
+| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API and names the dataset's files (and, for a table, its folder): lowercase letters, digits, `_` and `-`, starting with a letter |
 | `name`       | Yes      | Full human-readable name shown in API responses and STAC metadata              |
 | `short_name` | No       | Short label used in compact displays                                           |
 | `variable`   | Yes      | Name of the data variable in the Zarr store (e.g. `precip`, `t2m`, `rainfall`) |
@@ -203,6 +203,7 @@ from the dimension's metadata, so there's nothing extra to configure.
 | `period_type`        | Yes      | Temporal resolution: `hourly`, `daily`, `dekadal`, `weekly`, `monthly`, `yearly`, or `climatology`. Validated at registration — an unrecognised value is rejected rather than silently ignored, and it is required unless `sync.kind` is `static` |
 | `sync.kind`          | Yes      | `temporal` — data grows over time; `release` — versioned releases; `static` — never synced                                                                                                                                                        |
 | `sync.execution`     | No       | `append` — new time steps appended to existing store; `rematerialize` — full rebuild on each sync                                                                                                                                                 |
+| `sync.refresh_after` | No       | Temporal append-kind only, for a source that publishes recent periods as a preliminary product and replaces them later (ERA5-Land and ERA5-Heat): an ISO 8601 duration after a period's end when its final version is expected, e.g. `P4M`. A period fetched before then is fetched again, once, by the first sync after it, so set it past the latest the provider finalises a period, with margin. Omit it for a source without a preliminary product. See [Preliminary periods](architecture.md#preliminary-periods) |
 | `sync.version`       | No       | Release-kind only: the release identity, as `value` (the source's own identifier, e.g. WorldPop's `R2025A`) plus `authority` (a machine identifier for whose scheme names it, e.g. `worldpop`). Independent of `period_type`; changing either half triggers a rematerialization even when the periods are unchanged. Both halves required. Rejected at registration on a non-release template, when blank, or when `authority` is not a machine identifier. See below |
 | `temporal_direction` | No       | Which way the periods run relative to now: `past` (default), `future` (a forecast), or `spanning` (crosses now, e.g. WorldPop 2015–2030). See below                                                                                               |
 

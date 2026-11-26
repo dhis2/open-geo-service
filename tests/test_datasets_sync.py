@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from open_geo_service import config as api_config
 from open_geo_service.ingestions import services, sync_engine
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
@@ -26,6 +28,7 @@ from open_geo_service.ingestions.schemas import (
     SyncKind,
     SyncResponse,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import next_period_string
 
 
@@ -277,7 +280,7 @@ def test_sync_dataset_append_policy_uses_store_based_append_for_plugin_backed_da
 
     monkeypatch.setattr(services, "create_artifact", fake_create_artifact)
     monkeypatch.setattr(services, "get_dataset_or_404", lambda _: _dataset_detail(dataset_id))
-    # Avoid a real network call from CHIRPS3DailyPlugin._availability_cutoff() —
+    # Avoid a real network call from CHIRPS3DailyPlugin.periods() —
     # this test is about the append plan, not plugin availability.
     monkeypatch.setattr(
         sync_engine,
@@ -361,6 +364,97 @@ def test_plan_sync_uses_cumulative_coverage_start_not_latest_request_provenance(
 
     assert result.action == SyncAction.APPEND
     assert result.current_start == "2026-01-01"
+
+
+_REFRESH_NOW = datetime(2026, 1, 14, tzinfo=UTC)
+
+
+@pytest.fixture
+def plan_refresh(
+    every_day_available: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Callable[[list[datetime | None], str], SyncDetail]:
+    """Plan a sync of a store holding 2026-01-01..10 with the given `fetched_at`, on 14 January.
+
+    Each day's final version is expected ten days after it ends, so days 1-3 have matured.
+    """
+    latest = _artifact(artifact_id="a1", end="2026-01-10", path=str(tmp_path / "chirps.icechunk"))
+    committed = _daily_periods("2026-01-01", "2026-01-10")
+    monkeypatch.setattr(sync_engine, "_artifact_storage_roots", lambda: (tmp_path.resolve(),))
+    monkeypatch.setattr(sync_engine, "read_committed_period_ids", lambda *_, **__: set(committed))
+    monkeypatch.setattr(sync_engine, "read_committed_period_ids_ordered", lambda *_, **__: committed)
+    monkeypatch.setattr(sync_engine, "utc_now", lambda: _REFRESH_NOW)
+
+    def plan(fetched: list[datetime | None], requested_end: str) -> SyncDetail:
+        monkeypatch.setattr(sync_engine, "read_fetched_at", lambda *_: fetched)
+        return sync_engine.plan_sync(
+            source_dataset={
+                "id": "chirps3_precipitation_daily",
+                "period_type": "daily",
+                "sync": {"kind": "temporal", "execution": "append", "refresh_after": "P10D"},
+                "ingestion": {"plugin": "example.Plugin"},
+            },
+            latest_artifact=latest,
+            requested_end=requested_end,
+        )
+
+    return plan
+
+
+@pytest.mark.parametrize(
+    ("requested_end", "preliminary", "reason", "plan"),
+    [
+        (
+            "2026-01-10",
+            True,
+            "provisional_periods_matured",
+            "Sync will replace 2026-01-01 through 2026-01-03 with final values.",
+        ),
+        ("2026-01-12", False, "new_periods_available_for_append", "Sync will add 2026-01-11 through 2026-01-12."),
+        (
+            "2026-01-12",
+            True,
+            "new_periods_available_for_append",
+            "Sync will replace 2026-01-01 through 2026-01-03 with final values and add 2026-01-11 through 2026-01-12.",
+        ),
+    ],
+)
+def test_plan_sync_replaces_preliminary_periods_once_their_final_version_is_expected(
+    plan_refresh: Callable[[list[datetime | None], str], SyncDetail],
+    requested_end: str,
+    preliminary: bool,
+    reason: str,
+    plan: str,
+) -> None:
+    # Fetched on 11 January, so all preliminary; unknown (NaT) is treated as final.
+    result = plan_refresh([datetime(2026, 1, 11, tzinfo=UTC) if preliminary else None] * 10, requested_end)
+
+    assert (result.action, result.reason) == (SyncAction.APPEND, reason)
+    assert result.message == f"Data exists for 2026-01-01 through 2026-01-10. {plan}"
+    expected_refresh = ["2026-01-01", "2026-01-02", "2026-01-03"] if preliminary else None
+    assert result.refresh_periods == expected_refresh
+    assert (result.refresh_start, result.refresh_end) == (
+        (expected_refresh[0], expected_refresh[-1]) if expected_refresh else (None, None)
+    )
+
+
+@pytest.mark.parametrize(("ahead", "due"), [(timedelta(minutes=59), False), (timedelta(minutes=61), True)])
+def test_plan_sync_fetches_again_a_period_stamped_by_a_clock_running_ahead(
+    plan_refresh: Callable[[list[datetime | None], str], SyncDetail],
+    caplog: pytest.LogCaptureFixture,
+    ahead: timedelta,
+    due: bool,
+) -> None:
+    """A `fetched_at` more than an hour after now was written by a clock running ahead.
+
+    Day 10's final version is expected on 21 January, so on 14 January it is not due by the rule
+    itself; only the stamp `ahead` of now can make it due. Every other day is final.
+    """
+    with caplog.at_level("WARNING", logger="open_geo_service.shared.provisional"):
+        result = plan_refresh([None] * 9 + [_REFRESH_NOW + ahead], "2026-01-10")
+
+    assert result.refresh_periods == (["2026-01-10"] if due else None)
+    assert result.action == (SyncAction.APPEND if due else SyncAction.NO_OP)
+    assert ("2026-01-10 was fetched at" in caplog.text) == due
 
 
 def test_plan_sync_marks_static_non_temporal_dataset_not_syncable() -> None:
@@ -646,7 +740,7 @@ def test_plan_sync_for_plugin_backed_icechunk_falls_back_to_artifact_end_when_co
 
     monkeypatch.setattr(sync_engine, "_artifact_storage_roots", lambda: (Path("/tmp").resolve(),))
     monkeypatch.setattr(sync_engine, "read_committed_period_ids", lambda *args, **kwargs: set())
-    # Avoid a real network call from CHIRPS3DailyPlugin._availability_cutoff() —
+    # Avoid a real network call from CHIRPS3DailyPlugin.periods() —
     # this test is about the committed-set fallback, not plugin availability.
     monkeypatch.setattr(sync_engine, "_query_available_periods", lambda *args, **kwargs: ["2026-01-31"])
 
@@ -1522,6 +1616,8 @@ def test_sync_plan_route_returns_plan_without_creating_artifact(
         "target_version": None,
         "delta_start": "2026-02-01",
         "delta_end": "2026-02-10",
+        "refresh_start": None,
+        "refresh_end": None,
     }
 
 
@@ -1770,6 +1866,7 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1786,7 +1883,7 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
 
     def fake_write(ds_arg: xr.Dataset, path: Path, *a: object, **kw: object) -> None:
         # Marked before anything is written, so a build killed part way is collected too.
-        assert path.with_name(f"{path.name}.gc-pending").exists()
+        assert services._collection_marker(path).exists()
         written.append((ds_arg, path))
 
     monkeypatch.setattr(downloader, "write_to_icechunk_store", fake_write)
@@ -1795,10 +1892,11 @@ def test_maybe_build_pyramid_calls_write_to_icechunk_store(tmp_path: Path, monke
 
     assert len(written) == 1
     # One period per dask chunk, so topozarr keeps one period per time shard (CLIM-1765).
-    assert opened == [{"merge_time": False, "branch": "main"}]
+    # With `fetched_at`, which every other reader drops, so the rebuilt levels keep it (CLIM-931).
+    assert opened == [{"merge_time": False, "branch": "main", "with_fetched_at": True}]
     # One commit on the branch it read, in the same store: no copy beside it.
     assert written[0][1] == icechunk_path
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["dataset.icechunk", "dataset.icechunk.gc-pending"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["dataset.icechunk", "gc-pending"]
     assert result.completed is True
     assert result.rewritten is True
 
@@ -1813,6 +1911,7 @@ def test_maybe_build_pyramid_skips_rewrite_for_normalized_flat_store(
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1848,6 +1947,7 @@ def test_maybe_build_pyramid_falls_back_on_build_error(tmp_path: Path, monkeypat
     from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions.services import _maybe_build_pyramid
 
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -1868,7 +1968,7 @@ def test_maybe_build_pyramid_falls_back_on_build_error(tmp_path: Path, monkeypat
     assert result.completed is False
     assert result.rewritten is False
     # What the failed build wrote is collected later, even if this store never updates again.
-    assert icechunk_path.with_name(f"{icechunk_path.name}.gc-pending").exists()
+    assert services._collection_marker(icechunk_path).exists()
 
 
 def test_plan_sync_append_for_icechunk_artifact(
@@ -1876,6 +1976,7 @@ def test_plan_sync_append_for_icechunk_artifact(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     icechunk_path = tmp_path / "dataset.icechunk"
     icechunk_path.mkdir()
 
@@ -2060,11 +2161,10 @@ def test_cleanup_collects_what_a_killed_ingest_left_unreachable(tmp_path: Path, 
 @pytest.fixture
 def short_retention(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> float:
     """A real retention window, one second long, so a test can wait it out."""
-    from open_geo_service.data_manager.services import downloader
     from open_geo_service.ingestions import services
 
     monkeypatch.setattr(services, "_GC_RETENTION", timedelta(seconds=1))
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     return 1.1
 
 
@@ -2078,7 +2178,7 @@ def test_a_collection_left_pending_frees_the_attempt_once_due(tmp_path: Path, sh
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     before = _chunk_files(target)
@@ -2091,7 +2191,7 @@ def test_a_collection_left_pending_frees_the_attempt_once_due(tmp_path: Path, sh
     time.sleep(short_retention)
     assert services.collect_pending_garbage_everywhere() == 1
     assert _chunk_files(target) == before - 10
-    assert not (tmp_path / "ds.icechunk.gc-pending").exists()
+    assert not layout.collection_marker("ds").exists()
 
 
 def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retention: float) -> None:
@@ -2099,7 +2199,7 @@ def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retenti
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     before = _chunk_files(target)
@@ -2109,7 +2209,7 @@ def test_the_next_ingest_runs_a_pending_collection(tmp_path: Path, short_retenti
     services.clean_up_interrupted_ingest(target)  # first thing every ingest does, under the lock
 
     assert _chunk_files(target) == before - 10
-    assert not (tmp_path / "ds.icechunk.gc-pending").exists()
+    assert not layout.collection_marker("ds").exists()
 
 
 def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention: float) -> None:
@@ -2117,7 +2217,7 @@ def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention
 
     from open_geo_service.ingestions import services
 
-    target = tmp_path / "ds.icechunk"
+    target = layout.raster_store("ds")
     repo = _rolled_back_store(target)
     repo.delete_branch("ogs-ingest-rollback-attempt")
     services._mark_collection_pending(target)
@@ -2128,4 +2228,4 @@ def test_the_sweep_skips_a_store_an_ingest_holds(tmp_path: Path, short_retention
         assert services.collect_pending_garbage_everywhere() == 0
     finally:
         lock.release()
-    assert (tmp_path / "ds.icechunk.gc-pending").exists(), "left for the next sweep"
+    assert layout.collection_marker("ds").exists(), "left for the next sweep"

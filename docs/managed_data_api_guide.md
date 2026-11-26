@@ -374,6 +374,8 @@ ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, conso
 
 Open the `published` branch, which is what GeoService serves; `main` can hold a sync in progress.
 
+GDAL opens it through its `repo` file: `gdalinfo "ICECHUNK:/vsicurl/http://127.0.0.1:9000/icechunk/chirps3_precipitation_daily/repo?branch=published"`.
+
 Both endpoints are advertised as `assets` in the STAC collection:
 
 ```json
@@ -384,8 +386,8 @@ Both endpoints are advertised as `assets` in the STAC collection:
     "xarray:open_kwargs": { "consolidated": true }
   },
   "icechunk": {
-    "href": "https://host/icechunk/chirps3_precipitation_daily",
-    "type": "application/octet-stream",
+    "href": "https://host/icechunk/chirps3_precipitation_daily/",
+    "type": "application/vnd.zarr+icechunk",
     "xarray:open_kwargs": { "zarr_format": 3, "consolidated": false }
   },
   "thumbnail": {
@@ -563,7 +565,9 @@ directory is not reachable through it.
 
 `GET /features/{collection_id}/data.pmtiles` serves the collection's vector tiles, a PMTiles
 archive the map viewer draws from, with range requests. Every refresh builds it from the stored
-GeoParquet, simplified per zoom, so it is for display only: aggregation reads the GeoParquet. A
+GeoParquet, simplified per zoom, so it is for display only: aggregation reads the GeoParquet.
+Zoomed out, polygons keep every feature large enough to draw, so boundaries show no gaps, while
+dense points and lines are thinned to keep tiles small. A
 failed build is logged and does not fail the refresh; the route then answers 404 and the STAC
 collection has no `tiles` asset.
 
@@ -1023,7 +1027,7 @@ before it became unreachable can finish; one still reading it after that can fai
 not found" and has to reopen the dataset.
 
 Collection runs right after a rollback or a replacement, and when the next ingest finds the
-branches of a killed one. What the hour kept is marked in `<store>.gc-pending` and collected once
+branches of a killed one. What the hour kept is marked in `<data_dir>/gc-pending/<id>` and collected once
 the hour has passed: at the next ingest of that store, at startup, and every 15 minutes on a
 writable instance.
 

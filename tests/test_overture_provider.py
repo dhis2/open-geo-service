@@ -482,7 +482,7 @@ def test_the_reported_release_becomes_the_collection_version(
     from open_geo_service.features import templates as feature_templates
     from open_geo_service.ingestions import services as ingestion_services
 
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts / "records.json")
@@ -510,7 +510,7 @@ def _feature_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     from open_geo_service import config as api_config
     from open_geo_service.ingestions import services as ingestion_services
 
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts / "records.json")

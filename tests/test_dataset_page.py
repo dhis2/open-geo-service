@@ -241,9 +241,9 @@ def test_a_dataset_without_a_thumbnail_gets_the_colormap_ramp(monkeypatch: pytes
 
 
 def test_a_dataset_with_a_thumbnail_links_it() -> None:
-    from open_geo_service.shared.thumbnails import thumbnail_path
+    from open_geo_service.shared import layout
 
-    path = thumbnail_path("rendered_dataset")
+    path = layout.thumbnail(layout.Kind.RASTER, "rendered_dataset")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"png")
     try:

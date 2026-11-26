@@ -60,6 +60,7 @@ from open_geo_service.openeo.schemas import (
     OpenEOLogEntry,
     OpenEOLogLevel,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.cancellation import (
     ExecutionCancelled,
     cancellation_scope,
@@ -1760,7 +1761,7 @@ def _write_managed_zarr(
 
     coverage = _derive_coverage(ds, x_dim, y_dim, t_dim, crs)
     period_type: str | None = _derive_period_type(ds, options, source_template, t_dim)
-    store_path = downloader.DOWNLOAD_DIR / f"{dataset_id}.icechunk"
+    store_path = layout.raster_store(dataset_id)
     store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Validate the complete record before crossing the store commit's point of no return.

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.crs import canonical_crs_code
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,8 @@ zoom, so 10 is fine enough for boundaries."""
 
 _TILEABLE_CRS = ("EPSG:4326", "EPSG:3857")
 
+_POLYGON_TYPES = frozenset({"Polygon", "MultiPolygon"})
+
 
 def archive_path(collection_path: Path) -> Path:
     """The archive for one stored version of a collection: its GeoParquet path, `.pmtiles`.
@@ -52,15 +55,21 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
 
     **Never raises.** A collection that cannot be tiled is still registered.
 
-    Written beside the target and moved into place, so the route never serves a partial
+    Written in the staging folder and moved into place, so the route never serves a partial
     archive. tylertoo reads WGS 84 or Web Mercator; a collection stored in another CRS is
     reprojected into a temporary copy first.
+
+    A polygon collection is built without tylertoo's per-level feature budget, which thins dense
+    areas to keep tiles small. Boundaries are what GeoService stores, and a zoomed-out map with
+    whole countries' districts missing looks like missing data. Polygons too small to draw at a
+    zoom are still left out. Points and lines keep the budget.
     """
     target = archive_path(collection_path)
-    staging = target.with_name(f"{target.name}.{uuid4().hex}.writing")
+    staging: Path | None = None
     try:
         import tylertoo
 
+        staging = layout.staging_dir() / f"{target.name}.{uuid4().hex}.writing"
         with tempfile.TemporaryDirectory(prefix="geoservice-tiles-") as scratch:
             source = collection_path
             if canonical_crs_code(crs) not in _TILEABLE_CRS:
@@ -69,16 +78,20 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
                 source = Path(scratch) / "wgs84.parquet"
                 gpd.read_parquet(collection_path).to_crs("EPSG:4326").to_parquet(source)
             overview = Path(scratch) / "overview.parquet"
-            report = tylertoo.overview(str(source), str(overview), max_zoom="auto")
+            # GeoParquet may say "Polygon Z"; the dimension does not change how it is tiled.
+            geometry_types = {name.split(" ")[0] for name in geoparquet.stored_geometry_types(collection_path)}
+            density_drop = not geometry_types or not geometry_types <= _POLYGON_TYPES
+            report = tylertoo.overview(str(source), str(overview), max_zoom="auto", density_drop=density_drop)
             if max(level["zoom"] for level in report["levels"]) < MIN_MAX_ZOOM:
-                tylertoo.overview(str(source), str(overview), max_zoom=MIN_MAX_ZOOM)
+                tylertoo.overview(str(source), str(overview), max_zoom=MIN_MAX_ZOOM, density_drop=density_drop)
             tylertoo.export_pmtiles(str(overview), str(staging), layer_name=TILE_LAYER)
-        staging.replace(target)
+        layout.move_into_place(staging, target)
     except Exception:
         logger.warning("Could not build vector tiles for feature collection '%s'", collection_id, exc_info=True)
         return None
     finally:
-        staging.unlink(missing_ok=True)
+        if staging is not None:
+            staging.unlink(missing_ok=True)
     return target
 
 

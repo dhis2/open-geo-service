@@ -8,7 +8,7 @@ import logging
 import mimetypes
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
@@ -53,6 +53,7 @@ from open_geo_service.ingestions.schemas import (
     FeatureDetail,
     IngestionListResponse,
     IngestionResponse,
+    ProvisionalPeriod,
     PublicationStatus,
     SyncAction,
     SyncDetail,
@@ -63,10 +64,12 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.ingestions.sync_engine import SyncConfigurationError, plan_sync, run_sync
 from open_geo_service.publications.services import managed_dataset_id_for, publish_artifact
+from open_geo_service.shared import layout
 from open_geo_service.shared.compute import get_job_slots
 from open_geo_service.shared.crs import transform_bbox
 from open_geo_service.shared.licences import DatasetLicence, declared_providers
 from open_geo_service.shared.persistence import atomic_text, index_lock
+from open_geo_service.shared.provisional import provisional_periods, refresh_after_from_template
 from open_geo_service.shared.raster_contract import TIME_ALIASES
 from open_geo_service.shared.statistics import measure_statistics
 from open_geo_service.shared.storage_size import stored_bytes
@@ -91,6 +94,7 @@ from open_geo_service.streaming.store import (
     publish_snapshot,
     published_snapshot,
     read_committed_period_ids_ordered,
+    read_fetched_at,
     read_snapshot,
     seal_version,
 )
@@ -449,6 +453,7 @@ def create_artifact(
     save_cursor: Callable[[dict[str, object]], None] | None = None,
     periods: list[str] | None = None,
     on_update_planned: Callable[[str | None], None] | None = None,
+    refresh_periods: list[str] | None = None,
 ) -> ArtifactRecord:
     """Materialize one managed dataset artifact and persist its metadata.
 
@@ -456,6 +461,10 @@ def create_artifact(
     only when the ingestion will change stored data. It receives the coverage end the data
     had before this update, or None when every period is new or rewritten. An up-to-date
     dataset returns its existing artifact without calling it.
+
+    ``refresh_periods`` are committed periods the sync planner found fetched while
+    preliminary and now final (CLIM-931). They are fetched again and written in place before
+    any new period is appended; a rematerialization refetches everything and ignores them.
 
     Source dataset materialization is plugin-backed and always writes an
     Icechunk store. Sync requests may still pass `download_start` and
@@ -558,6 +567,7 @@ def create_artifact(
         save_cursor=save_cursor,
         periods=periods,
         on_update_planned=on_update_planned,
+        refresh_periods=refresh_periods,
     )
 
 
@@ -1291,6 +1301,7 @@ def _create_streaming_artifact(
     save_cursor: Callable[[dict[str, object]], None] | None = None,
     periods: list[str] | None = None,
     on_update_planned: Callable[[str | None], None] | None = None,
+    refresh_periods: list[str] | None = None,
 ) -> ArtifactRecord:
     """Create or update one plugin-backed Icechunk artifact.
 
@@ -1338,6 +1349,7 @@ def _create_streaming_artifact(
     store_committed = False
     plugin_handed_to_orchestrator = False
     ingest_completed = False
+    refreshed_indices: list[int] = []
     try:
         timeless = registry_datasets.is_timeless(dataset)
         plugin = _load_streaming_plugin(plugin_path, params=params, static=timeless)
@@ -1357,6 +1369,11 @@ def _create_streaming_artifact(
                 overwrite=overwrite,
                 periods=periods,
             )
+        # A rematerialization fetches every period again anyway, so only an update in place
+        # refreshes. One with nothing new to append still writes the refreshed periods.
+        refresh = list(refresh_periods or []) if plan.action != SyncAction.REMATERIALIZE else []
+        if refresh and plan.action == SyncAction.NO_OP:
+            plan = replace(plan, action=SyncAction.APPEND, periods=[])
         if plan.action == SyncAction.NO_OP:
             try:
                 existing = get_latest_artifact_for_dataset_or_404(str(dataset["id"]))
@@ -1429,6 +1446,7 @@ def _create_streaming_artifact(
             assert plan.start is not None and plan.end is not None
             plugin_handed_to_orchestrator = True
             result = run_streaming_ingest_sync(
+                refresh_periods=refresh if replacement_branch is None else None,
                 plugin=cast(IngestionPlugin, plugin),
                 params=params,
                 dataset=dataset,
@@ -1446,6 +1464,7 @@ def _create_streaming_artifact(
                 replace=replacement_branch is not None,
             )
             ingest_completed = True
+            refreshed_indices = result.refreshed_indices
             held_back = result.held_back
             wrote_this_run = result.periods_written > 0
             # Held-back periods were committed and then reset away, which also leaves data to collect.
@@ -1485,7 +1504,9 @@ def _create_streaming_artifact(
                     ),
                 )
 
-        normalization = _maybe_build_pyramid(store_path, dataset, branch=ingest_branch, amend=wrote_this_run)
+        normalization = _maybe_build_pyramid(
+            store_path, dataset, branch=ingest_branch, amend=wrote_this_run, refreshed_indices=refreshed_indices
+        )
         rewritten = normalization.rewritten
         if plan.action != SyncAction.NO_OP and plan.has_committed_periods and not normalization.completed:
             raise RuntimeError(f"Could not normalize '{dataset['id']}'; the dataset update was rolled back")
@@ -1528,6 +1549,7 @@ def _create_streaming_artifact(
             variables=[str(dataset["variable"])],
             request_scope=request_scope,
             coverage=coverage,
+            provisional_periods=_recorded_provisional_periods(store_path, dataset),
             created_at=datetime.now(UTC),
             publication=ArtifactPublication(),
         )
@@ -1602,6 +1624,25 @@ def _create_streaming_artifact(
         finally:
             # Releasing the in-process writer lock must not depend on store cleanup.
             lock.release()
+
+
+def _recorded_provisional_periods(store_path: Path, dataset: dict[str, object]) -> list[ProvisionalPeriod]:
+    """The store's preliminary periods under the template's current ``sync.refresh_after``.
+
+    Derived from the store at the record step, as coverage is, and never stored separately.
+    """
+    window = refresh_after_from_template(dataset)
+    if window is None:
+        return []
+    period_type = str(dataset["period_type"])
+    fetched_at = read_fetched_at(store_path)
+    period_ids = read_committed_period_ids_ordered(store_path, period_type)
+    if fetched_at is None or len(fetched_at) != len(period_ids):
+        return []
+    return [
+        ProvisionalPeriod(period=found.period, fetched_at=found.fetched_at, final_after=found.final_after)
+        for found in provisional_periods(period_ids, fetched_at, period_type, window)
+    ]
 
 
 # Every branch an ingest creates for itself starts with this, and only lives while the ingest runs.
@@ -1755,19 +1796,34 @@ def collect_unreachable_objects(repo: Any, store_path: Path) -> bool:
 
 
 def _collection_marker(store_path: Path) -> Path:
-    return store_path.with_name(f"{store_path.name}.gc-pending")
+    return layout.collection_marker(store_path.name.removesuffix(".icechunk"))
 
 
 def _mark_collection_pending(store_path: Path, *, at: datetime | None = None) -> None:
     """Record that *store_path* holds unreachable objects too recent to collect yet.
 
-    A file beside the store holding the time, so the collection survives a restart and runs
+    A file in the data folder holding the time, so the collection survives a restart and runs
     whether or not the dataset is ever synced again. A later rollback moves the time forward.
     """
+    marker = _collection_marker(store_path)
     try:
-        _collection_marker(store_path).write_text((at or datetime.now(UTC)).isoformat())
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text((at or datetime.now(UTC)).isoformat())
     except OSError:
         logger.warning("Could not mark a pending collection for '%s'", store_path, exc_info=True)
+
+
+def _adopt_legacy_marker(store_path: Path) -> None:
+    """Move a pending collection an earlier version marked beside the store to where the sweep looks."""
+    legacy = store_path.with_name(f"{store_path.name}.gc-pending")
+    if not legacy.is_file():
+        return
+    marker = _collection_marker(store_path)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(marker)
+    except OSError:
+        logger.warning("Could not move the pending-collection marker '%s'", legacy, exc_info=True)
 
 
 def _move_collection_after_writes(store_path: Path) -> None:
@@ -1819,15 +1875,13 @@ def clean_up_interrupted_ingests() -> int:
     write, which covers whatever it wrote after marking; a clean restart moves nothing. A store an
     ingest already holds is skipped.
     """
-    directory = Path(downloader.DOWNLOAD_DIR)
-    if not directory.is_dir():
-        return 0
     changed = 0
-    for store_path in directory.glob("*.icechunk"):
+    for store_path in layout.raster_stores():
         lock = _acquire_store_lock(store_path)
         if not lock.acquire(blocking=False):
             continue
         try:
+            _adopt_legacy_marker(store_path)
             _move_collection_after_writes(store_path)
             changed += clean_up_interrupted_ingest(store_path)
         finally:
@@ -1841,12 +1895,9 @@ def collect_pending_garbage_everywhere() -> int:
     Called at startup and periodically on a writable instance, which is what guarantees a
     failed attempt's data is freed even when it was the last ingest the store will see.
     """
-    directory = Path(downloader.DOWNLOAD_DIR)
-    if not directory.is_dir():
-        return 0
     collected = 0
-    for marker in directory.glob("*.icechunk.gc-pending"):
-        store_path = marker.with_suffix("")
+    for dataset_id in layout.pending_collections():
+        store_path = layout.raster_store(dataset_id)
         lock = _acquire_store_lock(store_path)
         if not lock.acquire(blocking=False):
             continue  # an ingest is running; its own recovery or the next sweep collects
@@ -1865,6 +1916,7 @@ def _maybe_build_pyramid(
     *,
     branch: str = "main",
     amend: bool = False,
+    refreshed_indices: list[int] | None = None,
 ) -> _StoreNormalizationResult:
     """Apply GeoZarr conventions and a multiscale pyramid to what *branch* of the Icechunk store holds.
 
@@ -1888,8 +1940,10 @@ def _maybe_build_pyramid(
     the write amplification of re-emitting the whole store on every sync.
 
     A temporal append to a pyramid store only needs the coarser levels extended to the
-    periods level 0 has gained, which ``append_pyramid_levels`` does in place. Anything else
-    (a first ingest, a replacement, a changed resampling method) rebuilds.
+    periods level 0 has gained, which ``append_pyramid_levels`` does in place, and periods
+    refreshed in place on level 0 (``refreshed_indices``) only need their coarser levels
+    rewritten, which ``rewrite_pyramid_levels`` does. Anything else (a first ingest, a
+    replacement, a changed resampling method) rebuilds.
 
     Returns whether normalization completed and whether it rewrote the store.
     Errors remain logged and swallowed so a brand-new plain flat artifact can
@@ -1898,16 +1952,18 @@ def _maybe_build_pyramid(
     """
     from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 
+    pyramid_method = downloader.resampling_method_from_template(dataset)
     try:
         appended = downloader.append_pyramid_levels(
-            store_path,
-            pyramid_method=downloader.resampling_method_from_template(dataset),
-            branch=branch,
-            amend=amend,
+            store_path, pyramid_method=pyramid_method, branch=branch, amend=amend
         )
+        if appended is not None and refreshed_indices:
+            appended = downloader.rewrite_pyramid_levels(
+                store_path, refreshed_indices, pyramid_method=pyramid_method, branch=branch, amend=amend
+            )
     except Exception:
-        # One commit, so a failure leaves the store as the ingest committed it.
-        logger.warning("Could not append to the pyramid levels of '%s'; rebuilding", store_path.name, exc_info=True)
+        # One commit each, so a failure leaves the store as the last one committed it.
+        logger.warning("Could not update the pyramid levels of '%s'; rebuilding", store_path.name, exc_info=True)
         appended = None
     if appended is not None:
         return _StoreNormalizationResult(completed=True)
@@ -1918,7 +1974,8 @@ def _maybe_build_pyramid(
         # so a shard several periods wide would be rewritten on every append (CLIM-879).
         # Splitting merged chunks afterwards instead made the build five times slower and
         # larger in memory, since every split re-reads its merged block (CLIM-1765).
-        ds = open_icechunk_dataset(store_path, merge_time=False, branch=branch)
+        # With `fetched_at`, so the rebuilt store keeps it on every level.
+        ds = open_icechunk_dataset(store_path, merge_time=False, branch=branch, with_fetched_at=True)
     except Exception:
         logger.warning("Could not open Icechunk store for GeoZarr write; skipping", exc_info=True)
         return _StoreNormalizationResult(completed=False)
@@ -2322,7 +2379,9 @@ def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
     artifact = _get_latest_published_icechunk_artifact(dataset_id)
     store_root = Path(artifact.path or artifact.asset_paths[0]).resolve()
 
-    full_path = (store_root / file_path).resolve()
+    # A client given the asset href, which ends in a slash, asks for `<href>/repo`; without the
+    # strip, `//repo` would name the absolute path /repo.
+    full_path = (store_root / file_path.lstrip("/")).resolve()
     if not full_path.is_relative_to(store_root):
         raise HTTPException(status_code=404, detail="Not found")
     if not full_path.is_file():
@@ -2757,7 +2816,12 @@ def _save_records(records: list[ArtifactRecord]) -> None:
 
 
 def _store_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
-    """Persist a newly created artifact record while avoiding lost updates."""
+    """Persist a newly created artifact record while avoiding lost updates.
+
+    A record for the same request and coverage is replaced in place, keeping its id and
+    publication: a sync that only replaced preliminary periods with final values (CLIM-931)
+    changed the values, statistics and provisional periods without changing the coverage.
+    """
 
     def mutate(records: list[ArtifactRecord]) -> ArtifactRecord:
         existing = _find_artifact_by_request_scope(
@@ -2767,7 +2831,11 @@ def _store_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
             format=record.format,
         )
         if existing is not None and existing.coverage == record.coverage:
-            return existing
+            replacement = record.model_copy(
+                update={"artifact_id": existing.artifact_id, "publication": existing.publication}
+            )
+            records[records.index(existing)] = replacement
+            return replacement
 
         records.append(record)
         return record
@@ -3234,6 +3302,7 @@ def _build_dataset_record(dataset_id: str, artifacts: list[ArtifactRecord]) -> D
         license_url=licence_url,
         providers=[DatasetProvider(**provider) for provider in declared_providers(source_dataset)],
         extent=latest.coverage,
+        provisional_periods=latest.provisional_periods,
         last_updated=latest.created_at,
         links=_dataset_links(dataset_id, latest, published=_latest_published(artifacts)),
         publication=DatasetPublication(

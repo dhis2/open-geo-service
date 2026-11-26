@@ -14,6 +14,31 @@ See **[ERA5-Land datasets](era5_land_datasets.md)** for the full reference, incl
 
 ---
 
+## ERA5-Heat — thermal comfort index (UTCI, daily)
+
+| Property               | Value                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Dataset ID**         | `era5heat_utci_daily`                                                                                            |
+| **Variable**           | `utci`                                                                                                           |
+| **Units**              | °C                                                                                                               |
+| **Period**             | Daily                                                                                                            |
+| **Spatial coverage**   | Global                                                                                                           |
+| **Spatial resolution** | 0.25° (~28 km)                                                                                                   |
+| **Record start**       | 1940-01-02                                                                                                       |
+| **Source**             | [CDS ERA5-Heat (derived-utci-historical)](https://cds.climate.copernicus.eu/datasets/derived-utci-historical?tab=overview) |
+
+The Universal Thermal Climate Index: how hot or cold the outdoors feels to the body, from air temperature, humidity, wind and radiation. The daily mean is averaged from the hourly values of the UTC calendar day. `era5heat_utci_daily_max` and `era5heat_utci_daily_min` are the same, with the daily maximum and minimum. It reads from the Copernicus Climate Data Store and needs `CDS_API_KEY` in `.env`, as the [ERA5-Land daily datasets](era5_land_datasets.md#copernicus-climate-data-store-daily-datasets) do.
+
+**Sync behaviour** — new days are appended as the source publishes them, about five days behind. Recent days are the intermediate product, computed from ECMWF's preliminary ERA5T, and are replaced by the consolidated product from final ERA5 later. Each template declares `sync.refresh_after: P4M`, so a sync fetches a day again once, four months after it, when its final values are out. See [Preliminary periods](architecture.md#preliminary-periods). A store ingested before this existed takes its preliminary days as final; ingest it again to have them replaced.
+
+---
+
+## CHIRPS v3 — where the data is read from
+
+All three CHIRPS3 datasets are read from [dynamical.org](https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/), which republishes the Climate Hazards Center's final and preliminary daily products as Icechunk Zarr stores on AWS Open Data. It updates daily and adds no delay to CHC's own releases. The values are CHC's, rounded in their least significant bits for compression: they differ from CHC's GeoTIFFs by well under 0.1 mm.
+
+---
+
 ## CHIRPS v3 — daily precipitation
 
 | Property               | Value                                              |
@@ -22,16 +47,16 @@ See **[ERA5-Land datasets](era5_land_datasets.md)** for the full reference, incl
 | **Variable**           | `precip`                                           |
 | **Units**              | mm                                                 |
 | **Period**             | Daily                                              |
-| **Spatial coverage**   | Global land, 50°S–50°N                             |
+| **Spatial coverage**   | Global land, 60°S–60°N                             |
 | **Spatial resolution** | ~5 km                                              |
 | **Record start**       | 1981-01-01                                         |
-| **Source**             | [CHIRPS v3](https://www.chc.ucsb.edu/data/chirps3) |
+| **Source**             | [CHIRPS v3, via dynamical.org](https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/) |
 
 CHIRPS (Climate Hazards Group InfraRed Precipitation with Station data) v3 is a quasi-global daily precipitation dataset merging satellite thermal infrared imagery with station observations. It is widely used for drought monitoring, food security analysis, and WASH planning in low- and middle-income countries.
 
-**Sync behaviour** — new data is ingested incrementally as it becomes available. The final product is published a month at a time, a month or more after it, so the current month is never present. The API probes the CHIRPS server for the newest complete month before each sync. For the current month, use the preliminary dataset below.
+**Sync behaviour** — new data is ingested incrementally as it becomes available. The final product is published a month at a time, two to three weeks after the month ends, so the current month is never present. For the current month, use the preliminary dataset below.
 
-**Transforms** — none applied; data is stored as received in mm.
+**Transforms** — the source is a rate in kg m⁻² s⁻¹ (mm/s); each day is stored as its total in mm.
 
 ---
 
@@ -43,16 +68,16 @@ CHIRPS (Climate Hazards Group InfraRed Precipitation with Station data) v3 is a 
 | **Variable**           | `precip`                                                                           |
 | **Units**              | mm                                                                                 |
 | **Period**             | Daily                                                                              |
-| **Spatial coverage**   | Global land, 50°S–50°N                                                             |
+| **Spatial coverage**   | Global land, 60°S–60°N                                                             |
 | **Spatial resolution** | ~5 km                                                                              |
 | **Record start**       | 2025-01-01                                                                         |
-| **Source**             | [CHIRPS v3 preliminary](https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/prelim/) |
+| **Source**             | [CHIRPS v3 preliminary, via dynamical.org](https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/) |
 
 Daily rainfall a few days after it falls, including the current month, for in-season monitoring. It is satellite-only, without the station blending of the final product, and **provisional**: the final daily dataset replaces these values a month or so later.
 
 It is a separate dataset from `chirps3_precipitation_daily` on purpose. A store holding both would rewrite its own history when the final values arrive, with nothing to say which values were provisional. A client wanting a continuous series uses the final dataset up to its last month and the preliminary one after it.
 
-**Sync behaviour** — the newest published day is found by probing the CHIRPS server day by day from today, up to 21 days back. The lag is typically 4–5 days.
+**Sync behaviour** — new days are ingested as they appear, typically 4–5 days after they fall.
 
 **Preliminary first, final later, in DHIS2** — push both datasets to the same data element. The DHIS2 export imports with `CREATE_AND_UPDATE`, so a value for an org unit and period that already exists is overwritten:
 
@@ -71,16 +96,16 @@ DHIS2 then holds the best value available for each day. It does not show which v
 | **Variable**           | `precip`                                           |
 | **Units**              | mm                                                 |
 | **Period**             | Monthly                                            |
-| **Spatial coverage**   | Global land, 50°S–50°N                             |
+| **Spatial coverage**   | Global land, 60°S–60°N                             |
 | **Spatial resolution** | ~5 km                                              |
 | **Record start**       | 1981-01                                            |
-| **Source**             | [CHIRPS v3](https://www.chc.ucsb.edu/data/chirps3) |
+| **Source**             | [CHIRPS v3, via dynamical.org](https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/) |
 
-The monthly CHIRPS product, published as one global raster per calendar month. Prefer it over aggregating the daily dataset when you only need monthly values: it is roughly 30× less data to ingest, and drought indices such as SPI and SPEI are conventionally computed monthly.
+Monthly CHIRPS precipitation, computed from the final daily product. Prefer it over the daily dataset when you only need monthly values: the stored dataset is roughly 30× smaller, and drought indices such as SPI and SPEI are conventionally computed monthly.
 
-**Sync behaviour** — as for the daily dataset, the latest published month is discovered by probing the CHIRPS server rather than assuming a fixed lag. The monthly final product typically trails the calendar by a month or two.
+**Sync behaviour** — a month is ingested once the final daily product covers all of it, two to three weeks after it ends.
 
-**Transforms** — none applied; the month's total is stored as received in mm. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
+**Transforms** — each month is the sum of its daily totals in mm, which equals CHC's own monthly total. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ---
 

@@ -75,6 +75,14 @@ Dimensions are normalised before writing, regardless of the source naming conven
 
 ---
 
+## `fetched_at`: when each period was fetched
+
+Every period an ingestion or sync writes carries a `fetched_at` coordinate along `t`: the UTC instant it was fetched. The sync uses it to fetch preliminary periods again once their final values are expected; see [Preliminary periods](architecture.md#preliminary-periods).
+
+It is stored as float64 seconds since 1970, so a period with no known fetch time is NaN (NaT when decoded). A pyramid holds it on every level, not at the root. It is chunked as `t` is beside it: in blocks of up to 4096 values on a flat store, rechunked at the end of each sync, and in blocks of 4096 on every level of a pyramid, set when the pyramid is built, so the planner reads it in a few requests. A pyramid built before then keeps one value per chunk until it is rebuilt. It is bookkeeping, so the accessor drops it unless a caller asks for it: it does not reach aggregation, openEO, exports, STAC or the map. Stores written before it existed get it at their next sync, NaT for the periods they already hold.
+
+---
+
 ## Multiscale pyramids
 
 For large spatial extents, a flat zarr would require a map viewer to download the entire spatial extent at full resolution on every tile request. The platform builds a multiscale pyramid when the grid has more than **1024 × 1024 pixels** (`nx * ny > 1,048,576`). A pyramid adds about a third to the store's size.
@@ -277,6 +285,12 @@ ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, conso
 
 Open the `published` branch: writers commit to `main`, and a dataset's readers see a version only
 once it is published (see [the managed data API guide](managed_data_api_guide.md), under versions and rollback).
+
+GDAL's Icechunk driver opens the repository through its `repo` file, since over HTTP it cannot tell that a URL is a directory without a listing. It opens `main` unless given a branch:
+
+```bash
+gdalinfo "ICECHUNK:/vsicurl/https://host/icechunk/era5land_precipitation_daily/repo?branch=published"
+```
 
 Both endpoints are advertised as assets in the STAC collection so clients can choose the appropriate one. Use `/zarr` for web maps and standard xarray workflows; use `/icechunk` when you need versioning or SDK-level access.
 

@@ -3,7 +3,7 @@
   short_name: Precipitation
   description: >-
     Daily rainfall total over land at 5 km, from satellite estimates calibrated against station
-    observations. Covers 50 degrees south to 50 degrees north from 1981 onwards.
+    observations. Covers 60 degrees south to 60 degrees north from 1981 onwards.
   standard_name: lwe_thickness_of_precipitation_amount
   variable: precip
   period_type: daily
@@ -12,7 +12,7 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "1981-01-01"
       resolution: P1D
@@ -23,12 +23,22 @@
   units: mm
   cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3
-  source_url: https://www.chc.ucsb.edu/data/chirps3
+  source: CHIRPS v3, via dynamical.org
+  # The page of the mirror the data is read from, as for the other mirrored datasets; CHC, where
+  # it originates, is the producer below.
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    # The mirror the data is read from. The STAC publisher drops the host role, as this instance
+    # is the only host; the description says what dynamical.org hosts.
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
+      description: >-
+        Mirror host: republishes CHIRPS3 final daily as an Icechunk Zarr store on AWS Open Data.
+      roles: [processor, host]
   display:
     colormap: blues
     range: [0, p98]
@@ -53,7 +63,7 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "2025-01-01"
       resolution: P1D
@@ -61,16 +71,22 @@
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin
     params:
       stage: prelim
-      flavor: sat
   units: mm
   cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3 preliminary
-  source_url: https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/prelim/
+  source: CHIRPS v3 preliminary, via dynamical.org
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/
+      description: >-
+        Mirror host: republishes CHIRPS3 preliminary daily as an Icechunk Zarr store on AWS Open
+        Data.
+      roles: [processor, host]
   display:
     colormap: blues
     range: [0, p98]
@@ -90,23 +106,29 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "1981-01-01"
       resolution: P1M
   ingestion:
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugin
-  # The month's total, as the source publishes it. Its normal and anomalies below are monthly
-  # totals too, so the observed, normal and anomaly chain stays in one unit.
+  # The month's total, summed from the final daily product. Its normal and anomalies below are
+  # monthly totals too, so the observed, normal and anomaly chain stays in one unit.
   units: mm
   cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3 (monthly)
-  source_url: https://www.chc.ucsb.edu/data/chirps3
+  source: CHIRPS v3 (monthly total of the daily product), via dynamical.org
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
+      description: >-
+        Mirror host: republishes CHIRPS3 final daily as an Icechunk Zarr store on AWS Open Data.
+      roles: [processor, host]
   display:
     colormap: blues
     range: [0, p98]

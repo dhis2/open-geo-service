@@ -35,7 +35,6 @@ def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
 
 
@@ -136,7 +135,7 @@ def test_a_streaming_ingest_records_the_size_and_statistics_of_the_published_sto
 
     def fake_sync(**_kwargs: object) -> object:
         downloader.write_to_icechunk_store(cube, store_path, commit_message="test")
-        return SimpleNamespace(periods_written=3, held_back=[])
+        return SimpleNamespace(periods_written=3, held_back=[], refreshed_indices=[])
 
     class _Plugin:
         time_dim = "t"
@@ -190,7 +189,7 @@ def test_an_openeo_publish_records_the_size_and_statistics_of_the_store_it_wrote
     configs.mkdir(parents=True)
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path / "rasters")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     (tmp_path / "rasters").mkdir()
     cube = xr.Dataset(
         {"tp": (("t", "y", "x"), np.arange(12, dtype="float32").reshape(3, 2, 2) - 4.0, {"units": "mm/d"})},
@@ -232,7 +231,7 @@ def test_a_failed_append_that_keeps_its_commits_refreshes_the_recorded_size(
 
     def first_sync(**_kwargs: object) -> object:
         downloader.write_to_icechunk_store(cube("2026-01-01", 3), store_path, commit_message="test")
-        return SimpleNamespace(periods_written=3, held_back=[])
+        return SimpleNamespace(periods_written=3, held_back=[], refreshed_indices=[])
 
     def failing_sync(**_kwargs: object) -> object:
         # Commit two more days, as the orchestrator does period by period, then fail.
@@ -295,7 +294,7 @@ def _published_without_statistics(
     configs.mkdir(parents=True)
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path / "rasters")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     (tmp_path / "rasters").mkdir()
     cube = xr.Dataset(
         {"tp": (("t", "y", "x"), np.arange(12, dtype="float32").reshape(3, 2, 2) - 4.0, {"units": "mm/d"})},

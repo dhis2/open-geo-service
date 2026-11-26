@@ -11,6 +11,7 @@ import pytest
 
 from open_geo_service import config as api_config
 from open_geo_service import migrate_layout
+from open_geo_service.shared import layout
 
 from .test_writer_lease import start_other_writer
 
@@ -165,7 +166,7 @@ def test_the_service_reads_the_migrated_instance(instance: Path) -> None:
     migrate_layout.main([])
     registry.reset_template_caches()
 
-    assert api_config.get_download_root() == instance / "data" / "rasters"
+    assert layout.kind_root(layout.Kind.RASTER) == instance / "data" / "rasters"
     assert "chelsa" in {t["id"] for t in registry.list_datasets()}
     assert "regions" in {t["id"] for t in feature_templates.list_feature_templates()}
 

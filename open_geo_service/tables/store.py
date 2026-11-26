@@ -4,7 +4,7 @@ A table's rows follow its schema (`tables.schemas`, CLIM-1971): the columns it d
 that says which stored row a write replaces, and what columns represent, which adds rules: feature ids checked
 against their collection and periods stored as their first day. The dataset's record names its schema.
 
-One folder per table dataset under `config.get_tables_root`, holding the dataset's one file of
+One folder per table dataset (`shared.layout`), holding the dataset's one file of
 current values. No history is kept: a revised value replaces its row, and a value written again
 unchanged keeps the row and its `written_at`, so `written_at` says when each value last changed.
 
@@ -26,8 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
-import time
 from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
@@ -39,7 +37,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
-from open_geo_service import config as api_config
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -49,9 +46,11 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
+from open_geo_service.shared import layout
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.persistence import index_lock
 from open_geo_service.shared.urls import require_segment_safe_id
+from open_geo_service.shared.versions import prune_superseded
 from open_geo_service.tables.schemas import DEFAULT_SCHEMA, WRITTEN_AT, TableSchema, declared_schema, get_schema
 
 logger = logging.getLogger(__name__)
@@ -173,7 +172,11 @@ def write_rows(
             # No record names the file, so no reader sees it; remove it rather than leave it.
             written.unlink(missing_ok=True)
             raise
-        _prune_superseded(_dataset_root(dataset_id), keep=written)
+        prune_superseded(
+            _dataset_root(dataset_id).glob("*.parquet"),
+            current=written,
+            replaced=[Path(path) for path in (existing.asset_paths if existing else [])],
+        )
         return registered
 
 
@@ -512,39 +515,18 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
 
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{stamp:%Y%m%dT%H%M%S%fZ}-{uuid4().hex}.parquet"
-    # A dot name no listing of `*.parquet` matches, so a half-written file is never taken for the dataset.
-    staging = folder / f".{path.name}.writing"
+    # Outside the dataset's folder, so a half-written file is never taken for the dataset.
+    staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
-        os.replace(staging, path)
+        layout.move_into_place(staging, path)
     finally:
         staging.unlink(missing_ok=True)
     return path
 
 
 def _dataset_root(dataset_id: str) -> Path:
-    return api_config.get_tables_root() / dataset_id
-
-
-def _prune_superseded(folder: Path, *, keep: Path) -> None:
-    """Remove the files a newer file replaced more than `SUPERSEDED_FILE_GRACE_SECONDS` ago.
-
-    A reader resolves the record, then opens the file it names, so a file just replaced must stay
-    for a reader caught between the two. A file was replaced when the next newer one was written,
-    so the next file's mtime is when it stopped being the dataset; *keep* is never removed. A file
-    that cannot be removed is logged and tried again on the next write.
-    """
-    from open_geo_service.features.store import SUPERSEDED_FILE_GRACE_SECONDS
-
-    files = sorted(folder.glob("*.parquet"), key=lambda path: path.stat().st_mtime)
-    now = time.time()
-    for older, newer in zip(files, files[1:], strict=False):
-        if older == keep or now - newer.stat().st_mtime < SUPERSEDED_FILE_GRACE_SECONDS:
-            continue
-        try:
-            older.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not remove superseded table file '%s'", older, exc_info=True)
+    return layout.dataset_dir(layout.Kind.TABLE, dataset_id)
 
 
 def _remove_records(dataset_id: str) -> None:

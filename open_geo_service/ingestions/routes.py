@@ -22,7 +22,7 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.jobs.models import JobLink, JobRecord
 from open_geo_service.jobs.service import get_job_service
-from open_geo_service.shared.thumbnails import thumbnail_path
+from open_geo_service.shared import layout
 from open_geo_service.shared.urls import mount_prefix
 
 ingestions_router = APIRouter()
@@ -201,8 +201,9 @@ def get_dataset_thumbnail(dataset_id: str) -> FileResponse:
     `write_dataset_thumbnail`. The STAC collection only advertises the asset when the file is
     there, so a client following a published href does not meet the 404.
     """
-    path = thumbnail_path(dataset_id)
-    if not path.is_file():
+    artifact = services.get_latest_artifact_for_dataset_or_404(dataset_id)
+    path = layout.find_thumbnail(artifact.format, dataset_id)
+    if path is None:
         raise HTTPException(status_code=404, detail=f"No thumbnail for dataset '{dataset_id}'")
     return FileResponse(path, media_type="image/png")
 

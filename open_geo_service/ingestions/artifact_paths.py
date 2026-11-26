@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service.shared import layout
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ def to_absolute(raw: str) -> str:
 def _rebase_legacy(candidate: Path, root: Path) -> Path:
     """Re-root a legacy absolute path onto root, preferring the longest matching suffix.
 
-    Managed stores always live at ``{data_root}/rasters/<name>`` (``downloader.DOWNLOAD_DIR``,
-    the sole trusted root in ``sync_engine._artifact_storage_roots``), so only a suffix
+    Managed stores always live under ``{data_root}/rasters/`` (``shared.layout``, the sole
+    trusted root in ``sync_engine._artifact_storage_roots``), so only a suffix
     starting at a ``rasters`` component is considered - a longer suffix would otherwise
     bind the record to a lookalike elsewhere under the root, and the rebased path would be
     persisted in a form sync rejects as untrusted.
@@ -82,7 +83,7 @@ def _rebase_legacy(candidate: Path, root: Path) -> Path:
         return candidate
     parts = candidate.parts
     for index in range(1, len(parts) - 1):
-        if parts[index] != "rasters":
+        if parts[index] != layout.Kind.RASTER.value:
             continue
         rebased = resolved_root.joinpath(*parts[index:])
         if rebased.exists():

@@ -16,10 +16,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
+from open_geo_service.features import providers as feature_providers
 from open_geo_service.features import services as feature_services
-from open_geo_service.features import store, tiles
+from open_geo_service.features import templates as feature_templates
+from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
+from open_geo_service.shared import layout, versions
 
 TEMPLATE = {"id": "districts", "name": "District boundaries", "id_property": "code"}
 
@@ -32,9 +35,8 @@ def _no_vector_tiles() -> None:
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Keep collections, records and thumbnails out of the developer's data directory."""
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
+    root = layout.kind_root(layout.Kind.VECTOR)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -100,6 +102,56 @@ def test_a_refresh_builds_vector_tiles_beside_the_geoparquet() -> None:
     assert south == pytest.approx(7.5, abs=0.01) and north == pytest.approx(8.8, abs=0.01)
 
 
+@pytest.mark.parametrize(("geometry", "kept_at_zoom_2"), [("polygon", 400), ("polygon z", 400), ("point", 256)])
+def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: TestClient, geometry: str, kept_at_zoom_2: int
+) -> None:
+    """Zoomed out, tylertoo's feature budget would draw 256 of these 400 districts, leaving holes.
+
+    Each district is large enough to draw at every zoom. Points are still thinned by the budget.
+    """
+    grid = [_box(f"{i}_{j}", f"{i}_{j}", i / 2, j / 2, (i + 1) / 2, (j + 1) / 2) for i in range(20) for j in range(20)]
+    if geometry == "point":
+        for feature in grid:
+            west, south = feature["geometry"]["coordinates"][0][0]
+            feature["geometry"] = {"type": "Point", "coordinates": [west + 0.25, south + 0.25]}
+    elif geometry == "polygon z":  # GeoParquet declares these "Polygon Z"
+        for feature in grid:
+            feature["geometry"]["coordinates"] = [[[*xy, 0.0] for xy in feature["geometry"]["coordinates"][0]]]
+    configs = tmp_path / "feature_templates"
+    configs.mkdir()
+    (configs / "grid.yaml").write_text(
+        "- id: districts\n  name: Districts\n  id_property: code\n"
+        "  source_url: https://example.org\n  provider: grid\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feature_templates, "CONFIGS_DIR", configs)
+    feature_templates.reset_feature_template_caches()
+    monkeypatch.setattr(
+        feature_providers,
+        "load_feature_providers",
+        lambda: {"grid": lambda **_: {"type": "FeatureCollection", "features": grid}},
+    )
+    import tylertoo
+
+    counts: dict[int, int] = {}
+    real_overview = tylertoo.overview
+
+    def counting_overview(*args: Any, **kwargs: Any) -> Any:
+        report = real_overview(*args, **kwargs)
+        counts.update({level["zoom"]: level["feature_count"] for level in report["levels"]})
+        return report
+
+    monkeypatch.setattr(tylertoo, "overview", counting_overview)
+
+    assert client.post("/features/districts/refresh").status_code == 200
+
+    assert counts[2] == kept_at_zoom_2
+    if geometry != "point":
+        assert set(counts.values()) == {400}
+    feature_templates.reset_feature_template_caches()
+
+
 def test_a_projected_collection_is_tiled_in_longitude_and_latitude() -> None:
     """tylertoo reads WGS 84 or Web Mercator only, so a UTM store is reprojected for the build."""
     record = _refresh(store_crs="EPSG:32628")
@@ -122,7 +174,7 @@ def test_a_failed_tile_build_does_not_fail_the_refresh(
 
     assert Path(str(record.path)).is_file()
     assert not tiles.archive_path(Path(str(record.path))).exists()
-    assert not [p for p in _isolated.iterdir() if p.name.endswith(".writing")]
+    assert not list(layout.staging_dir().glob("*.writing"))
     # Nothing advertises or serves an archive that is not there.
     assert client.get("/features/districts/data.pmtiles").status_code == 404
     collection = client.get("/stac/districts/collection.json").json()
@@ -203,9 +255,9 @@ def test_an_unpublished_collection_serves_no_tiles(client: TestClient) -> None:
 
 
 def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
-    _refresh()  # marks the first file superseded
+    _refresh()  # keeps the file it replaces
     current = Path(str(_refresh().path))  # removes it, past a zero grace period
 
     assert not first.exists()
@@ -215,10 +267,10 @@ def test_a_superseded_file_takes_its_archive_with_it(monkeypatch: pytest.MonkeyP
 
 def test_an_archive_that_cannot_be_removed_is_tried_again_later(monkeypatch: pytest.MonkeyPatch) -> None:
     """The archive goes before its Parquet file, so a failure leaves the version discoverable."""
-    monkeypatch.setattr(store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     first = Path(str(_refresh().path))
     archive = tiles.archive_path(first)
-    _refresh()  # marks the first file superseded
+    _refresh()  # keeps the file it replaces
     archive.unlink()
     archive.mkdir()  # an archive that cannot be unlinked
     (archive / "held").touch()

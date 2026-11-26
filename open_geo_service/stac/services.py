@@ -30,7 +30,7 @@ from open_geo_service.features import templates as feature_templates
 from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord, FeatureDetail
-from open_geo_service.shared import geoparquet
+from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.classes import (
     STAC_CLASSIFICATION_EXTENSION,
     classification_from_template,
@@ -40,7 +40,7 @@ from open_geo_service.shared.crs import canonical_crs_code, is_builtin_crs
 from open_geo_service.shared.display import display_range
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
 from open_geo_service.shared.licences import DatasetLicence, declared_providers, parse_licence
-from open_geo_service.shared.thumbnails import colormap_stops, thumbnail_path
+from open_geo_service.shared.thumbnails import colormap_stops
 from open_geo_service.shared.time import (
     Cadence,
     parse_period_string_to_datetime,
@@ -308,11 +308,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     # Only when the file is actually there: a collection that advertises a thumbnail a client
     # then 404s on is worse than one that advertises none. A render that failed or found
     # nothing to draw leaves an otherwise complete collection without the asset.
-    thumbnail_href = (
-        absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png")
-        if thumbnail_path(dataset_id).is_file()
-        else None
-    )
+    thumbnail = layout.find_thumbnail(artifact.format, dataset_id)
     licence = parse_licence(source_dataset.get("license"))
 
     template = _build_collection_template(
@@ -389,7 +385,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         "roles": template_asset.get("roles"),
         "xarray:open_kwargs": xarray_open_kwargs,
     }
-    if thumbnail_href is not None:
+    if thumbnail is not None:
         # `thumbnail` is a standardised STAC asset role, and a Collection may carry assets —
         # the spec recommends collection-level assets for exactly this shape, a standalone
         # collection fronting a Zarr store with no items. So no extension is needed and any
@@ -397,22 +393,26 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         # than on the pystac template because only the assets assembled here reach the
         # payload; the template's are rebuilt from the xstac output above.
         collection_payload["assets"]["thumbnail"] = {
-            "href": thumbnail_href,
+            "href": absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png"),
             "type": "image/png",
             "title": "Thumbnail",
             "description": THUMBNAIL_DESCRIPTION,
             "roles": ["thumbnail"],
-            **file_fields(thumbnail_path(dataset_id)),
+            **file_fields(thumbnail),
         }
         collection_payload["stac_extensions"] = sorted({*collection_payload["stac_extensions"], FILE_EXTENSION})
     if artifact.format == ArtifactFormat.ICECHUNK:
         collection_payload["assets"]["icechunk"] = {
-            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}"),
-            "type": "application/octet-stream",
+            # The repository's directory, with its slash, so no client is redirected to it.
+            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/"),
+            # As the STAC Zarr best practices and xpystac name an Icechunk repository.
+            "type": "application/vnd.zarr+icechunk",
             "title": "Icechunk store (native SDK access)",
             "description": (
                 "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
-                "JavaScript, with the dataset's version history."
+                "JavaScript, with the dataset's version history. Open the published branch; main can hold "
+                "a sync in progress. GDAL opens it through its repo file: "
+                "ICECHUNK:/vsicurl/<href>repo?branch=published."
             ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
@@ -563,7 +563,8 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
         collection.stac_extensions.append(WEB_MAP_LINKS_EXTENSION)
     # As for a raster collection: only when the file is there, so a client never follows a
     # thumbnail href to a 404.
-    if thumbnail_path(dataset_id).is_file():
+    thumbnail = layout.find_thumbnail(artifact.format, dataset_id)
+    if thumbnail is not None:
         collection.add_asset(
             "thumbnail",
             pystac.Asset(
@@ -572,7 +573,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 title="Thumbnail",
                 description=THUMBNAIL_DESCRIPTION,
                 roles=["thumbnail"],
-                extra_fields=file_fields(thumbnail_path(dataset_id)),
+                extra_fields=file_fields(thumbnail),
             ),
         )
 
