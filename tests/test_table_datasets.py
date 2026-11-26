@@ -814,17 +814,43 @@ RAINFALL_TEMPLATE = """\
       constants: {unit: mm}
 """
 
+VISITS_SCHEMA = """\
+- id: district_visits
+  name: Clinic visits per district and month
+  columns:
+    - {name: collection_id, type: string, nullable: false}
+    - {name: district, type: string, required: true, nullable: false, represents: feature_id}
+    - {name: month, type: date, required: true, nullable: false, represents: period_start}
+    - {name: visits, type: int32, unit: visits, represents: value}
+  key: [collection_id, district, month]
+"""
+
+VISITS_TEMPLATE = """\
+- id: district_visits
+  name: Clinic visits by district
+  period_type: monthly
+  schema: district_visits
+  collection: districts
+  ingestion:
+    plugin: open_geo_service.plugins.tables.csv_file.CsvTablePlugin
+    params: {path: visits.csv}
+"""
+
 
 @pytest.fixture
 def plugins_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """An instance whose plugins_dir holds the rainfall table template, reading rainfall.csv beside its config."""
+    """An instance whose plugins_dir holds the rainfall table template, reading rainfall.csv beside its config,
+    and a visits template with a schema of its own."""
     root = tmp_path / "plugins"
-    (root / "tables").mkdir(parents=True)
+    (root / "tables" / "schemas").mkdir(parents=True)
     (root / "tables" / "rainfall.yaml").write_text(RAINFALL_TEMPLATE, encoding="utf-8")
+    (root / "tables" / "visits.yaml").write_text(VISITS_TEMPLATE, encoding="utf-8")
+    (root / "tables" / "schemas" / "visits.yaml").write_text(VISITS_SCHEMA, encoding="utf-8")
     (tmp_path / "rainfall.csv").write_text(
         "district,month,rainfall_mm,station_count\nD1,2026-01,120.5,3\nD2,2026-01,98,2\nD1,2026-02,,0\nD2,2026-02,80,2\n",
         encoding="utf-8",
     )
+    (tmp_path / "visits.csv").write_text("district,month,visits\nD1,2026-01,12\nD2,2026-01,7\n", encoding="utf-8")
     config = api_config.get_config()
     monkeypatch.setattr(api_config, "get_config", lambda: {**config, "plugins_dir": str(root)})
     monkeypatch.setattr(api_config, "get_config_path", lambda: tmp_path / "geoservice.yaml")
@@ -889,6 +915,20 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
     assert refused.status_code == 400
     assert "CSV line 6: value 'lots' is not a double" in refused.json()["detail"]
     assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "end": "2026-03"}).status_code == 200
+
+    # A template whose schema is the instance's own, with columns named as the source's fields.
+    assert client.post("/ingestions", json={"dataset_id": "district_visits"}).status_code == 200
+    rows = client.get("/tables/district_visits/rows").json()["items"]
+    assert [(row["district"], row["month"], row["visits"]) for row in rows] == [
+        ("D1", "2026-01-01", 12),
+        ("D2", "2026-01-01", 7),
+    ]
+    columns = client.get("/stac/district_visits/collection.json").json()["table:columns"]
+    assert [(column["name"], column.get("unit")) for column in columns][1:4] == [
+        ("district", None),
+        ("month", None),
+        ("visits", "visits"),
+    ]
 
     _write([_row("D1", 1.0)])
     assert client.post("/sync/precip_districts", json={}).status_code == 409
