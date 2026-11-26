@@ -455,7 +455,7 @@ dataset id alone.
 against the document's own URL: a collection's `data` asset is the file beside its
 `collection.json`, served under `/stac` too. The `zarr` and `style` assets are there only when
 `GEOSERVICE_BASE_URL` is set; without it, take the Zarr URL from `/datasets/{dataset_id}` or
-openEO's `/collections/{dataset_id}`, as the Python client does.
+openEO's `/collections/{dataset_id}`, as the Python client does, and the style from the route below.
 
 What this means:
 
@@ -580,9 +580,10 @@ collection has no `tiles` asset.
 
 `GET /features/{collection_id}/styles/default.json` serves the MapLibre style the map viewer
 draws a collection with: its tiles as filled areas, lines and points, with the collection's
-attribution on the source. The STAC collection lists it as its `style` asset, and names the
-archive and its layer in a `pmtiles` link (web-map-links extension), whenever the collection has
-tiles.
+attribution on the source. Whenever the collection has tiles, openEO's collection lists this
+route as its `style` asset, and the written STAC collection the same style as a file in its
+`styles/` folder (with `GEOSERVICE_BASE_URL` set); both name the archive and its layer in a
+`pmtiles` link (web-map-links extension).
 
 ## 12. Read table datasets
 

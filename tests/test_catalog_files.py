@@ -24,6 +24,7 @@ from open_geo_service import config as api_config
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.features import services as feature_services
 from open_geo_service.features import templates as feature_templates
+from open_geo_service.features.tiles import STYLE_MEDIA_TYPE
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
@@ -189,11 +190,18 @@ def test_the_written_catalog_passes_rashid_and_links_only_inside_itself(data: Pa
     }
     for key, document in _documents(catalog).items():
         for href in _hrefs(document):
-            # Inside the folder, a source elsewhere, or a route the configured address generates.
-            generated = href.startswith(f"{PUBLIC}/zarr/") or href.endswith("/styles/default.json")
-            assert not href.startswith(PUBLIC) or generated, (key, href)
+            # Inside the folder, a source elsewhere, or the Zarr route the configured address generates.
+            assert not href.startswith(PUBLIC) or href.startswith(f"{PUBLIC}/zarr/"), (key, href)
             if "://" not in href:
                 assert (catalog / key).parent.joinpath(href).resolve().exists(), (key, href)
+    # The style beside the tiles names them by absolute URL, as MapLibre resolves it against the page.
+    districts = catalog / "vectors" / "districts"
+    assert _documents(catalog)["vectors/districts/collection.json"]["assets"]["style"]["href"] == (
+        "./styles/default.json"
+    )
+    (source,) = json.loads((districts / "styles" / "default.json").read_text())["sources"].values()
+    tiles_name = source["url"].removeprefix(f"pmtiles://{PUBLIC}/stac/vectors/districts/")
+    assert tiles_name.endswith(".pmtiles") and (districts / tiles_name).is_file(), source["url"]
     for path in catalog.rglob("*.md"):
         # The Zarr route, and this instance named as a provider, as in the JSON.
         assert PUBLIC not in path.read_text().replace(f"{PUBLIC}/zarr/", "").replace(f"({PUBLIC}/)", ""), path
@@ -234,16 +242,19 @@ def test_a_write_is_in_the_files_before_it_returns_and_an_unpublished_folder_has
     assert data_href == f"./{Path(str(second.path)).name}", "a refresh rewrites the collection"
 
 
-def test_the_zarr_asset_follows_the_configured_address(
+def test_the_zarr_asset_and_the_style_follow_the_configured_address(
     data: Path, monkeypatch: pytest.MonkeyPatch, restart_writer: Callable[[], None]
 ) -> None:
     collection = data / "catalog" / "rasters" / "rain" / "collection.json"
+    style = data / "catalog" / "vectors" / "districts" / "styles" / "default.json"
     assert json.loads(collection.read_text())["assets"]["zarr"]["href"] == f"{PUBLIC}/zarr/rain"
 
     # A restart with another address rewrites every document.
     monkeypatch.setenv("GEOSERVICE_BASE_URL", "https://moved.example.org")
     restart_writer()
     assert json.loads(collection.read_text())["assets"]["zarr"]["href"] == "https://moved.example.org/zarr/rain"
+    (source,) = json.loads(style.read_text())["sources"].values()
+    assert source["url"].startswith("pmtiles://https://moved.example.org/stac/vectors/districts/")
 
     # An origin-only address behind a proxy prefix composes as a request-built URL does.
     monkeypatch.setenv("ROOT_PATH", "/geoservice")
@@ -263,6 +274,9 @@ def test_the_zarr_asset_follows_the_configured_address(
     )
     catalog_files.write_catalog()
     assert len(reads) == 1
+    # Nor the style, which could name its tiles only by a relative URL, which MapLibre misreads.
+    assert not style.exists()
+    assert "style" not in json.loads((style.parent.parent / "collection.json").read_text())["assets"]
     written = json.loads(collection.read_text())
     assert "zarr" not in written["assets"] and written["assets"]["icechunk"]["href"] == "./rain.icechunk/"
     for render in written.get("renders", {}).values():
@@ -288,6 +302,7 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
     immutable = client.get(f"/stac/rasters/rain/rain.icechunk/snapshots/{snapshot.name}")
     assert immutable.headers["cache-control"] == "max-age=31536000, immutable"
     assert client.head("/stac/README.md").headers["content-type"].startswith("text/markdown")
+    assert client.head("/stac/vectors/districts/styles/default.json").headers["content-type"] == STYLE_MEDIA_TYPE
     data_file = next((data / "catalog" / "vectors" / "districts").glob("*.parquet"))
     ranged = client.get(f"/stac/vectors/districts/{data_file.name}", headers={"Range": "bytes=0-3"})
     assert ranged.status_code == 206 and ranged.content == b"PAR1"

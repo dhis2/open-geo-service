@@ -18,6 +18,9 @@ from typing import Any, Protocol
 DOCUMENT_NAMES = frozenset({"catalog.json", "collection.json", "README.md", "AGENTS.md"})
 """The file names of the documents a catalog is made of; every other file is data."""
 
+STYLES = "styles"
+"""The folder of a collection that holds its MapLibre styles, as Portolan places them beside PMTiles."""
+
 Document = Mapping[str, Any] | str
 
 
@@ -69,10 +72,18 @@ def apply(operations: Iterable[Operation], sink: Sink) -> None:
 
 
 def managed_keys(keys: Iterable[str]) -> list[str]:
-    """Of *keys*, those of the catalog's documents: its own, each sub-catalog's and each collection's."""
-    return sorted(
-        key for key in keys if PurePosixPath(key).name in DOCUMENT_NAMES and len(PurePosixPath(key).parts) <= 3
-    )
+    """Of *keys*, those the writer manages, so it deletes them once no longer written.
+
+    The documents of the catalog, each sub-catalog and each collection, and each collection's
+    MapLibre styles in its `styles/` folder, where Portolan places them beside PMTiles.
+    """
+    return sorted(key for key in keys if _managed(PurePosixPath(key)))
+
+
+def _managed(key: PurePosixPath) -> bool:
+    if key.name in DOCUMENT_NAMES:
+        return len(key.parts) <= 3
+    return len(key.parts) == 4 and key.parts[2] == STYLES and key.suffix == ".json"
 
 
 def _encode(document: Document) -> bytes:

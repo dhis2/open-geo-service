@@ -20,16 +20,21 @@ data/
         collection.json  README.md  AGENTS.md
         <id>.<uuid>.parquet      one GeoParquet file per version
         <id>.<uuid>.pmtiles      its vector tiles
+        styles/default.json      its MapLibre style, with GEOSERVICE_BASE_URL set
         thumbnail.png
     tables/
       catalog.json  README.md  AGENTS.md
       <id>/
         collection.json  README.md  AGENTS.md
         <stamp>-<uuid>.parquet   one Parquet file per version
-  artifacts/records.json         the dataset records, which name each dataset's current files
+  artifacts/                     records.json, the dataset records, which name each dataset's
+                                 current files, and the locks of their writes
   gc-pending/<id>                stores with unreachable data due for collection
   tmp/                           files being written
-  jobs/  openeo_jobs/  ...       jobs, schedules, pipelines and other state
+  cache/                         source downloads kept for reuse
+  jobs/  openeo_jobs/  process_graphs/  pipelines/  derivations/  exports/
+  schedules.json  schedule_results.json  notifications.json
+                                 jobs, schedules, pipelines and other state
   writer.lock  writer.json       the writer lease
 ```
 
@@ -67,10 +72,13 @@ server writes none of it, so after an upgrade the writer starts first.
 - **Every link stays inside `catalog/`.** Links between documents are relative, and so are the
   data assets: the Icechunk store, the GeoParquet and PMTiles files, the Parquet file, the
   thumbnail. A copy of `catalog/`, served by any static host, is a complete catalog.
-- **What GeoService generates on request needs its public address.** A raster's `zarr` asset,
-  a feature collection's MapLibre `style` and the host provider's address are written only when
-  `GEOSERVICE_BASE_URL` is set, with that address. Portolan asks for the host's address, so a
-  catalog meant to be published needs it set.
+- **What needs the public address is written only with it.** A raster's `zarr` asset, which
+  GeoService generates on request, and the host provider's address are written only when
+  `GEOSERVICE_BASE_URL` is set. So is a feature collection's MapLibre style, a file in its
+  `styles/` folder that its `style` asset links: MapLibre resolves the tiles URL in a style
+  against the page rather than the style, so the style names its PMTiles file by absolute URL.
+  Portolan asks for the host's address and for a style beside PMTiles, so a catalog meant to be
+  published needs the setting.
 
 `/stac` serves `catalog/` as a static host of it would: the documents and the data files beside
 them, without reading the records. A dataset written but not yet published is reachable by its

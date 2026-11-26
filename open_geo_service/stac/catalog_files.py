@@ -4,8 +4,10 @@ The documents are the ones the builders make for a request, with their links rew
 folder: a link between documents becomes relative, a link to a dataset's data becomes the file
 beside its `collection.json`, and a link to another GeoService route is dropped, so a copied
 `catalog/` is a complete catalog wherever it is hosted. What GeoService generates on request
-stays absolute and is written only when `GEOSERVICE_BASE_URL` is set: the `zarr` asset, a feature
-collection's `style` asset, and the instance's own address as a provider. The written layout is
+stays absolute and is written only when `GEOSERVICE_BASE_URL` is set: the `zarr` asset and the
+instance's own address as a provider. A feature collection's MapLibre style is written as a file in
+its `styles/` folder, also only then, as MapLibre resolves the tiles URL in a style against the
+page rather than the style, so the style names its tiles by absolute URL. The written layout is
 described in `docs/data_folder_layout.md`.
 """
 
@@ -16,13 +18,14 @@ import posixpath
 import re
 import threading
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import HTTPException
 from starlette.requests import Request
 
 from open_geo_service import storage, writer_lease
+from open_geo_service.features import services as features_services
 from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord
@@ -87,6 +90,9 @@ class _CatalogSink:
                 keys += files
                 below += subfolders
             folders = below
+        for folder in folders:
+            if PurePosixPath(folder).name == portolan.STYLES:
+                keys += self._objects.level(folder)[0]
         return [key.removeprefix(self._prefix) for key in keys]
 
 
@@ -108,6 +114,7 @@ def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portol
     request = _catalog_request()
     base = absolute_base(request)
     built: dict[str, portolan.Document] = {}
+    styles: dict[str, portolan.Document] = {}  # written as built: MapLibre styles, not STAC
     files: dict[str, str] = {}
     described: dict[str, ArtifactRecord] = {}
     for dataset_id, artifact in published.items():
@@ -122,6 +129,12 @@ def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portol
             continue
         built |= {f"{folder}/collection.json": collection, f"{folder}/README.md": readme, f"{folder}/AGENTS.md": agents}
         files |= _data_files(dataset_id, artifact)
+        assets = collection.get("assets")
+        if configured_base() and isinstance(assets, dict) and "style" in assets:
+            style_key = f"{folder}/{portolan.STYLES}/default.json"
+            tiles_url = f"{base}/stac/{files[f'/features/{dataset_id}/data.pmtiles']}"
+            styles[style_key] = features_services.published_collection_style_or_404(dataset_id, tiles_url)
+            files[f"/features/{dataset_id}/styles/default.json"] = style_key
         described[dataset_id] = artifact
     # Only kinds with a collection written, so no sub-catalog is empty.
     for kind in stac_services.published_kinds(described):
@@ -135,13 +148,13 @@ def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portol
         "README.md": documents.catalog_readme(request),
         "AGENTS.md": documents.catalog_agents(request),
     }
-    written = set(built)
+    written = set(built) | set(styles)
     return {
         key: _localized_markdown(document, key, base, files, written)
         if isinstance(document, str)
         else _localized_json(dict(document), key, base, files, written)
         for key, document in built.items()
-    }
+    } | styles
 
 
 def _catalog_request() -> Request:
@@ -212,10 +225,9 @@ def _localizer(key: str, base: str, files: dict[str, str]) -> Callable[[str], st
 def _served_by_the_instance_only(route: str) -> bool:
     """The routes a written document may name with the configured address: generated on request.
 
-    Zarr, translated from Icechunk; a feature collection's MapLibre style, which names its tiles
-    by absolute URL; and the instance itself, as a provider.
+    Zarr, translated from Icechunk, and the instance itself, as a provider.
     """
-    return route.startswith("/zarr/") or (route.startswith("/features/") and "/styles/" in route) or route in ("", "/")
+    return route.startswith("/zarr/") or route in ("", "/")
 
 
 def _localized_json(
@@ -348,4 +360,6 @@ def served_file(path: str) -> tuple[Path, str]:
     target = (root / path).resolve()
     if not target.is_relative_to(root) or not target.is_file():
         raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
+    if target.parent.name == portolan.STYLES and target.suffix == ".json":
+        return target, tiles.STYLE_MEDIA_TYPE
     return target, _MEDIA_TYPES.get(target.suffix, "application/octet-stream")
