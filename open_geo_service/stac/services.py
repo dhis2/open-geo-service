@@ -8,8 +8,9 @@ import logging
 import math
 import os
 import threading
+import urllib.parse
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -21,6 +22,7 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
+from open_geo_service.auth.tokens import reads_gated
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -28,7 +30,7 @@ from open_geo_service.features import templates as feature_templates
 from open_geo_service.features import tiles
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord, FeatureDetail
-from open_geo_service.shared import forecast, geoparquet
+from open_geo_service.shared import forecast, geoparquet, layout
 from open_geo_service.shared.classes import (
     STAC_CLASSIFICATION_EXTENSION,
     classification_from_template,
@@ -37,8 +39,8 @@ from open_geo_service.shared.classes import (
 from open_geo_service.shared.crs import canonical_crs_code, is_builtin_crs
 from open_geo_service.shared.display import display_range
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
-from open_geo_service.shared.licences import DatasetLicence, parse_licence
-from open_geo_service.shared.thumbnails import colormap_stops, thumbnail_path
+from open_geo_service.shared.licences import DatasetLicence, declared_providers, parse_licence
+from open_geo_service.shared.thumbnails import colormap_stops
 from open_geo_service.shared.time import (
     Cadence,
     parse_period_string_to_datetime,
@@ -46,10 +48,12 @@ from open_geo_service.shared.time import (
     period_type_to_iso_step,
     resolve_iso_period_step,
 )
-from open_geo_service.shared.urls import absolute_url, path_segment, self_url
+from open_geo_service.shared.urls import absolute_base, absolute_url, path_segment, self_url
 from open_geo_service.stac.media_types import ZARR_V3_MEDIA_TYPE, data_group_open_kwargs, zarr_media_type
 
-CATALOG_DESCRIPTION = "Published datasets: rasters as GeoZarr stores and vector datasets as GeoParquet"
+CATALOG_DESCRIPTION = (
+    "Published datasets: rasters as GeoZarr stores, vector datasets as GeoParquet, and tables as Parquet"
+)
 STAC_VERSION = "1.1.0"
 MARKDOWN_MEDIA_TYPE = "text/markdown"
 CATALOG_PATH = "/stac/catalog.json"
@@ -111,6 +115,7 @@ WEB_MAP_LINKS_EXTENSION = "https://stac-extensions.github.io/web-map-links/v1.3.
 PROCESSING_EXTENSION = "https://stac-extensions.github.io/processing/v1.2.0/schema.json"
 FILE_EXTENSION = "https://stac-extensions.github.io/file/v2.1.0/schema.json"
 # The versioned profile URI is Portolan's only conformance signal; it defines no fields of its own.
+AUTHENTICATION_EXTENSION = "https://stac-extensions.github.io/authentication/v1.2.0/schema.json"
 PORTOLAN_SCHEMA = "https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"
 DEFAULT_STAC_LICENSE = "various"
 _UNBOUNDED_TEMPORAL_EXTENT: list[list[datetime | None]] = [[None, None]]
@@ -180,6 +185,14 @@ def _get_catalog_id() -> str:
     return api_config.get_id()
 
 
+THUMBNAIL_DESCRIPTION = "A small preview image of the data, for listings and search results."
+
+
+def _stac_datetime(value: datetime) -> str:
+    """An instant as STAC writes it: RFC 3339, with `Z` for UTC."""
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def build_catalog(request: Request) -> dict[str, object]:
     """Build the STAC catalog document."""
     self_href = self_url(request)
@@ -191,7 +204,8 @@ def build_catalog(request: Request) -> dict[str, object]:
         {"rel": "describedby", "href": "./README.md", "type": MARKDOWN_MEDIA_TYPE},
         {"rel": "agents", "href": "./AGENTS.md", "type": MARKDOWN_MEDIA_TYPE},
     ]
-    for dataset_id, artifact in _eligible_artifacts_by_dataset().items():
+    artifacts = _eligible_artifacts_by_dataset()
+    for dataset_id, artifact in artifacts.items():
         links.append(
             {
                 "rel": "child",
@@ -200,7 +214,7 @@ def build_catalog(request: Request) -> dict[str, object]:
                 "type": "application/json",
             }
         )
-    return {
+    catalog: dict[str, Any] = {
         "stac_version": STAC_VERSION,
         "stac_extensions": [PORTOLAN_SCHEMA],
         "type": "Catalog",
@@ -208,8 +222,12 @@ def build_catalog(request: Request) -> dict[str, object]:
         # The instance's own name, as in the web interface; "Open Geo Service" when unset.
         "title": _get_catalog_title(),
         "description": CATALOG_DESCRIPTION,
+        # Changed by every collection's sync, so the latest of theirs. A catalog whose collections
+        # are all mirrors is a mirror too, and Portolan requires it there (PORTO-CORE-057).
+        **({"updated": _stac_datetime(max(a.created_at for a in artifacts.values()))} if artifacts else {}),
         "links": links,
     }
+    return _declare_authentication(catalog, request)
 
 
 def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
@@ -235,8 +253,49 @@ def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, req
     return a newer record after a concurrent refresh, and the document would then mix the two.
     """
     if artifact.format == ArtifactFormat.GEOPARQUET:
-        return _build_feature_collection(dataset_id, artifact, request)
-    return _build_raster_collection(dataset_id, artifact, request)
+        collection = _build_feature_collection(dataset_id, artifact, request)
+    elif artifact.format == ArtifactFormat.PARQUET:
+        collection = _build_table_collection(dataset_id, artifact, request)
+    else:
+        collection = _build_raster_collection(dataset_id, artifact, request)
+    return _declare_authentication(collection, request)
+
+
+# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
+# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
+_AUTH_SCHEMES: dict[str, dict[str, str]] = {
+    "basic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "An API token's id as the username and its secret as the password.",
+    },
+    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
+}
+
+
+def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
+    """With reads gated, a copy that declares how to sign in, and which links and assets need it.
+
+    Only links and assets on this instance are marked; a source page or licence elsewhere is
+    not. With reads public the document is returned unchanged.
+    """
+    if not reads_gated():
+        return document
+    base = absolute_base(request)
+    refs = sorted(_AUTH_SCHEMES)
+
+    def mark(target: dict[str, Any]) -> dict[str, Any]:
+        href = str(target.get("href", ""))
+        split = urllib.parse.urlsplit(href)
+        here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
+        return {**target, "auth:refs": refs} if here else target
+
+    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
+    declared["links"] = [mark(link) for link in document.get("links", [])]
+    if "assets" in document:
+        declared["assets"] = {key: mark(asset) for key, asset in document["assets"].items()}
+    return declared
 
 
 def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
@@ -249,11 +308,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     # Only when the file is actually there: a collection that advertises a thumbnail a client
     # then 404s on is worse than one that advertises none. A render that failed or found
     # nothing to draw leaves an otherwise complete collection without the asset.
-    thumbnail_href = (
-        absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png")
-        if thumbnail_path(dataset_id).is_file()
-        else None
-    )
+    thumbnail = layout.find_thumbnail(artifact.format, dataset_id)
     licence = parse_licence(source_dataset.get("license"))
 
     template = _build_collection_template(
@@ -309,7 +364,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     # was last synced from it. A workflow output names the sources of the data it was made from.
     for source_url in _source_pages(artifact.dataset_id, source_dataset):
         template_links.append({"rel": "via", "href": source_url, "type": "text/html", "title": "Source"})
-    collection_payload["updated"] = artifact.created_at.isoformat().replace("+00:00", "Z")
+    collection_payload["updated"] = _stac_datetime(artifact.created_at)
     # Relative, as for the catalog and feature collections, so they resolve beside the document.
     template_links.extend(_document_links())
     collection_payload["links"] = template_links
@@ -326,10 +381,11 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         "href": template_asset["href"],
         "type": template_asset.get("type"),
         "title": template_asset.get("title"),
+        "description": template_asset.get("description"),
         "roles": template_asset.get("roles"),
         "xarray:open_kwargs": xarray_open_kwargs,
     }
-    if thumbnail_href is not None:
+    if thumbnail is not None:
         # `thumbnail` is a standardised STAC asset role, and a Collection may carry assets —
         # the spec recommends collection-level assets for exactly this shape, a standalone
         # collection fronting a Zarr store with no items. So no extension is needed and any
@@ -337,18 +393,27 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         # than on the pystac template because only the assets assembled here reach the
         # payload; the template's are rebuilt from the xstac output above.
         collection_payload["assets"]["thumbnail"] = {
-            "href": thumbnail_href,
+            "href": absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png"),
             "type": "image/png",
             "title": "Thumbnail",
+            "description": THUMBNAIL_DESCRIPTION,
             "roles": ["thumbnail"],
-            **file_fields(thumbnail_path(dataset_id)),
+            **file_fields(thumbnail),
         }
         collection_payload["stac_extensions"] = sorted({*collection_payload["stac_extensions"], FILE_EXTENSION})
     if artifact.format == ArtifactFormat.ICECHUNK:
         collection_payload["assets"]["icechunk"] = {
-            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}"),
-            "type": "application/octet-stream",
+            # The repository's directory, with its slash, so no client is redirected to it.
+            "href": absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/"),
+            # As the STAC Zarr best practices and xpystac name an Icechunk repository.
+            "type": "application/vnd.zarr+icechunk",
             "title": "Icechunk store (native SDK access)",
+            "description": (
+                "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
+                "JavaScript, with the dataset's version history. Open the published branch; main can hold "
+                "a sync in progress. GDAL opens it through its repo file: "
+                "ICECHUNK:/vsicurl/<href>repo?branch=published."
+            ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
         }
@@ -438,7 +503,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
 
     # When the collection was last refreshed, which for a mirror of an upstream source is when
     # it was last synced from it.
-    collection.extra_fields["updated"] = artifact.created_at.isoformat().replace("+00:00", "Z")
+    collection.extra_fields["updated"] = _stac_datetime(artifact.created_at)
 
     _apply_table_extension(collection, artifact, detail)
     _add_feature_collection_links(
@@ -456,6 +521,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
             href=absolute_url(request, f"/features/{path_segment(dataset_id)}/data.parquet"),
             media_type=PARQUET_MEDIA_TYPE,
             title="GeoParquet collection",
+            description="Every feature with all its properties, in one GeoParquet file; table:columns describes them.",
             roles=["data"],
             extra_fields=file_size(data_path) if data_path is not None and data_path.is_file() else None,
         ),
@@ -470,6 +536,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 href=tiles_href,
                 media_type=tiles.PMTILES_MEDIA_TYPE,
                 title="Vector tiles (PMTiles)",
+                description="The features as vector tiles in one PMTiles archive, for drawing on a map.",
                 roles=["visual"],
                 extra_fields=file_size(tiles.archive_path(data_path)),
             ),
@@ -480,6 +547,7 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
                 href=absolute_url(request, f"/features/{path_segment(dataset_id)}/styles/default.json"),
                 media_type=tiles.STYLE_MEDIA_TYPE,
                 title="MapLibre style",
+                description="A MapLibre style that draws the vector tiles.",
                 roles=["style"],
             ),
         )
@@ -495,15 +563,17 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
         collection.stac_extensions.append(WEB_MAP_LINKS_EXTENSION)
     # As for a raster collection: only when the file is there, so a client never follows a
     # thumbnail href to a 404.
-    if thumbnail_path(dataset_id).is_file():
+    thumbnail = layout.find_thumbnail(artifact.format, dataset_id)
+    if thumbnail is not None:
         collection.add_asset(
             "thumbnail",
             pystac.Asset(
                 href=absolute_url(request, f"/datasets/{path_segment(dataset_id)}/thumbnail.png"),
                 media_type="image/png",
                 title="Thumbnail",
+                description=THUMBNAIL_DESCRIPTION,
                 roles=["thumbnail"],
-                extra_fields=file_fields(thumbnail_path(dataset_id)),
+                extra_fields=file_fields(thumbnail),
             ),
         )
 
@@ -523,6 +593,126 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
     return payload
 
 
+def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
+    """Build the STAC collection for a table dataset: its rows in one Parquet file.
+
+    A table document, as for a feature collection, with no geometry: `table:columns` from the
+    table's schema, each with its description and the value columns with their unit, and the file
+    itself as the `data` asset. The spatial extent is the bounds of the feature collections the
+    values are reported on, and the temporal one the first and last period, as the schema's columns
+    represent them. A computed table has no
+    template, so its licence and providers are its sources' (`tables.sources`); `derived_from`
+    links name those sources and `via` links the pages their data came from.
+    """
+    from open_geo_service.tables import store as table_store
+    from open_geo_service.tables.sources import table_sources
+
+    sources = table_sources(artifact)
+    summary = table_store.summarize(artifact)
+    spatial = artifact.coverage.spatial_wgs84 or artifact.coverage.spatial
+    collection = pystac.Collection(
+        id=dataset_id,
+        description=sources.description(artifact),
+        extent=pystac.Extent(
+            spatial=pystac.SpatialExtent([[spatial.xmin, spatial.ymin, spatial.xmax, spatial.ymax]]),
+            temporal=pystac.TemporalExtent([[_start_of_day(summary.first_period), _start_of_day(summary.last_period)]]),
+        ),
+        title=artifact.dataset_name,
+        license=sources.stac_license,
+    )
+    collection.extra_fields["keywords"] = [artifact.dataset_id, "table", "parquet", "stac"]
+    # When a value last changed: the record is replaced on every write that changes one.
+    collection.extra_fields["updated"] = _stac_datetime(artifact.created_at)
+    collection.stac_extensions.append(PORTOLAN_SCHEMA)
+    table = TableExtension.ext(collection, add_if_missing=True)
+    table.row_count = summary.row_count
+    columns = _table_dataset_columns(artifact)
+    if columns:
+        collection.extra_fields["table:columns"] = columns
+
+    catalog_href = absolute_url(request, CATALOG_PATH)
+    collection.clear_links()
+    collection.set_self_href(absolute_url(request, collection_path(dataset_id)))
+    collection.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
+    collection.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    collection.add_link(
+        pystac.Link(
+            rel="alternate",
+            target=absolute_url(request, f"/datasets/{path_segment(dataset_id)}"),
+            media_type="application/json",
+            title="Dataset detail",
+        )
+    )
+    # One link per licence: values computed from several sources are bound by each.
+    for href, title in sources.license_links():
+        collection.add_link(pystac.Link(rel="license", target=href, media_type="text/html", title=title))
+    for recorded in ingestion_services.recorded_inputs(artifact):
+        input_id = str(recorded["collection_id"])
+        collection.add_link(
+            pystac.Link(
+                rel="derived_from",
+                target=absolute_url(request, collection_path(input_id)),
+                media_type="application/json",
+                title=input_id,
+            )
+        )
+    for source_url in _source_pages(dataset_id, {}):
+        collection.add_link(pystac.Link(rel="via", target=source_url, media_type="text/html", title="Source"))
+    for link in _document_links():
+        collection.add_link(
+            pystac.Link(rel=link["rel"], target=link["href"], media_type=link["type"], title=link["title"])
+        )
+
+    data_path = Path(artifact.asset_paths[0]) if artifact.asset_paths else None
+    collection.add_asset(
+        "data",
+        pystac.Asset(
+            href=absolute_url(request, f"/tables/{path_segment(dataset_id)}/data.parquet"),
+            media_type=PARQUET_MEDIA_TYPE,
+            title="Table (Parquet)",
+            description="The dataset's current rows, one per key; table:columns describes them.",
+            roles=["data"],
+            # Size and checksum, as Portolan asks of a single-file asset: a table is small, and
+            # the checksum is computed once per file version.
+            extra_fields=file_fields(data_path) if data_path is not None and data_path.is_file() else None,
+        ),
+    )
+    if data_path is not None and data_path.is_file():
+        collection.stac_extensions.append(FILE_EXTENSION)
+    collection.stac_extensions.append(PROCESSING_EXTENSION)
+
+    payload = collection.to_dict(include_self_link=True, transform_hrefs=False)
+    payload["stac_version"] = STAC_VERSION
+    payload["providers"] = _published_providers(sources.template(), request, [_processor_provider(artifact, request)])
+    return payload
+
+
+def _table_dataset_columns(artifact: ArtifactRecord) -> list[dict[str, str]]:
+    """`table:columns` for a table dataset: each column its schema declares, with its type, description and unit."""
+    from open_geo_service.tables.schemas import WRITTEN_AT_DESCRIPTION
+    from open_geo_service.tables.store import schema_of, unit_of
+
+    declared = schema_of(artifact)
+    columns: list[dict[str, str]] = []
+    for field in declared.arrow:
+        column = {"name": field.name, "type": str(field.type)}
+        described = declared.column(field.name)
+        # Only `written_at` is not declared: the store adds it to every table.
+        description = described.description if described is not None else WRITTEN_AT_DESCRIPTION
+        unit = unit_of(artifact, field.name)
+        if description:
+            column["description"] = description
+        # The table extension defines no unit field, and its column schema admits further ones.
+        if unit:
+            column["unit"] = unit
+        columns.append(column)
+    return columns
+
+
+def _start_of_day(day: date | None) -> datetime | None:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC) if day is not None else None
+
+
 def _published_providers(
     source_dataset: dict[str, Any], request: Request, processors: list[dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
@@ -538,7 +728,7 @@ def _published_providers(
     from open_geo_service import config as api_config
 
     providers = []
-    for provider in _build_providers(source_dataset):
+    for provider in declared_providers(source_dataset):
         entry = {key: value for key, value in provider.items() if key != "roles"}
         declared = provider.get("roles") or []
         roles = [role for role in declared if role != "host"] if declared else ["producer"]
@@ -684,8 +874,8 @@ def _collection_description(dataset_id: str, artifact: ArtifactRecord, source_da
     the collection always published a generated sentence, so a template author wrote a
     description, saw it accepted, and it went nowhere. That matters most for datasets whose
     values mislead without a caveat: Meta RWI ranks micro-regions *within one country*, MODIS
-    LST is surface rather than 2 m air temperature, CHIRPS3 monthly is a mean daily rate and
-    not a monthly total. Each is a trap that produces plausible-looking output when missed, and
+    LST is surface rather than 2 m air temperature. Each is a trap that produces plausible-looking
+    output when missed, and
     the published collection is the only place an API consumer would look.
 
     The generated fallback stays for templates without one, and notably for openEO
@@ -711,7 +901,7 @@ def _processor_provider(artifact: ArtifactRecord, request: Request) -> dict[str,
         "name": _get_catalog_title(),
         "roles": ["processor"],
         "url": absolute_url(request, "/"),
-        "processing:datetime": artifact.created_at.isoformat().replace("+00:00", "Z"),
+        "processing:datetime": _stac_datetime(artifact.created_at),
     }
     if artifact.provenance is not None and artifact.provenance.ogs_version is not None:
         provider["processing:software"] = {"open-geo-service": artifact.provenance.ogs_version}
@@ -750,51 +940,11 @@ def _source_pages(dataset_id: str, template: dict[str, Any]) -> list[str]:
     return pages
 
 
-def _build_providers(source_dataset: dict[str, Any]) -> list[dict[str, Any]]:
-    """STAC `providers` from the template, for carrying attribution (CLIM-946).
-
-    Attribution is a licence condition under CC-BY and CC-BY-NC, not a courtesy, and OGS had
-    nowhere to record it at collection level. Entries are passed through with only their shape
-    checked — STAC defines `name`, `description`, `roles` and `url`, and inventing validation
-    beyond that would reject legitimate metadata.
-    """
-    declared = source_dataset.get("providers")
-    if not isinstance(declared, list):
-        return []
-    providers: list[dict[str, Any]] = []
-    for entry in declared:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        provider: dict[str, Any] = {"name": name.strip()}
-        for key in ("description", "url"):
-            value = entry.get(key)
-            if isinstance(value, str) and value.strip():
-                provider[key] = value.strip()
-        roles = entry.get("roles")
-        if isinstance(roles, list):
-            cleaned = [str(r) for r in roles if isinstance(r, str) and r.strip()]
-            if cleaned:
-                provider["roles"] = cleaned
-        providers.append(provider)
-    return providers
-
-
 def _eligible_artifacts_by_dataset() -> dict[str, ArtifactRecord]:
-    """Return the artifacts this builder may describe: published rasters, and only those.
+    """Return the artifacts the catalogue describes: published rasters, feature collections and tables.
 
-    This module's answer for `ArtifactFormat.GEOPARQUET` is that it never arrives. Everything
-    below is raster — xstac opens the store as an xarray dataset to derive `cube:dimensions`
-    and `cube:variables`, and the assets, media types and render hints are all Zarr's — so a
-    feature collection needs the STAC table extension (`table:row_count`,
-    `table:primary_geometry`, `table:columns`) and no datacube fields at all. That is a second
-    builder, not a branch through this one.
-
-    CLIM-1069 adds it, and widens the gate in the same change so the catalogue never advertises
-    a child it cannot serve. Until then a GeoParquet record is absent from this set and its
-    collection URL is a plain 404, which is true rather than merely unimplemented.
+    Each format has its own builder (`build_collection_for_artifact`), and the gate admits only
+    formats one exists for, so the catalogue never advertises a child it cannot serve.
     """
     return ingestion_services.stac_eligible_artifacts_by_dataset()
 
@@ -853,6 +1003,7 @@ def _build_collection_template(
             href=zarr_href,
             media_type=_zarr_media_type(artifact),
             title="Zarr store",
+            description="The data as a Zarr store, for any Zarr reader. xarray:open_kwargs says how to open it.",
             roles=["data"],
         ),
     )
@@ -1119,6 +1270,8 @@ def _asset_to_dict(asset: pystac.Asset) -> dict[str, Any]:
         payload["type"] = asset.media_type
     if asset.title is not None:
         payload["title"] = asset.title
+    if asset.description is not None:
+        payload["description"] = asset.description
     if asset.roles is not None:
         payload["roles"] = asset.roles
     payload.update(asset.extra_fields)

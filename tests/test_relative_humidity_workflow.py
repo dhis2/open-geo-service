@@ -12,6 +12,7 @@ import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activat
 import xarray as xr
 from openeo_pg_parser_networkx.process_registry import Process
 
+from open_geo_service import config as api_config
 from open_geo_service.data_registry.services import datasets as registry
 from open_geo_service.openeo import jobs
 from open_geo_service.openeo import workflows as workflow_store
@@ -109,7 +110,7 @@ def managed_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    monkeypatch.setattr("open_geo_service.data_manager.services.downloader.DOWNLOAD_DIR", tmp_path / "rasters")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     (tmp_path / "rasters").mkdir()
     return tmp_path
 

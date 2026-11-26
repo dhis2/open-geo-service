@@ -115,9 +115,11 @@ The current CLI starts the server. Commands for ingestion, job inspection,
 and maintenance of read-only deployments are planned. Such commands must use the
 shared domain services and may call them directly while the HTTP server is stopped.
 
-Every writer of a managed Icechunk store (ingestion, sync, and openEO jobs publishing a
-managed dataset) holds a writer lock: a lock file beside the store, which also excludes
-writers in other processes. A synchronous ingestion or sync request encountering an active
+Every write of a managed Icechunk store (ingestion, sync, and openEO jobs publishing a
+managed dataset) holds the store's writer lock, so two writes of one store never overlap.
+Other processes are kept out by the writer lease (see
+[One writer per instance](instance_guide.md#one-writer-per-instance)), so the lock is held
+within the writer only. A synchronous ingestion or sync request encountering an active
 writer is refused with `409` before source data is fetched or written. An asynchronous request
 has already returned `202` by that point, so its job fails with the same explanation instead.
 An openEO job that reaches managed-dataset publication while the lock is held fails before
@@ -127,12 +129,14 @@ A native or openEO job also runs in at most one process at a time. If a process 
 shutting down is executing a job, startup recovery in the new process leaves that job alone instead of
 running it a second time, and watches it. If the old process finishes the job, nothing more
 happens; if it exits without finishing, the new process takes the job over within seconds, as
-it would have at startup. The operating system releases both locks when their process exits,
-so a crash never leaves a store or job locked.
+it would have at startup. The operating system releases the job's lease when its process
+exits, and a store's lock lives in the writer's memory, so a crash never leaves a store or job
+locked.
 
-Job, artifact and scheduler records are still whole-file JSON without transactions.
-Direct store mutation outside the shared services must therefore still require
-a stopped server or otherwise guarantee a single writer.
+Job, artifact and scheduler records are whole-file JSON without transactions. They rely on
+one writer per instance, which the writer lease enforces: every write to a store or a record
+takes or checks it, so a process that is not the writer is refused. See
+[One writer per instance](instance_guide.md#one-writer-per-instance).
 
 ---
 
@@ -181,7 +185,17 @@ Within `sync.kind: temporal`, two execution modes control what happens when new 
 - `append` — downloads only the missing time range and appends it to the existing artifact
 - `rematerialize` — discards the existing artifact and rebuilds it from scratch
 
-`append` is efficient for large historical datasets (avoid re-downloading years of data on each sync). `rematerialize` is appropriate when old data may change retroactively (e.g. reanalysis products that are corrected after the fact).
+`append` is efficient for large historical datasets (avoid re-downloading years of data on each sync). `rematerialize` is appropriate when old data may change retroactively anywhere in the record. When a source only replaces its recent, preliminary periods, `append` with `sync.refresh_after` fetches just those again (see below).
+
+### Preliminary periods
+
+Some sources publish recent periods as a preliminary product and replace them with final values later: ERA5-Land and ERA5-Heat serve recent days computed from ERA5T, final about two months after the month in question. These sources do not mark which periods are preliminary, so each store records when every period was fetched instead, as the `fetched_at` coordinate along its time axis (see [Zarr and GeoZarr](zarr_and_geozarr.md#fetched_at-when-each-period-was-fetched)).
+
+**The rule.** A template's `sync.refresh_after` (an ISO 8601 duration) says when a period's final version is expected: `final_after = end of period + refresh_after`. A sync fetches a period again when `fetched_at < final_after <= now`. Fetched again after that, its new `fetched_at` is past `final_after`, so each period is fetched at most twice, and a period that matured while no sync ran is replaced at the next one. Periods still inside the window are not fetched again: their preliminary values do not change in place. A period with no `fetched_at`, in a store written before it was recorded, counts as final, so a store that held ERA5T data before this existed is not corrected until it is ingested again. The window is read from the template at each sync, so changing it applies to existing stores. A period is fetched again only once, so choose `refresh_after` past the latest the provider finalises a period, not its usual lag: a period fetched again before its final version is out keeps its preliminary values for good, with no warning. A `fetched_at` more than an hour after now was written while the server clock ran ahead, possibly past `final_after` while the data was still preliminary, so such a period is fetched again with a warning once the clock is correct. A clock running behind only delays a refresh. `open_geo_service/shared/provisional.py` is where the rule is decided.
+
+**The sync.** The planner reads `fetched_at` from the store and fetches the due periods first, from the earliest to the latest due one, then appends new periods as before, in one sync. A due period is written in place on level 0 (a Zarr region write), and a pyramid's coarser levels for it are recomputed by the kernel that extends them on append. The sync plan names the periods as `refresh_start` and `refresh_end`, and the update event a pipeline or derived dataset runs on starts from the first of them, so they carry the final values on.
+
+**The API.** A managed dataset lists its preliminary periods in `provisional_periods`, with `fetched_at` and `final_after`. They are published like any other period.
 
 ### Availability clamping
 
@@ -310,7 +324,7 @@ When a new ingestion request arrives, the framework plans against the periods al
 - same bbox (from the configured extent)
 - the contiguous union of committed and requested source-valid periods
 
-If the union extends forward, only missing periods are appended. A non-adjacent request also fetches the intervening source-valid periods. If the union starts before existing coverage, or the committed coordinate is gapped or out of order, the framework rematerializes the union in a sibling store and publishes it only after successful validation and normalization. `request_scope` records what the caller asked for; artifact `coverage` records the cumulative realized store.
+If the union extends forward, only missing periods are appended. A non-adjacent request also fetches the intervening source-valid periods. If the union starts before existing coverage, or the committed coordinate is gapped or out of order, the framework rematerializes the union on a temporary branch of the same Icechunk repository and moves `main` to it only after successful validation and normalization, so readers never see a partial store. `request_scope` records what the caller asked for; artifact `coverage` records the cumulative realized store.
 
 The artifact store keeps the full history of records for sync deduplication and provenance. Old artifacts are not deleted automatically. For long-running instances, `records.json` grows over time. The long-term direction is a proper transactional store, but for the current scale (tens of artifacts per instance) a JSON file is adequate.
 
@@ -352,3 +366,18 @@ Ingest and sync enumerate the complete source-valid union before writing. A forw
 ### The append execution mode avoids re-downloading history
 
 `append` writes only the source-available periods missing from the committed Icechunk store. The committed store is authoritative for existing history, while a temporary Icechunk branch preserves the pre-ingest snapshot until normalization and artifact registration succeed. Earlier requests, gaps, and release-style updates instead build a complete sibling replacement.
+
+### Empty periods at the end of a run are not stored
+
+A source can list periods before their data is written. dynamical.org's CHIRPS3 mirror extends its time axis to the day of each update first and writes the data minutes later, so for those minutes it lists several days with no values; ERA5-Heat once listed a day whose every hour was NaN. A sync resumes after the newest stored period, so storing such a period would keep it empty for good.
+
+The orchestrator therefore commits every period as usual, and checks each for values that are all missing (NaN, or the variable's `_FillValue`). Whether an empty period E is kept depends on what follows it in the run:
+
+1. **A later period L has data.** E and every empty period up to L are empty for a reason of their own, such as water or cloud over the whole extent, and are kept.
+2. **No later period has data.** The source has not filled them yet. When the run ends, the branch the run writes to is reset to the snapshot before E, as a failed sync is rolled back. The periods before E are kept, and a later sync fetches the rest again. Readers of a published dataset open the `published` branch, which moves only when the sync finishes, so they never see E.
+
+In case 2 the sync still succeeds, with a warning in its message and the log naming the periods held back: for a source such as dynamical.org this happens on every sync that lands in its update window, and the dataset still advances to the last period with data, so it is not a failure. A source that never fills a listed period shows as a dataset whose end stops advancing, with the same warning on every sync.
+
+The reset also runs when the run fails or is cancelled part way, so empty periods are never left at the end of the store. The newest period of a run that is truly empty is held back until a later period is listed, then written.
+
+These rules apply to new periods, in an initial ingest or a sync. A preliminary period fetched again for its final values (see [Preliminary periods](#preliminary-periods)) is long published, and is written as it comes back.

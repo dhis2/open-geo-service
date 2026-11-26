@@ -8,6 +8,7 @@ import pytest
 import xarray as xr
 
 from open_geo_service.plugins.processes.climatological_normal import climatological_normal
+from open_geo_service.shared.time import stamp_cadence
 
 
 def _daily_cube() -> xr.DataArray:
@@ -41,19 +42,44 @@ def test_climatological_normal_requires_temporal_dimension() -> None:
 
 
 def test_climatological_normal_monthly_reduces_time_to_month() -> None:
-    # A cube where each step equals its calendar month → the month-of-year mean is the
-    # month itself (1..12).
-    times = pd.date_range("1991-01-01", "1992-12-31", freq="D")
-    month = times.month.to_numpy().astype("float32")
-    data = np.broadcast_to(month[:, None, None], (len(times), 2, 2)).copy()
-    cube = xr.DataArray(data, dims=("t", "y", "x"), coords={"t": times, "y": [1.0, 2.0], "x": [1.0, 2.0]})
+    # Monthly totals of 1 mm a day: the month-of-year mean is the mean monthly total, and a
+    # February normal averages 28 and 29 days (WMO-No. 1203).
+    times = pd.date_range("1991-01-01", "1992-12-01", freq="MS")
+    days = times.days_in_month.to_numpy().astype("float32")
+    data = np.broadcast_to(days[:, None, None], (len(times), 2, 2)).copy()
+    monthly = xr.DataArray(data, dims=("t", "y", "x"), coords={"t": times, "y": [1.0, 2.0], "x": [1.0, 2.0]})
 
-    out = climatological_normal(cube, frequency="month")
+    out = climatological_normal(monthly, frequency="month")
 
     assert "month" in out.dims and "dayofyear" not in out.dims and "t" not in out.dims
     assert out.sizes["month"] == 12
-    assert float(out.sel(month=1).isel(y=0, x=0)) == pytest.approx(1.0)
-    assert float(out.sel(month=12).isel(y=0, x=0)) == pytest.approx(12.0)
+    assert float(out.sel(month=1).isel(y=0, x=0)) == pytest.approx(31.0)
+    assert float(out.sel(month=2).isel(y=0, x=0)) == pytest.approx(28.5)
+
+
+@pytest.mark.parametrize(
+    ("cell_methods", "declared", "frequency", "refused"),
+    [
+        # Totals over periods shorter than the normal's would average into a per-day amount.
+        ("time: sum", None, "month", True),
+        ("time: sum", "dekadal", "month", True),  # the declared period type wins over the axis
+        ("time: sum", None, "dayofyear", False),
+        # A quantity averaged over time, such as temperature or NDVI, is a mean of means.
+        ("time: mean", None, "month", False),
+        (None, "dekadal", "month", False),
+    ],
+)
+def test_climatological_normal_refuses_only_totals_shorter_than_its_period(
+    cell_methods: str | None, declared: str | None, frequency: str, refused: bool
+) -> None:
+    cube = stamp_cadence(_daily_cube(), declared)
+    if cell_methods:
+        cube.attrs["cell_methods"] = cell_methods
+    if refused:
+        with pytest.raises(ValueError, match="compute it from a"):
+            climatological_normal(cube, frequency=frequency, smoothing_window=0)
+    else:
+        assert climatological_normal(cube, frequency=frequency, smoothing_window=0).sizes[frequency] > 0
 
 
 def test_climatological_normal_rejects_unknown_frequency() -> None:

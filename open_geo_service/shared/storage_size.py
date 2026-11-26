@@ -8,17 +8,33 @@ page from seconds to many minutes.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 def stored_bytes(path: str | Path) -> int:
-    """Bytes on disk under *path*: a store directory walked without following symlinks, or a file.
+    """Bytes the artifact at *path* stores.
+
+    For an Icechunk repository, the bytes of the chunks its branches and tags reach, as Icechunk
+    reports them: the versions it keeps, without data awaiting collection or its small metadata
+    files. For anything else, the bytes on disk under *path*: a directory walked without
+    following symlinks, or a file.
 
     A path that is missing or unreadable counts as 0 rather than raising, since a size is a
     figure for display and an ingest must not fail over it.
     """
     root = Path(path)
+    if (root / "repo").is_file():
+        try:
+            import icechunk
+
+            repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(root)))
+            return int(repo.chunk_storage_stats().non_virtual_bytes())
+        except Exception:
+            logger.warning("Could not read the size of '%s' from Icechunk; measuring its files", root, exc_info=True)
     try:
         if not root.is_dir():
             return root.stat().st_size if root.is_file() else 0

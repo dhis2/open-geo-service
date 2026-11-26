@@ -153,6 +153,26 @@ class OpenEOJobListResponse(BaseModel):
     links: list[dict[str, Any]] = Field(default_factory=list)
 
 
+OpenEOLogLevel = Literal["error", "warning", "info", "debug"]
+
+
+class OpenEOLogEntry(BaseModel):
+    """One entry in GET /jobs/{id}/logs."""
+
+    id: str
+    level: OpenEOLogLevel
+    message: str
+    time: datetime | None = None
+
+
+class OpenEOJobLogs(BaseModel):
+    """Envelope for GET /jobs/{id}/logs."""
+
+    level: OpenEOLogLevel
+    logs: list[OpenEOLogEntry]
+    links: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class OpenEOJobResultLink(BaseModel):
     """One asset link in GET /jobs/{id}/results."""
 

@@ -37,8 +37,9 @@ the recovered job finds the data current and still emits the event it owed, exac
 
 The event says what changed: `dataset_id`, `artifact_id`, `action` (`ingest`, the sync
 planner's `append` or `rematerialize`, or `full_rewrite` for a dataset an openEO job
-published), `previous_end` (the coverage end before the update, or `null` when the whole store
-is new or rewritten), and `current_start` and `current_end` (the coverage after it). A pipeline
+published), `previous_end` (the coverage end before the update; when a sync replaced preliminary
+periods with final values, the period before the first of them; `null` when the whole store is
+new or rewritten), and `current_start` and `current_end` (the coverage after it). A pipeline
 runs the interval the update affected; a recipe always recomputes the whole coverage.
 
 ## Updates from derived datasets
@@ -155,7 +156,8 @@ Such a job runs up to 3 times, the first attempt included, under the same job id
 
 When the attempts run out, the job stays `error`. Its error names the attempt, for example
 `OSError: connection reset (attempt 3 of 3)`, and `GET /jobs/{job_id}/results` answers with it.
-The job's `logs` field lists every attempt with its time and outcome. Re-running a failed job
+The job's `logs` field, and `GET /jobs/{job_id}/logs`, list every attempt with its time and
+outcome. Re-running a failed job
 with `POST /jobs/{job_id}/results` starts a fresh attempt budget.
 
 Jobs submitted directly run once. A job still running in another Open Geo Service process, for example one

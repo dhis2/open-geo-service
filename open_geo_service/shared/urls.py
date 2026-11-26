@@ -31,6 +31,8 @@ import urllib.parse
 from typing import NamedTuple
 
 from fastapi import Request
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +158,11 @@ def configured_public_root() -> str:
     return origin + (path or configured_root_path())
 
 
-SEGMENT_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SEGMENT_SAFE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 """Shape of an id that can appear in a URL path and route back to the same resource.
+
+It also names the dataset's folder and files in the data folder, and is the form Portolan asks
+of a collection id (PORTO-CORE-016): lowercase, starting with a letter, no dots.
 
 Every catalogued dataset id becomes a path segment — `/stac/{id}/collection.json`, `/zarr/{id}`,
 `/features/{id}` — and an id outside this shape produces a link that does not work, or worse,
@@ -174,6 +179,10 @@ an id is unroutable however it is written. `?`, `#` and space do survive escapin
 """
 
 
+ID_RULE = "start with a lowercase letter and carry only lowercase letters, digits, '_' or '-'"
+"""`SEGMENT_SAFE_ID_PATTERN` in words, for messages and form help."""
+
+
 def is_segment_safe_id(value: str) -> bool:
     """True when *value* can be a URL path segment that routes back to the same resource.
 
@@ -182,6 +191,33 @@ def is_segment_safe_id(value: str) -> bool:
     segment.
     """
     return bool(SEGMENT_SAFE_ID_PATTERN.fullmatch(value))
+
+
+def require_segment_safe_id(value: str, what: str, where: str = "") -> str:
+    """Return *value*, or raise `ValueError` naming it as *what* (in *where*) when it breaks the rule."""
+    if not is_segment_safe_id(value):
+        place = f" in {where}" if where else ""
+        raise ValueError(f"invalid {what} {value!r}{place}; it must {ID_RULE}")
+    return value
+
+
+_SKIPPED_IDS: set[tuple[str, str]] = set()
+
+
+def has_refused_id(declared: object, what: str, source: str) -> bool:
+    """True when *declared*, a template or schema read from *source*, has an id the rule refuses.
+
+    For loaders, which skip such an entry rather than fail every entry beside it: one written
+    under an earlier, looser rule (an openEO `save_result` template, say) would otherwise take
+    the whole catalogue down. Logged once per process; a missing id is left to the loader.
+    """
+    declared_id = declared.get("id") if isinstance(declared, dict) else None
+    if not isinstance(declared_id, str) or not declared_id or is_segment_safe_id(declared_id):
+        return False
+    if (declared_id, source) not in _SKIPPED_IDS:
+        _SKIPPED_IDS.add((declared_id, source))
+        logger.warning("Skipping %s %r in %s: an id must %s; rename it", what, declared_id, source, ID_RULE)
+    return True
 
 
 def path_segment(value: str) -> str:
@@ -233,6 +269,52 @@ def route_path(request: Request) -> str:
     strips the same way Starlette strips it.
     """
     return strip_mount(request.url.path, str(request.scope.get("root_path", "")))
+
+
+class RelativeSlashRedirects:
+    """Sends Starlette's trailing-slash redirect as a path under the mount prefix.
+
+    Starlette builds that redirect's `Location` from the request scope: absolute, with the
+    scheme uvicorn saw, and with the scope's path, which lacks the prefix when the proxy strips
+    it before forwarding. Behind such a proxy `/nepal/datasets/` went to `http://host/datasets`
+    (CLIM-1975). Rewritten to the form the module docstring gives every in-page redirect. Other
+    redirects keep their `Location`: only one whose path is the request's with the trailing
+    slash added or removed is Starlette's.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_relative(message: Message) -> None:
+            if message["type"] == "http.response.start" and message["status"] in (307, 308):
+                headers = MutableHeaders(scope=message)
+                location = _relative_slash_location(scope, headers.get("location"))
+                if location is not None:
+                    headers["location"] = location
+            await send(message)
+
+        await self.app(scope, receive, send_relative)
+
+
+def _relative_slash_location(scope: Scope, location: str | None) -> str | None:
+    """The prefixed path for Starlette's slash redirect to `location`, or None for any other."""
+    if location is None:
+        return None
+    target = urllib.parse.urlsplit(location)
+    # The scope's path is decoded and the `Location` escaped, so `%20` in an id still matches.
+    decoded = urllib.parse.unquote(target.path)
+    requested = str(scope["path"])
+    if decoded == requested or decoded.rstrip("/") != requested.rstrip("/"):
+        return None
+    # Starlette's path, escaping kept, less any prefix the scope carried.
+    path = strip_mount(target.path, str(scope.get("root_path", "")))
+    query = f"?{target.query}" if target.query else ""
+    return f"{mount_prefix(Request(scope))}{path}{query}"
 
 
 def self_url(request: Request) -> str:

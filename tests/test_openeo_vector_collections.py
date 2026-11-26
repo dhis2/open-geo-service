@@ -41,7 +41,7 @@ def _box(code: str, xmin: float, ymin: float, xmax: float, ymax: float) -> dict[
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_features_root", lambda: root)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")

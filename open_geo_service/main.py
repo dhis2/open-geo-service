@@ -13,6 +13,8 @@ from starlette.responses import Response
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
+from open_geo_service.auth import routes as auth_routes
 from open_geo_service.auth.middleware import AccessMiddleware
 from open_geo_service.auth.tokens import configured_tokens
 from open_geo_service.automation import routes as automation_routes
@@ -161,6 +163,22 @@ async def _measure_missing_statistics(stop: threading.Event) -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
+    """Take the writer lease, or refuse every write if read-only, then run the services.
+
+    Taken first, so a refused second writer starts nothing, and kept until the process exits:
+    job workers are stopped without waiting and may still be writing after shutdown. A read-only
+    process may run beside the writer on the same data folder, and never becomes the writer.
+    """
+    if api_config.is_read_only():
+        writer_lease.refuse_writes()
+    else:
+        writer_lease.ensure_held("server")
+    async with _services():
+        yield
+
+
+@asynccontextmanager
+async def _services() -> AsyncGenerator[None]:
     """Run lightweight startup recovery hooks for the application lifecycle."""
     from open_geo_service.plugins_diagnostics import log_plugin_loading
     from open_geo_service.shared.compute import install_shared_dask_pool
@@ -176,6 +194,7 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     from open_geo_service.notifications import webhook
 
     webhook.webhook_url()  # a malformed notifications block refuses startup
+    api_config.get_snapshot_retention()  # so does a malformed retention, which would stop cleanup
     # After plugins load, so a recipe is checked against the workflows it will run.
     derivations.validate_recipes()
     maintenance: asyncio.Task[None] | None = None
@@ -183,17 +202,22 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     notification_replay: asyncio.Task[None] | None = None
     derived_refresh: asyncio.Task[None] | None = None
     if not api_config.is_read_only():
-        # Before any job is recovered, so no pyramid rebuild can be in progress. A read-only
-        # instance may share its data directory with a writing one, so it leaves them alone.
+        # A read-only instance may share its data directory with a writing one, so it leaves
+        # the stores alone.
         from open_geo_service.ingestions.services import (
+            clean_up_interrupted_ingests,
             collect_pending_garbage_everywhere,
-            remove_leftover_rebuilds,
+            reconcile_published_branches,
         )
 
         try:
-            remove_leftover_rebuilds()
+            clean_up_interrupted_ingests()
         except Exception:
-            logger.exception("Could not remove leftover pyramid rebuilds; continuing startup")
+            logger.exception("Could not clean up interrupted ingests; continuing startup")
+        try:
+            reconcile_published_branches()
+        except Exception:
+            logger.exception("Could not reconcile published branches; continuing startup")
         try:
             collect_pending_garbage_everywhere()
         except Exception:
@@ -203,7 +227,9 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         notification_replay = asyncio.create_task(_replay_notifications_periodically())
         derived_refresh = asyncio.create_task(_refresh_derived_datasets_periodically())
     job_service = get_job_service()
-    job_service.recover_pending_jobs()
+    # Recovery requeues and takes over jobs, which only the writer runs.
+    if not api_config.is_read_only():
+        job_service.recover_pending_jobs()
     openeo_service = get_openeo_job_service()
     from open_geo_service.jobs import dispatch
     from open_geo_service.pipelines import runner as pipeline_runner
@@ -223,12 +249,13 @@ async def _lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         derivations.on_job_finished(record)
 
     openeo_service.set_finished_listener(_job_finished)
-    openeo_service.recover_pending_jobs()
-    try:
-        # A job whose last attempt failed after its commit still owes that publication's event.
-        openeo_service.reconcile_publications()
-    except Exception:
-        logger.exception("openEO publication reconciliation failed; continuing startup")
+    if not api_config.is_read_only():
+        openeo_service.recover_pending_jobs()
+        try:
+            # A job whose last attempt failed after its commit still owes that publication's event.
+            openeo_service.reconcile_publications()
+        except Exception:
+            logger.exception("openEO publication reconciliation failed; continuing startup")
     try:
         pipeline_runner.reconcile()
     except Exception:
@@ -294,6 +321,7 @@ def create_app() -> FastAPI:
     # instead of on the first request that builds a link.
     _app = FastAPI(lifespan=_lifespan, root_path=urls.configured_root_path())
     urls.configured_base()
+    _app.add_middleware(urls.RelativeSlashRedirects)
 
     # Registered *before* CORS so it ends up innermost: Starlette applies the most recently
     # added middleware outermost, so CORS wraps this and a 401 or 403 still carries the headers
@@ -376,6 +404,7 @@ def create_app() -> FastAPI:
         return response
 
     _app.include_router(system_routes.router, tags=["System"])
+    _app.include_router(auth_routes.router, tags=["System"])
     _app.include_router(openeo_routes.capabilities_router, tags=["openEO"])
     _app.include_router(stac_routes.router, prefix="/stac", tags=["STAC"])
     _app.include_router(openeo_routes.collections_router, prefix="/collections", tags=["openEO"])

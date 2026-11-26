@@ -63,6 +63,16 @@ retain older periods already stored by Open Geo Service. Requests wholly within 
 coverage do not query the source. Extending backwards or repairing an existing gap
 requires the source to reproduce the complete union, including committed history.
 
+**`periods()` lists what the source says is available.** Read it from metadata (a
+catalogue, a file listing, an archive's time axis) rather than opening the data to check
+its values. A source can list periods shortly before their data is written: the framework
+does not store empty periods at the end of a run, and fetches them again on a later sync,
+while an empty period followed by one with data (water or cloud over the whole extent) is
+written as it is. See [Empty periods at the end of a run are not
+stored](architecture.md#empty-periods-at-the-end-of-a-run-are-not-stored). A period that is
+only partly written is stored as it is, so if a source fills a period in pieces, clamp
+`periods()` to the last complete one.
+
 **`fetch_period`** — fetches exactly one period and returns it as an `xarray.Dataset`
 normalized to `(t, y, x)`. Write it as a regular (blocking) method and the framework runs
 it in a worker thread, so ordinary blocking I/O is fine; the framework appends the result
@@ -263,7 +273,7 @@ aggregation processes use — they need no forecast awareness.
 
 | Field        | Required | Description                                                                    |
 | ------------ | -------- | ------------------------------------------------------------------------------ |
-| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API             |
+| `id`         | Yes      | Unique template identifier. This becomes the dataset ID in the API and names the dataset's files (and, for a table, its folder): lowercase letters, digits, `_` and `-`, starting with a letter |
 | `name`       | Yes      | Full human-readable name shown in API responses and STAC metadata              |
 | `short_name` | No       | Short label used in compact displays                                           |
 | `variable`   | Yes      | Name of the data variable in the Zarr store (e.g. `precip`, `t2m`, `rainfall`) |
@@ -280,6 +290,7 @@ aggregation processes use — they need no forecast awareness.
 | `period_type`        | Yes      | Temporal resolution: `hourly`, `daily`, `dekadal`, `weekly`, `monthly`, `yearly`, or `climatology`. Validated at registration — an unrecognised value is rejected rather than silently ignored, and it is required unless `sync.kind` is `static` |
 | `sync.kind`          | Yes      | `temporal` — data grows over time; `release` — versioned releases; `static` — never synced                                                                                                                                                        |
 | `sync.execution`     | No       | `append` — new time steps appended to existing store; `rematerialize` — full rebuild on each sync                                                                                                                                                 |
+| `sync.refresh_after` | No       | Temporal append-kind only, for a source that publishes recent periods as a preliminary product and replaces them later (ERA5-Land and ERA5-Heat): an ISO 8601 duration after a period's end when its final version is expected, e.g. `P4M`. A period fetched before then is fetched again, once, by the first sync after it, so set it past the latest the provider finalises a period, with margin. Omit it for a source without a preliminary product. See [Preliminary periods](architecture.md#preliminary-periods) |
 | `sync.version`       | No       | Release-kind only: the release identity, as `value` (the source's own identifier, e.g. WorldPop's `R2025A`) plus `authority` (a machine identifier for whose scheme names it, e.g. `worldpop`). Independent of `period_type`; changing either half triggers a rematerialization even when the periods are unchanged. Both halves required. Rejected at registration on a non-release template, when blank, or when `authority` is not a machine identifier. See below |
 | `temporal_direction` | No       | Which way the periods run relative to now: `past` (default), `future` (a forecast), or `spanning` (crosses now, e.g. WorldPop 2015–2030). See below                                                                                               |
 
@@ -535,7 +546,7 @@ The response reports the window that was actually ingested, under `dataset.exten
 
 Layers whose grid exceeds 1024×1024 cells (about 1.05 megapixels, counted as `nx × ny` rather than per axis) are stored as a multiscale pyramid so the map stays fast when zoomed out. Coarser levels sit beside the full-resolution level 0, which analytics keeps reading, so **analysis results do not change** and the persistent cost is roughly +33% storage.
 
-Building one is not free, though. Level 0 is rewritten rather than kept as-is — the pyramid writer re-chunks it to its own target chunk size — the rebuild goes to a sibling store and is swapped in, so it needs transient disk for a second copy, and it takes longer than a flat write (measured at roughly 2.4× on a 2 GB store, in exchange for around 6× less peak memory).
+Building one is not free, though. Level 0 is rewritten rather than kept as-is — the pyramid writer re-chunks it to its own target chunk size — the rebuild is a new commit in the same store, so it needs disk for a second copy until the old version is collected: at once if its data is more than an hour old, else once it is, and it takes longer than a flat write (measured at roughly 2.4× on a 2 GB store, in exchange for around 6× less peak memory).
 
 Levels are aggregated from the full-resolution data, and `ingestion.resampling` controls how:
 
@@ -575,7 +586,7 @@ keeps its own attributes:
 
 | Field           | Required | Description                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `units`         | No       | Physical units, as a **CF/udunits** string (e.g. `mm`, `mm/d`, `degC`, `kg m-2 s-1`). Validated at registration — a non-udunits value (e.g. `people`) is logged as a warning. Use `""` for a dimensionless quantity (e.g. a standardized index). For unit-aware processes (e.g. SPI) the unit must be _dimensionally_ correct — a precipitation **rate** is `mm/d`, not bare `mm`. |
+| `units`         | No       | Physical units, as a **CF/udunits** string (e.g. `mm`, `mm/d`, `degC`, `kg m-2 s-1`). Validated at registration — a non-udunits value (e.g. `people`) is logged as a warning. Use `""` for a dimensionless quantity (e.g. a standardized index). The unit must be _dimensionally_ correct for unit-aware processes: precipitation totals are `mm`, which processes such as SPI take after [`amount2rate`](climate_indices.md#precipitation-totals-and-rates) turns them into a rate (`mm/d`). |
 | `standard_name` | No       | CF [standard name](https://cfconventions.org/standard-names.html) (e.g. `air_temperature`, `lwe_thickness_of_precipitation_amount`). Set it to `null` when the variable has none, so one a source or process left is removed: CF has no standard name for many derived quantities, and xclim, for one, labels a count of hot days `number_of_days_with_air_temperature_above_threshold` whatever it was counted from. |
 | `cell_methods`  | No       | CF cell methods describing the temporal aggregation (e.g. `time: mean`, `time: sum`).                                                                                                                                                                                                                                                                                              |
 

@@ -21,7 +21,7 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.jobs.models import JobLink, JobRecord
 from open_geo_service.jobs.service import get_job_service
-from open_geo_service.shared.thumbnails import thumbnail_path
+from open_geo_service.shared import layout
 from open_geo_service.shared.urls import mount_prefix
 
 ingestions_router = APIRouter()
@@ -143,7 +143,8 @@ def list_datasets(request: Request, response: Response) -> DatasetListResponse |
     same terms as a single dataset: only a client ranking `text/html` above JSON, with `?f=html`
     and `?f=json` deciding outright.
     """
-    from open_geo_service.system.templates import prefers_html, render_datasets_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_datasets_page
 
     response.headers["Vary"] = "Accept"
     if prefers_html(request):
@@ -166,7 +167,8 @@ def get_dataset(dataset_id: str, request: Request, response: Response) -> Datase
     page links to; `?f=html` and `?f=json` choose explicitly.
     """
     record = services.get_dataset_or_404(dataset_id)
-    from open_geo_service.system.templates import prefers_html, render_dataset_page
+    from open_geo_service.shared.negotiation import prefers_html
+    from open_geo_service.system.templates import render_dataset_page
 
     # Two representations share this URL, so a cache keyed on the URL alone would serve one
     # client the other's. Set on both arms: the JSON arm is a model FastAPI serialises, so the
@@ -191,8 +193,9 @@ def get_dataset_thumbnail(dataset_id: str) -> FileResponse:
     `write_dataset_thumbnail`. The STAC collection only advertises the asset when the file is
     there, so a client following a published href does not meet the 404.
     """
-    path = thumbnail_path(dataset_id)
-    if not path.is_file():
+    artifact = services.get_latest_artifact_for_dataset_or_404(dataset_id)
+    path = layout.find_thumbnail(artifact.format, dataset_id)
+    if path is None:
         raise HTTPException(status_code=404, detail=f"No thumbnail for dataset '{dataset_id}'")
     return FileResponse(path, media_type="image/png")
 
@@ -245,7 +248,7 @@ def serve_icechunk_store_file(dataset_id: str, file_path: str) -> FileResponse:
         import icechunk, zarr
 
         repo = icechunk.Repository.open(icechunk.http_storage("http://<host>/icechunk/<dataset_id>/"))
-        ds = zarr.open(repo.readonly_session("main").store, zarr_format=3)
+        ds = zarr.open(repo.readonly_session("published").store, zarr_format=3)
     """
     return services.serve_icechunk_file(dataset_id, file_path)
 

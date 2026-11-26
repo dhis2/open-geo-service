@@ -68,6 +68,13 @@ def _reader(rows: list[dict[str, Any]]) -> pa.RecordBatchReader:
     return pa.RecordBatchReader.from_batches(schema, [batch])
 
 
+def _catalog(*releases: str, base: str = "https://stac.overturemaps.org/") -> dict[str, Any]:
+    """Overture's root STAC catalogue, its last release the latest, children linked under `base`."""
+    children = [{"rel": "child", "href": f"{base}{r}/catalog.json"} for r in releases]
+    root = {"rel": "self", "href": "https://stac.overturemaps.org/catalog.json"}
+    return {"latest": releases[-1], "links": [root, *children]}
+
+
 @pytest.fixture
 def stub_reader(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     """Substitute the network seam, recording the arguments it was called with."""
@@ -79,6 +86,8 @@ def stub_reader(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def
             return None if rows is None else _reader(rows)
 
         monkeypatch.setattr(overture, "_record_batch_reader", _fake)
+        monkeypatch.setattr(overture, "_catalog", lambda: calls["catalog"])
+        calls["catalog"] = _catalog("r", "2026-09-23.0", "2026-11-18.0")
         return calls
 
     return _install
@@ -383,12 +392,12 @@ def test_the_provider_is_discovered_built_in() -> None:
 
 
 def test_the_release_is_passed_through_as_given(stub_reader: Any) -> None:
-    """The release is the collection's version, so it must not be rewritten or defaulted."""
+    """A named release is the collection's version, so it must not be rewritten."""
     calls = stub_reader([_row("a")])
 
-    overture.overture_features(release="2026-08-19.0", bbox=SIERRA_LEONE)
+    overture.overture_features(release="2026-09-23.0", bbox=SIERRA_LEONE)
 
-    assert calls["release"] == "2026-08-19.0"
+    assert calls["release"] == "2026-09-23.0"
 
 
 def test_the_provider_module_imports_nothing_private() -> None:
@@ -436,20 +445,32 @@ def test_template_params_reach_the_provider_as_keyword_arguments(
     # provider happens to use — that is the seam's job, and a provider may use either.
     collection, _version = feature_services._unpack_provider_result(provider(**params), provider_name="overture")
 
-    assert calls["release"] == template["params"]["release"]
+    assert calls["release"] == "2026-11-18.0"  # the template names none, so the latest is read
     assert [f["properties"] for f in collection["features"]] == [{"id": "a", "subtype": "region"}]
 
 
 # --- the release reaches the record as its version ---------------------------------------------
 
 
-def test_the_provider_reports_the_release_it_read(stub_reader: Any) -> None:
+def test_the_provider_reports_the_release_it_read_the_latest_unless_named(stub_reader: Any) -> None:
     """The second half of the pair: what makes a monthly-release source answerable."""
-    stub_reader([_row("a")])
+    calls = stub_reader([_row("a")])
 
     _collection, release = overture.overture_features(release="2026-09-23.0", bbox=SIERRA_LEONE)
-
     assert release == "2026-09-23.0"
+
+    _collection, release = overture.overture_features(bbox=SIERRA_LEONE)
+    assert (release, calls["release"]) == ("2026-11-18.0", "2026-11-18.0")
+
+    # Overture removes releases after about two months; a pin to one is refused naming those there are.
+    with pytest.raises(ValueError, match=r"'2026-08-20\.0' is no longer published.*'2026-11-18\.0'"):
+        overture.overture_features(release="2026-08-20.0", bbox=SIERRA_LEONE)
+
+    # A server process reads the catalogue again on every run, so it follows a new release, and
+    # the catalogue may link its releases relative to itself.
+    calls["catalog"] = _catalog("2026-10-21.0", "2026-11-18.0", "2026-12-16.0", base="./")
+    _collection, release = overture.overture_features(bbox=SIERRA_LEONE)
+    assert release == "2026-12-16.0"
 
 
 def test_the_reported_release_becomes_the_collection_version(
@@ -461,7 +482,7 @@ def test_the_reported_release_becomes_the_collection_version(
     from open_geo_service.features import templates as feature_templates
     from open_geo_service.ingestions import services as ingestion_services
 
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts / "records.json")
@@ -475,7 +496,7 @@ def test_the_reported_release_becomes_the_collection_version(
     record = feature_services.refresh_feature_collection_from_provider(str(template["id"]))
 
     assert record.version is not None, "the release the provider read was not recorded"
-    assert record.version.value == template["params"]["release"]
+    assert record.version.value == "2026-11-18.0"
     # The authority is the registry name the caller looked the provider up under, never
     # something the provider declared about itself.
     assert record.version.authority == "overture"
@@ -489,7 +510,7 @@ def _feature_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     from open_geo_service import config as api_config
     from open_geo_service.ingestions import services as ingestion_services
 
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts / "records.json")

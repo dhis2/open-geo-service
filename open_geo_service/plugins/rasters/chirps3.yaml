@@ -1,10 +1,10 @@
 - id: chirps3_precipitation_daily
-  name: Precipitation rate (CHIRPS3)
+  name: Precipitation (CHIRPS3)
   short_name: Precipitation
   description: >-
-    Daily rainfall over land at 5 km, from satellite estimates calibrated against station
-    observations. Covers 50 degrees south to 50 degrees north from 1981 onwards.
-  standard_name: lwe_precipitation_rate
+    Daily rainfall total over land at 5 km, from satellite estimates calibrated against station
+    observations. Covers 60 degrees south to 60 degrees north from 1981 onwards.
+  standard_name: lwe_thickness_of_precipitation_amount
   variable: precip
   period_type: daily
   sync:
@@ -12,41 +12,50 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "1981-01-01"
       resolution: P1D
   ingestion:
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin
-  # Daily precipitation as a rate (mm/day): a daily total in mm equals the mean daily
-  # rate (the cell is one day), so this is a relabel, not a value change. Storing precip
-  # as a flux is what xclim drought indices (SPI/SPEI) consume directly.
-  units: mm/d
-  cell_methods: "time: mean"
+  # Every precipitation dataset is a total (CLIM-1638). xclim indices take a rate: convert
+  # with the amount2rate process (docs/climate_indices.md).
+  units: mm
+  cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3
-  source_url: https://www.chc.ucsb.edu/data/chirps3
+  source: CHIRPS v3, via dynamical.org
+  # The page of the mirror the data is read from, as for the other mirrored datasets; CHC, where
+  # it originates, is the producer below.
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    # The mirror the data is read from. The STAC publisher drops the host role, as this instance
+    # is the only host; the description says what dynamical.org hosts.
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
+      description: >-
+        Mirror host: republishes CHIRPS3 final daily as an Icechunk Zarr store on AWS Open Data.
+      roles: [processor, host]
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: -9999.0
 
 # A separate dataset from the final one, not an extension of it: preliminary values are replaced
 # when the final product appears a month or so later, and one store holding both would rewrite
 # its own history with nothing to say which values were provisional.
 - id: chirps3_precipitation_daily_prelim
-  name: Precipitation rate (CHIRPS3, preliminary)
+  name: Precipitation (CHIRPS3, preliminary)
   short_name: Precipitation (preliminary)
   description: >-
-    Daily rainfall over land at 5 km, a few days after it falls, for the current month too.
+    Daily rainfall total over land at 5 km, a few days after it falls, for the current month too.
     Satellite estimates only, without the station blending of the final product, and
     provisional: the final CHIRPS3 daily dataset replaces these values a month or so later.
     Kept from January 2025 onwards.
-  standard_name: lwe_precipitation_rate
+  standard_name: lwe_thickness_of_precipitation_amount
   variable: precip
   period_type: daily
   sync:
@@ -54,7 +63,7 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "2025-01-01"
       resolution: P1D
@@ -62,32 +71,34 @@
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin
     params:
       stage: prelim
-      flavor: sat
-  units: mm/d
-  cell_methods: "time: mean"
+  units: mm
+  cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3 preliminary
-  source_url: https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/prelim/
+  source: CHIRPS v3 preliminary, via dynamical.org
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/
+      description: >-
+        Mirror host: republishes CHIRPS3 preliminary daily as an Icechunk Zarr store on AWS Open
+        Data.
+      roles: [processor, host]
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: -9999.0
 
 - id: chirps3_precipitation_monthly
-  name: Precipitation rate (CHIRPS3, monthly)
+  name: Precipitation (CHIRPS3, monthly)
   short_name: Precipitation
-  # The mm/d trap is why the warning is in the description and not only in a comment here: the
-  # source ships a monthly total, this stores a mean daily rate, and reading one as the other is
-  # wrong by a factor of ~30 while looking entirely plausible.
   description: >-
-    Monthly rainfall over land at 5 km, from satellite estimates calibrated against station
-    observations, from 1981 onwards. Units are mm/d — a MEAN DAILY RATE, not a monthly total.
-    Multiply by the days in the month to get the total.
-  standard_name: lwe_precipitation_rate
+    Monthly rainfall total over land at 5 km, from satellite estimates calibrated against station
+    observations, from 1981 onwards.
+  standard_name: lwe_thickness_of_precipitation_amount
   variable: precip
   period_type: monthly
   sync:
@@ -95,52 +106,55 @@
     execution: append
   extents:
     spatial:
-      bbox: [-180, -50, 180, 50]
+      bbox: [-180, -60, 180, 60]
     temporal:
       begin: "1981-01-01"
       resolution: P1M
   ingestion:
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugin
-  # The source raster is a monthly *total* in mm — confirmed against the sum of the same
-  # month's dailies, which matches exactly — so the plugin divides by the number of days to
-  # store a mean daily rate. Unlike the daily dataset this is a real conversion, not a
-  # relabel. mm/d is what every other monthly precipitation dataset here uses, including
-  # chirps3_precipitation_monthly_normal_1991_2020 below: storing the raw total under the
-  # same units would make a monthly anomaly against that normal wrong by a factor of ~30.
-  units: mm/d
-  cell_methods: "time: mean"
+  # The month's total, summed from the final daily product. Its normal and anomalies below are
+  # monthly totals too, so the observed, normal and anomaly chain stays in one unit.
+  units: mm
+  cell_methods: "time: sum"
   resolution: 5 km x 5 km
-  source: CHIRPS v3 (monthly)
-  source_url: https://www.chc.ucsb.edu/data/chirps3
+  source: CHIRPS v3 (monthly total of the daily product), via dynamical.org
+  source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
   license: CC-BY-4.0
   providers:
     - name: UCSB Climate Hazards Center
       url: https://www.chc.ucsb.edu/data/chirps
+      roles: [producer, licensor]
+    - name: dynamical.org
+      url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-final/
+      description: >-
+        Mirror host: republishes CHIRPS3 final daily as an Icechunk Zarr store on AWS Open Data.
+      roles: [processor, host]
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: -9999.0
 
 # ---------------------------------------------------------------------------
 # Climate-normal output templates for the `climate_normal` openEO workflow (normals
 # computed from the already-ingested CHIRPS3 store). No ingestion plugin — the data is
-# produced by the workflow and published via save_result. Run the workflow on
-# chirps3_precipitation_daily; `frequency` selects day-of-year (366) or month (12).
-# Monthly values are the mean daily rate per calendar month. The reference period is
-# baked into the id (e.g. _1991_2020); add a copy with a new period when one is adopted.
+# produced by the workflow and published via save_result. Run the workflow with
+# `frequency: dayofyear` on chirps3_precipitation_daily for the daily normal, and with
+# `frequency: month` on chirps3_precipitation_monthly for the monthly one: the mean of monthly
+# totals (WMO-No. 1203). The reference period is baked into the id (e.g. _1991_2020); add a
+# copy with a new period when one is adopted.
 # ---------------------------------------------------------------------------
 
 - id: chirps3_precipitation_daily_normal_1991_2020
   name: Precipitation daily normal (CHIRPS3, 1991–2020)
   short_name: Precipitation daily normal
   description: >-
-    Average CHIRPS rainfall for each day of the year over 1991-2020. The baseline a daily anomaly
-    is measured against.
+    Average CHIRPS daily rainfall total for each day of the year over 1991-2020. The baseline a
+    daily anomaly is measured against.
   variable: precip
   period_type: climatology
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_normal workflow)
   produced_by: climate_normal
   license: CC-BY-4.0
@@ -149,20 +163,20 @@
       url: https://www.chc.ucsb.edu/data/chirps
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: -9999.0
 
 - id: chirps3_precipitation_monthly_normal_1991_2020
   name: Precipitation monthly normal (CHIRPS3, 1991–2020)
   short_name: Precipitation monthly normal
   description: >-
-    Average CHIRPS rainfall for each calendar month over 1991-2020. The baseline a monthly anomaly
-    is measured against.
+    Average CHIRPS monthly rainfall total for each calendar month over 1991-2020. The baseline a
+    monthly anomaly is measured against.
   variable: precip
   period_type: climatology
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_normal workflow)
   produced_by: climate_normal
   license: CC-BY-4.0
@@ -171,14 +185,14 @@
       url: https://www.chc.ucsb.edu/data/chirps
   display:
     colormap: blues
-    range: [0.0, 20.0]
+    range: [0, p98]
     nodata: -9999.0
 
 # Anomaly output template for the `climate_anomaly` workflow (observed − normal, by
 # day-of-year). No ingestion plugin — produced by the workflow; refresh by re-running.
 # Relative counterpart of the template above, for `method: "relative"`. A separate template
-# because the process changes the unit: percent-of-normal is not a rain rate, and publishing
-# one under the other's `mm/d` is refused at save time. Range is percent, so ±100.
+# because the process changes the unit: percent-of-normal is not a rainfall total, and
+# publishing one under the other's `mm` is refused at save time. Range is percent, so ±100.
 - id: chirps3_precipitation_daily_relative_anomaly_1991_2020
   name: Precipitation daily relative anomaly (CHIRPS3, vs 1991–2020 normal)
   short_name: Precipitation anomaly (%)
@@ -199,6 +213,9 @@
   display:
     colormap: RdBu
     midpoint: 0
+    # Fixed, not measured: a relative anomaly cannot fall below -100% but has no upper bound,
+    # and where the normal is near zero one shower reads as +1000%. A measured range centred
+    # on 0 would follow that tail and leave a total drought near neutral.
     range: [-100.0, 100.0]
     nodata: -9999.0
 
@@ -212,7 +229,7 @@
   period_type: daily
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_anomaly workflow)
   produced_by: climate_anomaly
   license: CC-BY-4.0
@@ -222,20 +239,19 @@
   display:
     colormap: RdBu
     midpoint: 0
-    range: [-20.0, 20.0]
     nodata: -9999.0
 
 - id: chirps3_precipitation_monthly_anomaly_1991_2020
   name: Precipitation monthly anomaly (CHIRPS3, vs 1991–2020 normal)
   short_name: Precipitation monthly anomaly
   description: >-
-    A month's CHIRPS rainfall minus its 1991-2020 normal, as a mean daily rate. Negative is drier
-    than usual, positive wetter.
+    A month's CHIRPS rainfall total minus its 1991-2020 normal. Negative is drier than usual,
+    positive wetter.
   variable: precip
   period_type: monthly
   sync:
     kind: static
-  units: mm/d
+  units: mm
   source: Derived (climate_anomaly workflow)
   # Refreshed after each update of chirps3_precipitation_monthly, once the anomaly was created.
   produced_by:
@@ -252,15 +268,11 @@
   display:
     colormap: RdBu
     midpoint: 0
-    # Tighter than the daily ±20: a monthly mean rate averages the extremes away, so a measured
-    # Sierra Leone monsoon anomaly sits near ±2.5 mm/d and ±20 renders as blank white. The
-    # ERA5-Land monthly template carries the same range for the same reason.
-    range: [-10.0, 10.0]
     nodata: -9999.0
 
 - id: chirps3_precipitation_monthly_relative_anomaly_1991_2020
   name: Precipitation monthly relative anomaly (CHIRPS3, vs 1991–2020 normal)
-  short_name: Precipitation anomaly (%)
+  short_name: Precipitation monthly anomaly (%)
   description: >-
     How far a month's CHIRPS rainfall sits from its 1991-2020 normal, as a percentage of that
     normal. Negative is drier than usual, positive wetter.
@@ -286,5 +298,6 @@
   display:
     colormap: RdBu
     midpoint: 0
+    # Fixed for the same reason as the daily relative anomaly.
     range: [-100.0, 100.0]
     nodata: -9999.0

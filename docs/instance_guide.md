@@ -140,6 +140,7 @@ plugins_dir: ./plugins/
 | `extent.country_code` | No | ISO 3166-1 alpha-3 — required for WorldPop downloads |
 | `data_dir` | Yes | Directory for downloaded files and Zarr stores, resolved relative to the config file |
 | `plugins_dir` | No | Directory containing `rasters/`, `vectors/`, `processes/` and `workflows/` plugin subdirectories |
+| `snapshot_retention_days` | No | How long a raster store keeps the versions it replaced, for rollback and for readers still on them. One snapshot per sync; about 1.8 MB a day for an appending daily store, so tens of MB per dataset at the default. `0` keeps only the current version. Defaults to `30` |
 | `read_only` | No | Set `true` to refuse all state-changing requests — see [Read-only instances](#read-only-instances). Defaults to `false` |
 | `scheduler` | No | Instance-level scheduled dataset-sync configuration. See [Scheduled dataset synchronization](scheduled_sync.md) |
 
@@ -320,9 +321,39 @@ connection = openeo.connect("https://geoservice.example.org").authenticate_basic
 ```
 
 `GET /me` reports the token a request ran as. Each token sees and changes only the batch jobs
-and stored process graphs it created; an `operator` token reaches all of them. The web interface has no sign-in yet, so with
-authentication on its forms are refused; operators act through the API until it does. The
-design and the later steps are in [Authentication and authorization](authentication.md).
+and stored process graphs it created; an `operator` token reaches all of them.
+
+In the web interface, **Sign in** in the header takes a token and opens a session for 8 hours,
+until **Sign out**, or until the instance restarts. Signed out, or signed in with an
+`authenticated` token, the pages stay readable and their forms say they need an operator token.
+Sign-in is offered only over HTTPS or on `localhost`, so a token is never sent in clear; over
+plain HTTP from another machine the page says so instead of showing the form. Behind a proxy that
+terminates TLS or rewrites the `Host` header, set `GEOSERVICE_BASE_URL` to the public origin, so
+the pages' origin is recognised; without it, sign-in is refused as coming from another site.
+
+A private instance can gate reads too:
+
+```yaml
+authentication:
+  gate_reads: true
+  tokens: [...]
+```
+
+Then every read (the pages, STAC, Zarr, Icechunk, GeoParquet, PMTiles, thumbnails, `/datasets`,
+`/features`, `/processes`) needs a token of either tier, and a signed-out browser is sent to the
+sign-in page. What a client needs to find out how to sign in stays public: openEO capabilities at
+`GET /` with `Accept: application/json`, `/.well-known/openeo`, `/credentials/*`, the API
+reference, `/health` and `/me`. The STAC catalog and collections declare `basic` and `bearer`
+schemes with the STAC Authentication extension. A client may send `Basic` with the token id as
+the username and the secret as the password, which is what QGIS, GDAL (`GDAL_HTTP_USERPWD`) and
+STAC Browser can send; deploy STAC Browser with `authConfig: {type: "http", scheme: "basic"}`,
+since it does not offer a sign-in from the catalog's schemes. Its catalog page loads thumbnails
+as plain images, which carry no credential, so they stay blank until signed URLs arrive
+(CLIM-1482); a collection's own page shows its thumbnail. Every response is marked
+`Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
+another. Open Geo Service refuses to start with `gate_reads` and no token.
+
+The design and the later steps are in [Authentication and authorization](authentication.md).
 
 ### Read-only instances
 
@@ -345,10 +376,49 @@ ingestion and sync (the pages leave their forms out), stored process graph write
 schedules, pipelines and export delivery. No token lifts read-only mode.
 
 Read-only applies to HTTP only, so ingestion becomes an operator task on the host. Until a
-CLI command exists, run it inside the container or virtualenv:
+CLI command exists, run it inside the container or virtualenv. The process becomes the
+instance's writer at its first write (see [One writer per instance](#one-writer-per-instance)):
 
 ```python
 from open_geo_service.ingestions.processes import execute_ingestion
 
 execute_ingestion(dataset_id="era5land_temperature_monthly", start="2016-01", end="2016-12")
 ```
+
+### One writer per instance
+
+One process writes to an instance's data folder: ingestion, sync, scheduled runs, pipelines and
+jobs all run in it. This is a permanent rule, not a current limitation. Writes are periodic and
+reads are constant, and reads scale without more writers.
+
+- **The writer** holds the writer lease: a lock on `writer.lock` in the data folder, with who
+  holds it in `writer.json` beside it. The server of an instance without `read_only: true`
+  takes it at startup, and any other process at its first write (a raster store, a feature
+  collection, a table, or a record such as a job). Each keeps it until it exits.
+- **A second writer is refused.** A second server on the same data folder (another replica),
+  a host command such as `migrate_layout`, or a script that writes stops with an error naming
+  the holder, its process id and host. Nothing waits: stop the writer first, or make the
+  second server read-only.
+- **One worker.** Run a writing server with one uvicorn worker. With `--workers 2`, the second
+  worker is refused and uvicorn stops the whole server.
+- **Readers run beside it.** Any number of `read_only: true` servers can serve the same data
+  folder to more users. They take no lease, recover no jobs and refuse every write, so a
+  read-only server never becomes the writer, not even when none is running.
+- **Different datasets are no exception.** Two writers on different datasets are not
+  supported either.
+
+The operating system releases the lock when the writer exits, so a crashed writer never
+blocks the next one. A writer that hangs keeps it until it is stopped.
+
+The lock is only seen by processes that share the data folder's filesystem:
+
+- **Docker Desktop (macOS, Windows):** the server runs in a virtual machine, and a process on
+  the host probably does not see its lock. Run host commands inside the container
+  (`docker compose exec`), not beside it.
+- **Network filesystems:** NFS supports the lock when its lock service runs. SMB, Azure Files
+  and FUSE mounts such as gcsfuse or s3fs may not. Keep the writer's data folder local.
+- **Rolling restarts:** a new writer is refused while the old one runs. On Kubernetes, use the
+  `Recreate` deployment strategy rather than `RollingUpdate`, so the old pod stops first.
+  Docker Compose stops the old container before starting the new one. Versions before the
+  writer lease do not take it, so when upgrading from one, stop the old server before starting
+  the new one.

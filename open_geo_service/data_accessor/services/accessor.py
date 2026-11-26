@@ -15,6 +15,7 @@ from ...data_manager.services.utils import get_time_dim, get_x_y_dims
 from ...shared import forecast
 from ...shared.crs import dataset_crs
 from ...shared.netcdf import write_netcdf
+from ...shared.provisional import FETCHED_AT
 from ...shared.time import numpy_datetime_to_period_string
 
 logger = logging.getLogger(__name__)
@@ -104,14 +105,15 @@ def get_data_coverage_for_paths(
     *,
     zarr_path: str | None = None,
     icechunk_path: str | None = None,
+    branch: str = "main",
 ) -> dict[str, Any]:
-    """Return coverage metadata for the concrete files created for one artifact."""
+    """Return coverage metadata for the concrete files created for one artifact, at *branch* of an Icechunk store."""
     provided = sum(value is not None for value in (zarr_path, icechunk_path))
     if provided != 1:
         raise ValueError("Coverage calculation requires exactly one artifact source")
 
     if icechunk_path is not None:
-        ds = open_icechunk_dataset(icechunk_path)
+        ds = open_icechunk_dataset(icechunk_path, branch=branch)
     else:
         assert zarr_path is not None
         ds = open_zarr_dataset(zarr_path)
@@ -212,13 +214,22 @@ def _open_zarr_group(store: Any, group: str | None, *, chunks: Any) -> xr.Datase
     return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks)  # type: ignore[no-any-return]
 
 
-def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True) -> xr.Dataset:
-    """Open an Icechunk-backed dataset through a readonly repository session.
+def open_icechunk_dataset(
+    store_path: str | Path, *, merge_time: bool = True, branch: str | None = None, with_fetched_at: bool = False
+) -> xr.Dataset:
+    """Open an Icechunk-backed dataset through a readonly session pinned to the version it opened.
+
+    Opens what readers see (``published``, or ``main`` before the first publish) unless a writer
+    names its *branch*.
 
     Dask chunks follow the stored chunks in space and merge them along time up to
     ``READ_CHUNK_TARGET_BYTES``, so computations are sized for dask rather than for storage.
     ``merge_time=False`` keeps the stored chunks along time as well, for a rewrite whose
     layout follows the source's chunks (a pyramid build, see ``_maybe_build_pyramid``).
+
+    The ``fetched_at`` coordinate, which records when each period was fetched for the sync
+    planner, is dropped unless ``with_fetched_at`` asks for it: it is bookkeeping, and every
+    consumer (aggregation, openEO, exports, STAC) would otherwise carry it along (CLIM-931).
     """
     import icechunk
 
@@ -227,7 +238,12 @@ def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True) ->
         raise FileNotFoundError(f"Icechunk store not found: {path}")
     storage = icechunk.local_filesystem_storage(str(path))
     repo = icechunk.Repository.open(storage)
-    session = repo.readonly_session("main")
+    if branch is None:
+        from open_geo_service.streaming.store import read_snapshot
+
+        session = repo.readonly_session(snapshot_id=read_snapshot(repo))
+    else:
+        session = repo.readonly_session(branch)
     # Opened without dask first: it finds where the data lives (the root, or a pyramid's level
     # 0) and the stored chunk shape, before the dask chunks are chosen.
     group: str | None = None
@@ -254,6 +270,8 @@ def open_icechunk_dataset(store_path: str | Path, *, merge_time: bool = True) ->
         ds = _open_zarr_group(session.store, group, chunks={})
     else:
         ds = _open_zarr_group(session.store, group, chunks="auto")
+    if not with_fetched_at and FETCHED_AT in ds.variables:
+        ds = ds.drop_vars(FETCHED_AT)
     if t_dim is not None:
         ds = ds.sortby(t_dim)
     from open_geo_service.shared.provenance import record_snapshot

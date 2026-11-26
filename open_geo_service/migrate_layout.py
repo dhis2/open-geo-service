@@ -1,6 +1,8 @@
 """Move an instance onto the rasters/vectors folder layout (CLIM-1253).
 
-Run once per instance, with its server stopped, from the directory its ``.env`` is in:
+Run once per instance, with its server stopped, from the directory its ``.env`` is in. It
+refuses while a server that holds the writer lease runs, but a server from before the lease
+holds none, so during an upgrade stopping the server is up to you:
 
     python -m open_geo_service.migrate_layout [--dry-run]
 
@@ -20,12 +22,14 @@ import argparse
 import json
 import re
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]  # loads .env
 from open_geo_service import config as api_config
+from open_geo_service import writer_lease
 from open_geo_service.shared.persistence import atomic_text
 
 DATA_RENAMES = (("downloads", "rasters"), ("features", "vectors"))
@@ -210,18 +214,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="report the changes without making them")
     args = parser.parse_args(argv)
     try:
-        plan = build_plan()
-    except MigrationError as exc:
+        # The plan is built under the lease, so no writer changes what it read before it is applied.
+        # Without a data folder there is nothing for a server to write, and taking the lease would create one.
+        writing = not args.dry_run and api_config.get_data_root().is_dir()
+        with writer_lease.hold("migrate_layout") if writing else nullcontext():
+            plan = build_plan()
+            if plan.empty:
+                print("Nothing to migrate: this instance already uses rasters/ and vectors/.")
+                return 0
+            for line in describe(plan):
+                print(("would " if args.dry_run else "") + line)
+            if args.dry_run:
+                return 0
+            apply(plan)
+    except (MigrationError, writer_lease.WriterLeaseHeld) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    if plan.empty:
-        print("Nothing to migrate: this instance already uses rasters/ and vectors/.")
-        return 0
-    for line in describe(plan):
-        print(("would " if args.dry_run else "") + line)
-    if not args.dry_run:
-        apply(plan)
-        print("Done. Restart the server.")
+    print("Done. Restart the server.")
     return 0
 
 

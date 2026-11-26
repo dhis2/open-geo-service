@@ -17,25 +17,22 @@ import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
 
+from open_geo_service import config as api_config
 from open_geo_service.data_accessor.services import accessor
-from open_geo_service.data_manager.services import downloader
 
 
 @pytest.fixture(autouse=True)
 def _empty_store_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     """Point the data directory at an empty temp dir, so "fresh instance" is what it says.
 
-    `DOWNLOAD_DIR` is resolved at module import, and `conftest.py` imports the app before its
-    session fixture installs a temporary config — so without this the tests read the developer's
-    real XDG stores. That made the whole-catalogue check host-dependent: slow, and passing or
-    failing on which datasets happen to be ingested locally, with a corrupt local store failing
-    it for a reason unrelated to the code.
+    Without this the tests read the session's shared test instance, which other tests write to,
+    so the whole-catalogue check would pass or fail on what those tests left there.
 
     Redirecting the directory rather than stubbing the absent-data result keeps the real
     two-source fall-through in play — icechunk miss, zarr miss — so the code under
     test still runs. Stubbing it would assert that a stub returns stubs.
     """
-    monkeypatch.setattr(downloader, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
 
 
 def _cube() -> xr.Dataset:
@@ -93,7 +90,7 @@ def test_a_template_with_nothing_ingested_is_returned_with_null_coverage(
     assert body["coverage"]["temporal"] == {"start": None, "end": None}
     assert body["coverage"]["spatial_wgs84"] is None
     # The declaration itself still has to survive.
-    assert body["units"] == "mm/d"
+    assert body["units"] == "mm"
 
 
 def test_a_template_with_data_still_reports_derived_coverage(

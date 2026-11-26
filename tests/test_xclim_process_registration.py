@@ -68,6 +68,7 @@ def test_registered_indicator_returns_a_data_array() -> None:
     import numpy as np
     import pandas as pd
     import xarray as xr
+    from xclim.core.options import get_options
 
     t = pd.date_range("2000-01-01", periods=731, freq="D")
     tas = xr.DataArray(
@@ -80,6 +81,7 @@ def test_registered_indicator_returns_a_data_array() -> None:
     assert isinstance(result, xr.DataArray)
     assert result.dims == ("t",)
     assert result.values.tolist() == [296.0, 296.0]
+    assert get_options()["as_dataset"] is True  # switched off for the call only
 
 
 def test_single_output_indicators_are_still_registered() -> None:

@@ -15,21 +15,22 @@ from open_geo_service.data_accessor.services.accessor import (
 )
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.ingestions import services as ingestion_services
+from open_geo_service.shared import layout
 
 
-def test_resolve_download_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_raster_stores_live_in_the_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config_file = tmp_path / "geoservice.yaml"
     config_file.write_text("data_dir: ./data\nextent:\n  id: test\n", encoding="utf-8")
     monkeypatch.setenv("GEOSERVICE_CONFIG", str(config_file))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert downloader._resolve_download_dir() == tmp_path / "data" / "rasters"
+    assert layout.raster_store("rain") == tmp_path / "data" / "rasters" / "rain.icechunk"
 
 
-def test_resolve_download_dir_uses_xdg_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raster_stores_live_under_xdg_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory() as xdg:
         monkeypatch.delenv("GEOSERVICE_CONFIG", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", xdg)
-        assert downloader._resolve_download_dir() == Path(xdg) / "geoservice" / "rasters"
+        assert layout.raster_store("rain") == Path(xdg) / "geoservice" / "rasters" / "rain.icechunk"
 
 
 def test_resolve_artifacts_dir_uses_data_dir_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -1,9 +1,10 @@
 """Table datasets as a pipeline destination: a workflow's value per feature and period, kept in OGS (CLIM-1554).
 
-The `table` destination renders a workflow's vector cube to the rows of a table dataset and
-delivers them through the one writer, `tables.store.write_rows`. The payload is those rows as a
-Parquet file, checked against the store when rendered, so a dry run reports what the writer
-would accept and a delivery merges exactly what was rendered into the table's current-value file.
+The `table` destination renders a workflow's vector cube to the rows of a table dataset, in the
+built-in aggregation schema (`tables.schemas`), and delivers them through the one writer,
+`tables.store.write_rows`. The payload is those rows as a Parquet file, checked against the store
+when rendered, so a dry run reports what the writer would accept and a delivery merges exactly
+what was rendered into the table's current-value file.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ from open_geo_service.exports.base import (
 )
 from open_geo_service.exports.report import ExportOutcome, ExportReport
 from open_geo_service.ingestions.schemas import ArtifactProvenance
-from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
-from open_geo_service.shared.urls import SEGMENT_SAFE_ID_PATTERN
+from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION, PARQUET_MEDIA_TYPE
+from open_geo_service.shared.urls import ID_RULE, SEGMENT_SAFE_ID_PATTERN, require_segment_safe_id
 from open_geo_service.shared.vectors import GEOMETRY_FIELD, SPATIAL_REDUCER_ATTR
 
 _PERIOD_FIELD = "t"
@@ -37,6 +38,8 @@ _CLASS_LABEL_FIELD = "class_label"
 _MAPPING_FIELDS = ("dataset_id", "collection_id", "name", "period_type", "unit")
 # Dataset-level facts travel in the Parquet footer, so `send` needs nothing but the payload.
 _NAME_KEY = b"ogs:dataset_name"
+SCHEMA = "aggregation"
+"""The table schema the destination writes: values aggregated per feature and period (`tables.schemas`)."""
 
 
 class TableDestinationSettings(BaseModel):
@@ -88,7 +91,7 @@ class TableExportPlugin(BaseExportPlugin):
                 "served at /tables/{id}/rows. A revised value replaces the previous one."
             ),
             fields=(
-                SettingsFormField(name="dataset_id", label="Dataset id", help_text="Letters, digits, '.', '_', '-'."),
+                SettingsFormField(name="dataset_id", label="Dataset id", help_text=f"Must {ID_RULE}."),
                 SettingsFormField(name="name", label="Name", help_text="Optional display name."),
             ),
         )
@@ -193,8 +196,9 @@ class TableExportPlugin(BaseExportPlugin):
             raise ValueError(f"Unsupported table mapping fields {unknown}")
         for field in ("dataset_id", "collection_id"):
             value = mapping.get(field)
-            if not isinstance(value, str) or not SEGMENT_SAFE_ID_PATTERN.fullmatch(value):
-                raise ValueError(f"table mapping requires {field}: letters, digits, '.', '_' or '-'")
+            if not isinstance(value, str):
+                raise ValueError(f"table mapping requires {field}")
+            require_segment_safe_id(value, f"table mapping {field}")
         for field in ("name", "period_type", "unit"):
             if field in mapping and not isinstance(mapping[field], str):
                 raise ValueError(f"table mapping {field} must be a string")
@@ -234,13 +238,14 @@ class TableExportPlugin(BaseExportPlugin):
             dataset_id=mapping["dataset_id"],
             collection_id=mapping["collection_id"],
             rows=rows,
+            schema=SCHEMA,
             period_type=period_type,
             written_at=datetime.now(UTC),
         )
         # The store's metadata carries the period type; the payload adds the dataset name.
         metadata = {**(table.schema.metadata or {}), _NAME_KEY: mapping.get("name", mapping["dataset_id"]).encode()}
         sink = pa.BufferOutputStream()
-        pq.write_table(table.replace_schema_metadata(metadata), sink)
+        pq.write_table(table.replace_schema_metadata(metadata), sink, compression=PARQUET_COMPRESSION)
         # The period type the store settled on, which may be the dataset's own.
         resolved = metadata.get(store.PERIOD_TYPE_KEY)
         period_type = resolved.decode() if resolved else None
@@ -273,13 +278,14 @@ class TableExportPlugin(BaseExportPlugin):
             "dataset_id": table.column("dataset_id")[0].as_py(),
             "collection_id": table.column("collection_id")[0].as_py(),
             "rows": rows,
+            "schema": SCHEMA,
             "written_at": table.column("written_at")[0].as_py(),
         }
         outcome = ExportOutcome.DRY_RUN if dry_run else ExportOutcome.SUCCESS
         message: str | None = None
         try:
             if dry_run:
-                store.check_rows(**arguments, period_type=period_type)
+                store.check_rows(**arguments, period_type=period_type, provenance=_provenance(context))
             else:
                 store.write_rows(
                     **arguments, dataset_name=name, period_type=period_type, provenance=_provenance(context)

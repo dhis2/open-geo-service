@@ -13,9 +13,22 @@ logger = logging.getLogger(__name__)
 
 _cache: list[Any] | None = None
 
-# The xclim realms registered as processes. `convert` (unit and variable conversions) and
-# `generic` are left out.
+# The xclim realms registered as processes. `generic` is left out, and of `convert` only the
+# water-budget chain SPEI needs is registered: its humidity and vapour-pressure converters repeat
+# the earthkit-meteo processes under other names.
 _REALMS = ("atmos", "land", "seaIce")
+_CONVERTERS = frozenset({"potential_evapotranspiration", "water_budget", "water_budget_from_tas"})
+
+# Deprecated indicators left out for their replacements; docs/climate_indices.md gives the
+# arguments that keep their values. An xclim upgrade that deprecates another indicator fails
+# `test_every_deprecated_indicator_is_replaced` until it is reviewed and added here.
+REPLACED = {
+    "cdd": "dry_spell_max_length",
+    "cwd": "wet_spell_max_length",
+    "heat_wave_index": "hot_spell_total_length",
+    "cold_spell_days": "cold_spell_total_length",
+    "maximum_consecutive_warm_days": "hot_spell_max_length",
+}
 
 
 def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
@@ -26,6 +39,9 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     directly). This renames ``t`` -> ``time`` on every xarray argument on the way
     in, and renames ``time`` -> ``t`` back on the result, so xclim works against our
     cubes without the caller adding ``rename_dimension`` to every process graph.
+
+    It also marks ``y`` as latitude on a cube in a geographic CRS, which is how xclim finds the
+    latitude that indicators such as ``potential_evapotranspiration`` need.
     """
     import xarray as xr
 
@@ -33,7 +49,10 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
 
     def _to_time(value: Any) -> Any:
         nonlocal renamed
-        if isinstance(value, (xr.DataArray, xr.Dataset)) and "t" in value.dims and "time" not in value.dims:
+        if not isinstance(value, (xr.DataArray, xr.Dataset)):
+            return value
+        value = _with_cf_latitude(value)
+        if "t" in value.dims and "time" not in value.dims:
             renamed = True
             return value.rename({"t": "time"})
         return value
@@ -53,6 +72,21 @@ def call_with_ogs_time_dim(func: Any, *args: Any, **kwargs: Any) -> Any:
     if isinstance(result, tuple):
         return tuple(_to_t(item) for item in result)
     return _to_t(result)
+
+
+def _with_cf_latitude(value: Any) -> Any:
+    """Return ``value`` with its ``y`` coordinate labelled CF latitude, if its CRS is geographic.
+
+    A cube without a CRS is left alone: its ``y`` may be a projected coordinate in metres.
+    """
+    import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates the .rio accessor
+
+    if "y" not in value.coords or "standard_name" in value["y"].attrs:
+        return value
+    crs = value.rio.crs
+    if crs is None or not crs.is_geographic:
+        return value
+    return value.assign_coords(y=value["y"].assign_attrs(standard_name="latitude", units="degrees_north"))
 
 
 def scan() -> list[Any]:
@@ -104,7 +138,8 @@ def _collect() -> list[Any]:
     # Registry keys are lower-cased identifiers, used as process ids. Dotted keys are the anuclim,
     # cf and icclim collections, which repeat the core indicators under their own names.
     for indicator_id, obj in registry.items():
-        if "." in indicator_id or obj.realm not in _REALMS:
+        registered = obj.realm in _REALMS or indicator_id in _CONVERTERS
+        if "." in indicator_id or not registered or indicator_id in REPLACED:
             continue
 
         # Every spec below declares a single datacube return, so an indicator producing
@@ -173,22 +208,12 @@ def _make_callable(indicator: Any, meta: dict[str, Any], accepted: set[str] | No
         if unknown:
             known = ", ".join(p["name"] for p in meta["parameters"])
             raise TypeError(f"{meta['id']} has no parameter {', '.join(unknown)}; its parameters are {known}")
-        return _single_output(call_with_ogs_time_dim(indicator, **kwargs))
+        from xclim.core.options import set_options
+
+        # xclim 1.0 indicators return a Dataset by default; a process returns the cube itself.
+        # The option is per thread since xclim 1.0.1, so concurrent jobs do not see it (CLIM-1767).
+        with set_options(as_dataset=False):
+            return call_with_ogs_time_dim(indicator, **kwargs)
 
     setattr(_call, _GEOSERVICE_PROCESS_ATTR, meta)
     return _call
-
-
-def _single_output(result: Any) -> Any:
-    """Return the one cube of a single-output indicator.
-
-    xclim 1.0 indicators return a Dataset by default. Its ``as_dataset`` option is a process-wide
-    global with no per-call override, and jobs run in threads, so we unwrap the result here
-    rather than switch the option off around the call (CLIM-1767).
-    """
-    import xarray as xr
-
-    if isinstance(result, xr.Dataset):
-        (name,) = result.data_vars
-        return result[name]
-    return result

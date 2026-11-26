@@ -29,7 +29,7 @@ from matplotlib.colors import to_hex
 
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.ingestions import services as ingestion_services
-from open_geo_service.shared import thumbnails
+from open_geo_service.shared import layout, thumbnails
 from open_geo_service.shared.thumbnails import (
     THUMBNAIL_LONG_SIDE_PIXELS,
     colormap_stops,
@@ -38,7 +38,6 @@ from open_geo_service.shared.thumbnails import (
     representative_slice,
     resolve_colormap,
     stretch_range,
-    thumbnail_path,
     write_dataset_thumbnail,
 )
 
@@ -334,7 +333,7 @@ def test_the_store_is_closed_once_the_pixels_are_read(tmp_path: Path, monkeypatc
             closed.append(True)
             self._ds.close()
 
-    monkeypatch.setattr(accessor, "open_icechunk_dataset", lambda path: Tracked(real_open(path)))
+    monkeypatch.setattr(accessor, "open_icechunk_dataset", lambda path, **kw: Tracked(real_open(path, **kw)))
 
     assert write_dataset_thumbnail(_store(tmp_path, _daily_cube(2)), DATASET, now=GENERATED_AT) is not None
     assert closed == [True]
@@ -354,7 +353,7 @@ def test_a_failing_render_does_not_fail_the_ingest(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(thumbnails, "render_png", explode)
 
     assert write_dataset_thumbnail(store, DATASET, now=GENERATED_AT) is None
-    assert not thumbnail_path("thumb_dataset").exists()
+    assert not layout.thumbnail(layout.Kind.RASTER, "thumb_dataset").exists()
 
 
 def test_an_unreadable_store_does_not_fail_the_ingest(tmp_path: Path) -> None:
@@ -576,7 +575,7 @@ def test_a_multi_period_sync_never_reaches_the_renderer(tmp_path: Path, monkeypa
             )
 
     store_path = tmp_path / "streaming.zarr"
-    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path: not path.exists())
+    monkeypatch.setattr(streaming_orchestrator, "is_store_empty", lambda path, **_: not path.exists())
 
     result = streaming_orchestrator.run_streaming_ingest_sync(
         plugin=_Plugin(),
@@ -609,7 +608,7 @@ def test_one_ingest_produces_exactly_one_render(tmp_path: Path, monkeypatch: pyt
     def fake_sync(**kwargs: object) -> object:
         # Stand in for a three-period sync: the store the finalisation sees is the finished one.
         downloader.write_to_icechunk_store(_daily_cube(3), store_path, commit_message="test")
-        return SimpleNamespace(periods_written=3)
+        return SimpleNamespace(periods_written=3, held_back=[], refreshed_indices=[])
 
     renders: list[Any] = []
     real_render = thumbnails.render_png
@@ -653,7 +652,7 @@ def test_one_ingest_produces_exactly_one_render(tmp_path: Path, monkeypatch: pyt
     )
 
     assert len(renders) == 1
-    assert thumbnail_path("thumb_dataset").is_file()
+    assert layout.thumbnail(layout.Kind.RASTER, "thumb_dataset").is_file()
 
 
 # -- how it reaches a client ----------------------------------------------------------------
@@ -724,7 +723,7 @@ def _published(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _write_a_thumbnail() -> Path:
-    path = thumbnail_path("thumb_dataset")
+    path = layout.thumbnail(layout.Kind.RASTER, "thumb_dataset")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"\x89PNG\r\n\x1a\n fake but on disk")
     return path
@@ -754,7 +753,7 @@ def test_the_collection_omits_the_thumbnail_when_there_is_none(client: TestClien
     assert "zarr" in payload["assets"]
 
 
-def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
+def test_the_route_serves_the_thumbnail(client: TestClient, _published: None) -> None:
     written = _write_a_thumbnail()
 
     response = client.get("/datasets/thumb_dataset/thumbnail.png")
@@ -766,5 +765,5 @@ def test_the_route_serves_the_thumbnail(client: TestClient) -> None:
     assert client.head("/datasets/thumb_dataset/thumbnail.png").status_code == 200
 
 
-def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient) -> None:
+def test_the_route_404s_when_a_dataset_has_no_thumbnail(client: TestClient, _published: None) -> None:
     assert client.get("/datasets/thumb_dataset/thumbnail.png").status_code == 404

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import csv
+import errno
 import io
 import math
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
+from open_geo_service.shared import layout, versions
 from open_geo_service.tables import store
 
 FIRST = datetime(2026, 3, 1, tzinfo=UTC)
@@ -36,8 +40,7 @@ def _box(code: str, west: float, south: float) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def stores(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Temporary feature, table and record stores, with a registered 'districts' collection."""
-    monkeypatch.setattr(api_config, "get_features_root", lambda: tmp_path / "vectors")
-    monkeypatch.setattr(api_config, "get_tables_root", lambda: tmp_path / "tables")
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -71,7 +74,13 @@ def _write(rows: list[dict[str, Any]], written_at: datetime = FIRST) -> Any:
 
 
 def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(client: TestClient) -> None:
-    _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    record = _write([_row("D1", 12.5, coverage=1.0, unit="mm"), _row("D2", None, coverage=0.0, unit="mm")])
+    # As a table written before the id rule changed: its record keeps a schema id the rule refuses.
+    assert record.table_schema is not None
+    old_rule = record.model_copy(update={"table_schema": {**record.table_schema, "id": "monthly.v1"}})
+    ingestion_services._save_records(
+        [old_rule if r.artifact_id == record.artifact_id else r for r in ingestion_services._load_records()]
+    )
 
     listed = {item["dataset_id"]: item for item in client.get("/datasets").json()["items"]}
     table = listed["precip_districts"]
@@ -105,7 +114,7 @@ def test_written_rows_are_listed_as_a_table_dataset_and_served_as_json_and_csv(c
 def test_a_revised_value_replaces_the_previous_one(
     client: TestClient, stores: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(feature_store, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     _write([_row("D1", 10.0), _row("D2", 20.0)], written_at=FIRST)
     _write([_row("D1", 11.0)], written_at=LATER)
 
@@ -114,8 +123,9 @@ def test_a_revised_value_replaces_the_previous_one(
         ("D1", 11.0, "2026-04-01T00:00:00+00:00"),
         ("D2", 20.0, "2026-03-01T00:00:00+00:00"),
     ]
-    # One file holds the dataset; no history is kept.
-    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 1
+    # No history is kept: the file the record names, and the one it replaced for a reader that
+    # resolved the previous record.
+    assert len(list((stores / "precip_districts").glob("*.parquet"))) == 2
 
     # Still one record, however many writes.
     assert (
@@ -162,29 +172,37 @@ def test_rows_are_filtered_by_collection_period_reducer_and_weights() -> None:
     values = lambda **kwargs: sorted(store.read_rows(record, **kwargs).column("value").to_pylist())  # noqa: E731
     assert values(start=date(2026, 2, 1)) == [2.0]
     assert values(end=date(2026, 1, 31)) == [1.0, 3.0, 4.0]
-    assert values(reducer="max") == [3.0]
-    assert values(weights="population") == [4.0]
+    assert values(equals={"reducer": "max"}) == [3.0]
+    assert values(equals={"weights": "population"}) == [4.0]
     assert values(collection_id="districts") == [1.0, 2.0, 3.0, 4.0]
     assert values(collection_id="other") == []
 
 
-def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("own_filesystem", [False, True], ids=["one filesystem", "tables mounted separately"])
+def test_a_reader_during_a_write_sees_the_files_before_it(
+    monkeypatch: pytest.MonkeyPatch, stores: Path, own_filesystem: bool
+) -> None:
     record = _write([_row("D1", 10.0)], written_at=FIRST)
     seen: list[list[float | None]] = []
-    rename = store.os.replace
+    rename = os.replace
 
     def read_then_rename(source: Any, target: Any) -> None:
         # The record index is replaced the same way; only the table's file is under test here.
         if Path(target).suffix == ".parquet":
+            if own_filesystem and Path(source).parent == layout.staging_dir():
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
             # The new file is fully written under its temporary name, and not yet visible.
             assert Path(source).stat().st_size > 0
             seen.append(store.read_rows(record).column("value").to_pylist())
         rename(source, target)
 
-    monkeypatch.setattr(store.os, "replace", read_then_rename)
+    monkeypatch.setattr(os, "replace", read_then_rename)
     updated = _write([_row("D1", 11.0)], written_at=LATER)
 
     assert seen == [[10.0]]
+    # Nothing is left behind in the staging folder, nor hidden beside the dataset's files.
+    assert list(layout.staging_dir().iterdir()) == []
+    assert all(path.suffix == ".parquet" for path in (stores / "precip_districts").iterdir())
     # The new record names the new file only.
     assert store.read_rows(updated).column("value").to_pylist() == [11.0]
     assert updated.asset_paths != record.asset_paths
@@ -193,12 +211,10 @@ def test_a_reader_during_a_write_sees_the_files_before_it(monkeypatch: pytest.Mo
 
 
 def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(stores: Path) -> None:
-    import os
-
     first = _write([_row("D1", 1.0)], written_at=FIRST)
     second = _write([_row("D1", 2.0)], written_at=LATER)
     # The second file replaced the first a while ago; the third write removes the first only.
-    replaced = Path(second.asset_paths[0]).stat().st_mtime - feature_store.SUPERSEDED_FILE_GRACE_SECONDS - 1
+    replaced = Path(second.asset_paths[0]).stat().st_mtime - versions.SUPERSEDED_FILE_GRACE_SECONDS - 1
     os.utime(first.asset_paths[0], (replaced - 1, replaced - 1))
     os.utime(second.asset_paths[0], (replaced, replaced))
     third = _write([_row("D1", 3.0)], written_at=datetime(2026, 5, 1, tzinfo=UTC))
@@ -254,7 +270,7 @@ def test_a_failed_write_leaves_no_file(monkeypatch: pytest.MonkeyPatch, stores: 
     def fail(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(store.os, "replace", fail)
+    monkeypatch.setattr(os, "replace", fail)
     with pytest.raises(OSError):
         _write([_row("D1", 10.0)])
     assert list((stores / "precip_districts").rglob("*")) == []
@@ -326,9 +342,9 @@ def test_checking_rows_returns_the_table_a_write_would_append_and_writes_nothing
         rows=[_row("D1", 12.5, coverage=1.0)],
         written_at=FIRST,
     )
-    assert table.schema == store.SCHEMA
+    assert table.schema == store.schema_of(None).arrow
     assert table.to_pylist()[0] | {"written_at": None} == {
-        **dict.fromkeys(store.SCHEMA.names),
+        **dict.fromkeys(store.schema_of(None).names),
         "collection_id": "districts",
         "dataset_id": "precip_districts",
         "feature_id": "D1",
@@ -399,6 +415,8 @@ def test_the_destination_renders_rows_and_delivers_them_through_the_writer() -> 
 
     rendered = plugin.render(_cube([1.5, math.nan]), plugin.validate_mapping(dict(_MAPPING)))
     assert rendered.record_count == 2 and rendered.periods == ("2026-01-01",)
+    metadata = pq.ParquetFile(io.BytesIO(rendered.content)).metadata
+    assert {metadata.row_group(0).column(i).compression for i in range(metadata.num_columns)} == {"ZSTD"}
 
     report = plugin.send(rendered.content, "tables")
     assert report.outcome == "success" and report.imported == 2
@@ -503,8 +521,7 @@ def test_destination_checks_name_a_held_dataset_id_and_a_missing_collection() ->
     assert [check.status for check in bad] == ["fail"]
 
 
-def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) -> None:
-    import pyarrow.parquet as pq
+def test_a_dataset_keeps_one_period_type_and_its_zstd_files_carry_it(stores: Path) -> None:
 
     _write([_row("D1", 1.0)], written_at=FIRST)  # monthly
     # Rows with another cadence are refused, by the writer and by a dry run alike.
@@ -523,6 +540,7 @@ def test_a_dataset_keeps_one_period_type_and_its_files_carry_it(stores: Path) ->
 
     files = sorted((stores / "precip_districts").glob("*.parquet"))
     assert {pq.read_schema(path).metadata[store.PERIOD_TYPE_KEY] for path in files} == {b"monthly"}
+    assert {pq.ParquetFile(path).metadata.row_group(0).column(0).compression for path in files} == {"ZSTD"}
     assert ingestion_services.published_table_artifacts_by_dataset()["precip_districts"].period_type == "monthly"
 
 
@@ -722,7 +740,9 @@ def test_an_empty_csv_still_names_every_column(client: TestClient) -> None:
     _write([_row("D1", 1.0)])
     response = client.get("/tables/precip_districts/rows", params={"format": "csv", "start": "2030-01-01"})
     header = response.text.splitlines()[0].split(",")
-    assert header[4:7] == ["period", "period_start", "period_end"] and len(header) == len(store.SCHEMA.names) + 2
+    assert (
+        header[4:7] == ["period", "period_start", "period_end"] and len(header) == len(store.schema_of(None).names) + 2
+    )
 
 
 def test_a_filter_that_matches_nothing_returns_no_rows(client: TestClient) -> None:
@@ -745,3 +765,44 @@ def test_a_filter_that_matches_nothing_returns_no_rows(client: TestClient) -> No
 )
 def test_a_period_ends_on_its_last_day(period_type: str | None, start: date, end: date | None) -> None:
     assert store.end_of_period(start, period_type) == end
+
+
+@pytest.mark.parametrize(
+    ("column", "message"),
+    [
+        (
+            {"name": "day", "type": "string", "represents": "period_start"},
+            "'day' represents period_start, so it must be a date",
+        ),
+        ({"name": "day", "type": "date", "represents": "day"}, "'day' represents unknown 'day'"),
+        (
+            {"name": "feature_id", "type": "string"},
+            "representing feature_id needs one representing collection_id",
+        ),
+        ({"name": "written_at", "type": "timestamp"}, "declares 'written_at'"),
+        ({"name": "lead", "type": "duration"}, "column 'lead' has type 'duration'"),
+        ({"name": "ratio", "type": "double", "unit": 1}, "column 'ratio' has unit 1, which is not text; quote it"),
+        ({"name": "ratio", "type": "double", "required": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
+        ({"name": "ratio", "type": "double", "nullable": "false"}, "column 'ratio' has a 'required' or 'nullable'"),
+        (
+            {"name": "day", "type": "date", "represents": "period_start"},
+            "'day' represents period_start, so it must be required and not nullable",
+        ),
+        (
+            {"name": "period", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
+            r"declares \['period'\], which readers add beside the period column",
+        ),
+        (
+            {"name": "day", "type": "date", "required": True, "nullable": False, "represents": "period_start"},
+            r"\['day'\] identify a row, so they must be in the key",
+        ),
+        ({"name": "day", "type": "date", "key": ["station", "station"]}, "names a key column more than once"),
+    ],
+)
+def test_a_schema_that_cannot_hold_its_rules_is_refused_naming_its_file(column: dict[str, Any], message: str) -> None:
+    from open_geo_service.tables.schemas import parse_schema
+
+    key = column.pop("key", ["station"])
+    declared = {"id": "stations", "columns": [{"name": "station", "type": "string"}, column], "key": key}
+    with pytest.raises(ValueError, match=f"table schema 'stations' in stations.yaml.*{message}"):
+        parse_schema(declared, source="stations.yaml")

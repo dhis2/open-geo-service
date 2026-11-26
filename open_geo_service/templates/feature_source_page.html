@@ -15,6 +15,7 @@
         {{ logo }}
         <h1>{{ name }}</h1>
       </a>
+      {{ account(mount) }}
     </header>
 
     <div class="layout">
@@ -24,7 +25,7 @@
         <p class="breadcrumb"><a href="{{ mount }}/data-sources">Data sources</a> / {{ source.id }}</p>
         <div class="page-title">
           <h2>{{ source.name }}</h2>
-          <span class="chip">Vector</span>
+          <span class="chip">vector</span>
           {% if fetched %}<span class="chip chip-{{ fetched.status }}">fetched</span>{% endif %}
         </div>
 
@@ -74,6 +75,8 @@
               </form>
               {% elif not refreshable %}
               <p class="note">This data source names no provider this instance has, so it cannot be fetched here.</p>
+              {% elif sign_in %}
+              <p class="note">{{ sign_in_note(mount, "fetch collections here") }}</p>
               {% elif read_only %}
               <p class="note">This instance is read-only, so collections cannot be fetched here.</p>
               {% endif %}
