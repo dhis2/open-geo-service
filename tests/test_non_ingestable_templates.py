@@ -298,6 +298,9 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
             response = client.post("/ingestions", json={"dataset_id": dataset_id}, headers=headers)
             assert response.status_code == 400, response.text
             assert reason in response.json()["detail"]
+        form = client.post("/manage/ingest", data={"dataset_id": dataset_id, "start": "2025-01"})
+        assert form.status_code == 400, form.text
+        assert reason in form.json()["error"]
         page = client.get(f"/data-sources/{dataset_id}", params={"f": "html"}).text
         assert reason in page
         assert 'name="start"' not in page
