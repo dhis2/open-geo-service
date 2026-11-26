@@ -96,7 +96,8 @@ server = [
     # Directly imported (shared/time.py, streaming, openeo). Capped to 2.x; pandas
     # 3.0 is a breaking major and not yet validated against this stack.
     "pandas>=2.3,<3",
-    "portalocker>=3.2.0",
+    # Exclusive locks only: on Windows a shared lock needs the `win32` extra (pywin32).
+    "portalocker>=4",
     "openeo-pg-parser-networkx>=2026.3.3",
     # We depend on the base package and hand-pick the implementation deps rather than
     # using the [implementations] extra. The extra pulls the `gdal` Python bindings,
