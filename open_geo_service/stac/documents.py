@@ -202,7 +202,7 @@ def _raster_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) 
         "",
     ]
     if artifact.format == ArtifactFormat.ICECHUNK:
-        icechunk_href = absolute_url(request, f"/icechunk/{path_segment(dataset_id)}")
+        icechunk_href = absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/")
         lines += [
             f"The data is an Icechunk repository of a Zarr v3 store with GeoZarr metadata: {icechunk_href}",
             "",

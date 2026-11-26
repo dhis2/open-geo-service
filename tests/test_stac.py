@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urljoin
 
 import numpy as np
 import pandas as pd
@@ -523,15 +524,16 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
     )
     assert response.status_code in (200, 201), response.text
 
-    collection = client.get(f"/stac/rasters/{dataset_id}/collection.json").json()
+    collection_url = f"/stac/rasters/{dataset_id}/collection.json"
+    collection = client.get(collection_url).json()
 
     # Every asset says what it is for, as Portolan asks (PORTO-CORE-088).
     assets = collection["assets"]
     assert {"zarr", "icechunk"} <= set(assets)
     assert all(asset.get("title") and asset.get("description") for asset in assets.values()), assets
     # The Icechunk href needs no redirect, and the file a client joins to it is served.
-    icechunk_href = assets["icechunk"]["href"]
-    assert icechunk_href.endswith(f"/icechunk/{dataset_id}/")
+    icechunk_href = urljoin(collection_url, assets["icechunk"]["href"])
+    assert icechunk_href.endswith(f"/{dataset_id}.icechunk/")
     assert assets["icechunk"]["type"] == "application/vnd.zarr+icechunk"
     assert client.get(f"{icechunk_href}/repo", follow_redirects=False).status_code == 200
     bands = collection["assets"]["zarr"]["bands"]

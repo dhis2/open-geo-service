@@ -198,7 +198,7 @@ def _data_files(dataset_id: str, artifact: ArtifactRecord) -> dict[str, str]:
     elif artifact.format == ArtifactFormat.PARQUET:
         files[f"/tables/{dataset_id}/data.parquet"] = f"{key}/{path.name}"
     elif artifact.format == ArtifactFormat.ICECHUNK:
-        files[f"/icechunk/{dataset_id}"] = f"{key}/{path.name}/"
+        files[f"/icechunk/{dataset_id}/"] = f"{key}/{path.name}/"
     return files
 
 
