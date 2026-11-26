@@ -19,7 +19,7 @@ import xarray as xr
 from fastapi import HTTPException, Request
 
 from open_geo_service.auth.tokens import Principal
-from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
+from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat
@@ -839,15 +839,12 @@ def _eligible_artifacts() -> dict[str, Any]:
 
 def _open_artifact(artifact: Any) -> xr.Dataset:
     # Only reached for a record the raster gate admitted, so the formats here and
-    # LOADABLE_RASTER_FORMATS describe the same set from the two sides. Enumerated rather than
-    # defaulted to open_zarr_dataset: since GEOPARQUET exists, an unexpected format falling
-    # through here would try to open a feature collection as a Zarr store and fail somewhere
-    # deep in the reader, reported as a corrupt store rather than as the wrong kind of dataset.
+    # LOADABLE_RASTER_FORMATS describe the same set from the two sides. Any other format is
+    # refused by name rather than handed to the Icechunk reader, which would report a feature
+    # collection as a corrupt store rather than as the wrong kind of dataset.
     path = _artifact_store_path(artifact)
     if artifact.format == ArtifactFormat.ICECHUNK:
         return open_icechunk_dataset(path)
-    if artifact.format == ArtifactFormat.ZARR:
-        return open_zarr_dataset(path)
     raise HTTPException(
         status_code=409,
         detail=(

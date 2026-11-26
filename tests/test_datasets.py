@@ -216,16 +216,6 @@ def test_dataset_links_include_zarr_and_stac_for_icechunk() -> None:
     assert all(link.rel != "ogc-collection" for link in links)
 
 
-def test_dataset_links_include_zarr_and_stac_for_plain_zarr() -> None:
-    artifact = _artifact(artifact_id="a4")
-    artifact.format = ArtifactFormat.ZARR
-
-    links = services._dataset_links("chirps3_precipitation_daily", artifact, published=artifact)
-
-    assert any(link.rel == "zarr" for link in links)
-    assert any(link.rel == "stac" for link in links)
-
-
 def test_get_dataset_zarr_store_file_reads_icechunk_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store_path = tmp_path / "chirps3.icechunk"
     storage = icechunk.local_filesystem_storage(str(store_path))
@@ -359,34 +349,33 @@ def test_zarr_route_serves_the_published_artifact_when_a_newer_one_is_unpublishe
     assert b'"release":"published"' in response.body
 
 
-def test_zarr_route_serves_plain_zarr_metadata_and_ranged_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store_path = tmp_path / "legacy.zarr"
-    store_path.mkdir()
-    (store_path / "zarr.json").write_text(
-        '{"zarr_format": 3, "node_type": "group", "attributes": {"source": "legacy"}}',
-        encoding="utf-8",
-    )
-    (store_path / "chunk.bin").write_bytes(b"0123456789")
-    artifact = _artifact(artifact_id="legacy-zarr")
-    artifact.format = ArtifactFormat.ZARR
-    artifact.path = str(store_path)
-    artifact.asset_paths = [str(store_path)]
-    monkeypatch.setattr(
-        services,
-        "latest_published_raster_artifacts_by_dataset",
-        lambda: {"legacy_zarr": artifact},
-    )
+def _seeded_icechunk_store(path: Path, source: str) -> ArtifactRecord:
+    """A raster record whose Icechunk store holds one small array, its root group carrying *source*."""
+    repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)))
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
+    xr.Dataset({"v": ("x", np.arange(64.0))}, attrs={"source": source}).to_zarr(session.store, mode="w", zarr_format=3)
+    session.commit("seed")
+    artifact = _artifact(artifact_id=source)
+    artifact.format = ArtifactFormat.ICECHUNK
+    artifact.path = str(path)
+    artifact.asset_paths = [str(path)]
+    return artifact
 
-    metadata = services.get_dataset_zarr_store_file_or_404("legacy_zarr", "")
-    chunk = services.get_dataset_zarr_store_file_or_404("legacy_zarr", "chunk.bin", range_header="bytes=2-5")
+
+def test_zarr_route_serves_store_metadata_and_ranged_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact = _seeded_icechunk_store(tmp_path / "store.icechunk", "seeded")
+    monkeypatch.setattr(services, "latest_published_raster_artifacts_by_dataset", lambda: {"rain": artifact})
+
+    metadata = services.get_dataset_zarr_store_file_or_404("rain", "")
+    whole = services.get_dataset_zarr_store_file_or_404("rain", "v/c/0")
+    ranged = services.get_dataset_zarr_store_file_or_404("rain", "v/c/0", range_header="bytes=2-5")
 
     assert isinstance(metadata, services.JSONResponse)
-    assert b'"source":"legacy"' in metadata.body
-    assert isinstance(chunk, services.Response)
-    assert chunk.status_code == 206
-    assert chunk.body == b"2345"
+    assert b'"source":"seeded"' in metadata.body
+    assert isinstance(whole, services.Response) and isinstance(ranged, services.Response)
+    assert ranged.status_code == 206
+    assert ranged.body == whole.body[2:6]
 
 
 def test_zarr_route_loads_records_only_when_they_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -395,13 +384,8 @@ def test_zarr_route_loads_records_only_when_they_change(tmp_path: Path, monkeypa
     monkeypatch.setattr(services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
     stores = {}
     for name in ("first", "second"):
-        store_path = tmp_path / f"{name}.zarr"
-        store_path.mkdir()
-        (store_path / "chunk.bin").write_bytes(name.encode())
-        artifact = _artifact(artifact_id=name, created_at=f"2026-01-1{len(stores)}T00:00:00+00:00")
-        artifact.format = ArtifactFormat.ZARR
-        artifact.path = str(store_path)
-        artifact.asset_paths = [str(store_path)]
+        artifact = _seeded_icechunk_store(tmp_path / f"{name}.icechunk", name)
+        artifact.created_at = datetime.fromisoformat(f"2026-01-1{len(stores)}T00:00:00+00:00")
         stores[name] = artifact
     services._save_records([stores["first"]])
     loads = 0
@@ -414,13 +398,13 @@ def test_zarr_route_loads_records_only_when_they_change(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(services, "_load_records", counting_load_records)
 
-    chunks = [services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "chunk.bin") for _ in range(3)]
+    roots = [services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "") for _ in range(3)]
     services._save_records([stores["first"], stores["second"]])
-    after_write = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "chunk.bin")
+    after_write = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "")
 
-    assert [chunk.body for chunk in chunks if isinstance(chunk, services.Response)] == [b"first"] * 3
+    assert all(isinstance(root, services.Response) and b'"source":"first"' in root.body for root in roots)
     assert isinstance(after_write, services.Response)
-    assert after_write.body == b"second"
+    assert b'"source":"second"' in after_write.body
     assert loads == 2
 
 
@@ -432,27 +416,22 @@ def test_zarr_route_sees_a_record_write_the_modification_time_misses(
     monkeypatch.setattr(services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
     artifacts = []
     for name in ("store", "other"):
-        store_path = tmp_path / f"{name}.zarr"
-        store_path.mkdir()
-        (store_path / "chunk.bin").write_bytes(name.encode())
-        artifact = _artifact(artifact_id="a")
-        artifact.format = ArtifactFormat.ZARR
-        artifact.path = str(store_path)
-        artifact.asset_paths = [str(store_path)]
+        artifact = _seeded_icechunk_store(tmp_path / f"{name}.icechunk", name)
+        artifact.artifact_id = "a"
         artifacts.append(artifact)
     services._save_records([artifacts[0]])
-    first = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "chunk.bin")
+    first = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "")
     before = services.ARTIFACTS_INDEX_PATH.stat()
 
     services._save_records([artifacts[1]])
     # A coarse clock: the second write gets the first one's modification time, at the same size.
     os.utime(services.ARTIFACTS_INDEX_PATH, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert services.ARTIFACTS_INDEX_PATH.stat().st_size == before.st_size
-    second = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "chunk.bin")
+    second = services.get_dataset_zarr_store_file_or_404("chirps3_precipitation_daily", "")
 
     assert isinstance(first, services.Response)
     assert isinstance(second, services.Response)
-    assert (first.body, second.body) == (b"store", b"other")
+    assert b'"source":"store"' in first.body and b'"source":"other"' in second.body
 
 
 def test_a_record_write_never_leaves_readers_a_partial_records_file(

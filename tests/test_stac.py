@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urljoin
 
+import icechunk
 import numpy as np
 import pandas as pd
 import pystac
@@ -90,6 +91,15 @@ def _artifact(
             collection_id=managed_dataset_id,
         ),
     )
+
+
+def _icechunk_store(path: Path, ds: xr.Dataset) -> None:
+    """A published Icechunk store holding *ds*, with its write branch, as GeoService writes one."""
+    repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)))
+    session = repo.writable_session("main")
+    ds.to_zarr(session.store, mode="w", zarr_format=3)
+    session.commit("seed")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
 
 
 def test_stac_landing_returns_catalog(client: TestClient) -> None:
@@ -589,16 +599,13 @@ def test_a_newer_unpublished_artifact_does_not_hide_the_published_one(monkeypatc
 
 
 def test_raster_gate_admits_every_loadable_store_format(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate follows what a reader can open, not one storage format.
-
-    `_open_artifact` opens Icechunk and plain Zarr; NETCDF has no datacube reader and is
-    offered as a download instead, so it stays out of both catalogues.
-    """
-    zarr = _artifact(
+    """The gate follows what a reader can open: `_open_artifact` opens Icechunk; NETCDF has no
+    datacube reader and is offered as a download instead, so it stays out of both catalogues."""
+    store = _artifact(
         artifact_id="a1",
-        dataset_id="legacy_zarr",
-        managed_dataset_id="legacy_zarr",
-        format=ArtifactFormat.ZARR,
+        dataset_id="rain",
+        managed_dataset_id="rain",
+        format=ArtifactFormat.ICECHUNK,
     )
     netcdf = _artifact(
         artifact_id="a2",
@@ -606,10 +613,10 @@ def test_raster_gate_admits_every_loadable_store_format(monkeypatch: pytest.Monk
         managed_dataset_id="legacy_netcdf",
         format=ArtifactFormat.NETCDF,
     )
-    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[zarr, netcdf]))
+    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[store, netcdf]))
 
-    assert list(ingestion_services.latest_published_raster_artifacts_by_dataset()) == ["legacy_zarr"]
-    assert list(ingestion_services.stac_eligible_artifacts_by_dataset()) == ["legacy_zarr"]
+    assert list(ingestion_services.latest_published_raster_artifacts_by_dataset()) == ["rain"]
+    assert list(ingestion_services.stac_eligible_artifacts_by_dataset()) == ["rain"]
     assert ArtifactFormat.NETCDF not in ingestion_services.LOADABLE_RASTER_FORMATS
 
 
@@ -819,25 +826,6 @@ def test_collection_reuses_cached_xstac_payload(
     assert open_count == 1
 
 
-def test_zarr_consolidated_flag_detects_v3_and_v2_markers(tmp_path: Path) -> None:
-    v3_consolidated = tmp_path / "v3_consolidated.zarr"
-    v3_consolidated.mkdir()
-    (v3_consolidated / "zarr.json").write_text('{"consolidated_metadata": {}}', encoding="utf-8")
-
-    v3_unconsolidated = tmp_path / "v3_unconsolidated.zarr"
-    v3_unconsolidated.mkdir()
-    (v3_unconsolidated / "zarr.json").write_text("{}", encoding="utf-8")
-
-    v2_consolidated = tmp_path / "v2_consolidated.zarr"
-    v2_consolidated.mkdir()
-    (v2_consolidated / ".zmetadata").write_text("{}", encoding="utf-8")
-
-    assert stac_services._zarr_consolidated_flag(str(v3_consolidated)) is True
-    assert stac_services._zarr_consolidated_flag(str(v3_unconsolidated)) is False
-    assert stac_services._zarr_consolidated_flag(str(v2_consolidated)) is True
-    assert stac_services._zarr_consolidated_flag("s3://example-bucket/store.zarr") is None
-
-
 def test_collection_preserves_template_links_when_xstac_mutates_template(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -931,9 +919,9 @@ def test_build_collection_with_xstac_reads_normalised_zarr_coordinates(tmp_path:
             "longitude": [1.0, 2.0, 3.0],
         },
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
 
     template = pystac.Collection(
         id="chirps3_precipitation_daily",
@@ -969,9 +957,9 @@ def test_build_collection_emits_crs_render_hints_for_projected_store(tmp_path: P
         },
         attrs={"proj:code": "EPSG:32633"},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="senorge_temperature_daily",
         description="test",
@@ -1017,9 +1005,9 @@ def test_build_collection_omits_crs_render_hints_for_wgs84(tmp_path: Path) -> No
         },
         attrs={"proj:code": "EPSG:4326"},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="era5land_temperature_daily",
         description="test",
@@ -1050,9 +1038,9 @@ def test_build_collection_spatial_extent_derives_from_store_not_coverage(tmp_pat
         },
         attrs={"proj:code": "EPSG:4326"},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="worldpop_population_yearly",
         description="test",
@@ -1082,9 +1070,9 @@ def test_build_collection_proj_bbox_prefers_store_spatial_bbox_attr(tmp_path: Pa
         # Half-pixel-expanded edges differ from the coord centres above.
         attrs={"proj:code": "EPSG:32633", "spatial:bbox": [99500.0, 6997500.0, 102500.0, 7000500.0]},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="senorge_temperature_daily",
         description="test",
@@ -1112,9 +1100,9 @@ def test_build_collection_normalizes_crs84_alias_to_epsg4326(tmp_path: Path) -> 
         },
         attrs={"proj:code": "OGC:CRS84"},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="chirps3_precipitation_daily",
         description="test",
@@ -1168,9 +1156,9 @@ def test_build_collection_crs_render_hints_use_store_wkt(tmp_path: Path) -> None
         },
         attrs={"proj:code": "EPSG:32633"},
     )
-    ds.to_zarr(str(zarr_path), mode="w", consolidated=True)
+    _icechunk_store(zarr_path, ds)
 
-    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ZARR, path=str(zarr_path))
+    artifact = _artifact(artifact_id="a1", format=ArtifactFormat.ICECHUNK, path=str(zarr_path))
     template = pystac.Collection(
         id="senorge_temperature_daily",
         description="test",

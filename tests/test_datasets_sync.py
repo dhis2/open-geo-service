@@ -204,7 +204,7 @@ def test_sync_dataset_append_policy_falls_back_to_rematerialize_without_icechunk
         end="2024",
         path=str(zarr_path),
     )
-    latest.format = ArtifactFormat.ZARR  # legacy download-path artifact, not Icechunk
+    latest.format = ArtifactFormat.NETCDF  # a download, not an Icechunk store
     monkeypatch.setattr(services, "get_latest_artifact_for_dataset_or_404", lambda _: latest)
     monkeypatch.setattr(
         services.registry_datasets,
@@ -878,7 +878,7 @@ def test_sync_dataset_append_policy_falls_back_for_plugin_backed_non_icechunk_ar
         end="2026-01-31",
         path="/tmp/chirps3_precipitation_daily.zarr",
     )
-    latest.format = ArtifactFormat.ZARR
+    latest.format = ArtifactFormat.NETCDF
     monkeypatch.setattr(services, "get_latest_artifact_for_dataset_or_404", lambda _: latest)
     monkeypatch.setattr(
         services.registry_datasets,

@@ -12,7 +12,7 @@ from pyproj import Transformer
 
 from open_geo_service import storage
 
-from ...data_manager.services.downloader import get_icechunk_path, get_zarr_path
+from ...data_manager.services.downloader import get_icechunk_path
 from ...data_manager.services.utils import get_time_dim, get_x_y_dims
 from ...shared.branches import WRITE_BRANCH
 from ...shared.crs import dataset_crs
@@ -45,20 +45,14 @@ def get_data(
     """Load an xarray raster dataset for a given time range and bbox."""
     logger.info("Opening dataset")
     icechunk_path = get_icechunk_path(dataset)
-    if icechunk_path.exists():
-        logger.info("Using Icechunk-backed store: %s", icechunk_path)
-        ds = open_icechunk_dataset(icechunk_path)
-    else:
-        zarr_path = get_zarr_path(dataset)
-        if not zarr_path:
-            # Neither source, so nothing has been ingested. A typed error, so a caller can tell
-            # it apart from a genuinely broken store (CLIM-897).
-            raise DatasetDataUnavailable(
-                f"Dataset '{dataset['id']}' has no ingested data: no Icechunk store and no Zarr "
-                f"archive. Ingest it before reading it."
-            )
-        logger.info(f"Using optimized zarr file: {zarr_path}")
-        ds = open_zarr_dataset(str(zarr_path))
+    if not icechunk_path.exists():
+        # Nothing has been ingested. A typed error, so a caller can tell it apart from a
+        # genuinely broken store (CLIM-897).
+        raise DatasetDataUnavailable(
+            f"Dataset '{dataset['id']}' has no ingested data: no Icechunk store. Ingest it before reading it."
+        )
+    logger.info("Using Icechunk-backed store: %s", icechunk_path)
+    ds = open_icechunk_dataset(icechunk_path)
 
     if start and end:
         try:
@@ -103,52 +97,16 @@ def get_data_coverage(dataset: dict[str, Any]) -> dict[str, Any]:
 
 
 def get_data_coverage_for_paths(
-    dataset: dict[str, Any],
-    *,
-    zarr_path: str | None = None,
-    icechunk_path: str | None = None,
-    branch: str = WRITE_BRANCH,
+    dataset: dict[str, Any], *, icechunk_path: str, branch: str = WRITE_BRANCH
 ) -> dict[str, Any]:
-    """Return coverage metadata for the concrete files created for one artifact, at *branch* of an Icechunk store."""
-    provided = sum(value is not None for value in (zarr_path, icechunk_path))
-    if provided != 1:
-        raise ValueError("Coverage calculation requires exactly one artifact source")
-
-    if icechunk_path is not None:
-        ds = open_icechunk_dataset(icechunk_path, branch=branch)
-    else:
-        assert zarr_path is not None
-        ds = open_zarr_dataset(zarr_path)
-
+    """Return coverage metadata for one artifact's Icechunk store, at *branch*."""
+    ds = open_icechunk_dataset(icechunk_path, branch=branch)
     try:
         return _coverage_from_dataset(
             ds=ds, period_type=str(dataset.get("period_type") or ""), native_crs=dataset_crs(ds)
         )
     finally:
         ds.close()
-
-
-def open_zarr_dataset(zarr_path: str) -> xr.Dataset:
-    """Open a zarr store, handling pyramid stores by opening the base resolution level.
-
-    When the root group has no data variables (as in a multiscale pyramid store),
-    attempts to open level 0 instead. This works for any store backend — local
-    paths, S3 URIs, GCS URIs, fsspec mappers — without filesystem-specific checks.
-    """
-    ds = _open_zarr(zarr_path)
-    if not ds.data_vars:
-        level0_path = zarr_path.rstrip("/") + "/0"
-        try:
-            level0 = _open_zarr(level0_path)
-        except Exception as exc:
-            ds.close()
-            raise ValueError(
-                f"Zarr store at {zarr_path!r} has no data variables at the root "
-                f"and base pyramid level {level0_path!r} could not be opened"
-            ) from exc
-        ds.close()
-        ds = level0
-    return ds
 
 
 READ_CHUNK_TARGET_BYTES = 16 * 2**20
@@ -280,11 +238,6 @@ def open_icechunk_dataset(
 
     record_snapshot(str(path), session.snapshot_id)
     return ds
-
-
-def _open_zarr(zarr_path: str) -> xr.Dataset:
-    """Open a zarr store with automatic consolidated metadata detection."""
-    return xr.open_zarr(zarr_path, consolidated=None)  # type: ignore[no-any-return]
 
 
 def _empty_coverage() -> dict[str, Any]:
