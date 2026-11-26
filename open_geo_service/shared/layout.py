@@ -94,10 +94,9 @@ def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
 
 
 def staging_dir() -> Path:
-    """A folder for files being written, which are then moved into place with `os.replace`.
+    """A folder for files being written, which are then moved into place with `storage.write_file`.
 
-    In the data folder, so the move stays on one filesystem and is atomic, but outside the
-    catalog, so a reader of the catalog never meets a partial file.
+    Outside the catalog, so a reader of the catalog never meets a partial file.
     """
     folder = api_config.get_data_root() / "tmp"
     folder.mkdir(parents=True, exist_ok=True)

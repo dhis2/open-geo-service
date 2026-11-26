@@ -414,9 +414,7 @@ def _publish_thumbnail(kind: layout.Kind, dataset_id: str, render: Callable[[Pat
     Rendered to a staging file and moved into place, never written over the published file.
     That path is served by HTTP, so writing in place would let a request read a half-written
     PNG, and a savefig that failed part way would truncate a previously good thumbnail — the
-    opposite of the leave-the-old-one-alone rule the writers follow. `os.replace` within one
-    filesystem is atomic, so a reader sees the old file or the new one and never something in
-    between.
+    opposite of the leave-the-old-one-alone rule the writers follow.
     """
     import os
 
