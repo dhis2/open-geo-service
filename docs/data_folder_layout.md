@@ -120,17 +120,24 @@ still built on request, with absolute links.
 
 ## Icechunk format version
 
-Raster stores are written in Icechunk spec version 2, the format of every Icechunk 2.x release,
-and the `icechunk>=2.3.1,<3` bound in `pyproject.toml` is what keeps it there. Icechunk 2.x reads
-repositories of spec version 1 and 2, and `icechunk.upgrade_icechunk_repository` migrates one
-from version 1 to 2. Icechunk 2.1 changed the format without a new version number; its
-specification calls that change backwards and forwards compatible.
+Raster stores are written in Icechunk spec major version 2 (spec 2.1 with Icechunk 2.1 and later),
+and the `icechunk>=2.3.1,<3` bound in `pyproject.toml` is what keeps them there. Icechunk's
+[version policy](https://icechunk.io/en/latest/reference/version-policy/) ties each library's
+major version to the spec's major version, the one byte recorded in every metadata file's header:
 
-Icechunk's documentation makes no wider promise about which later versions will read today's
-repositories. So raising that bound to a new major version is a deliberate change: first check
-that the readers of an instance's stores open the new format (icechunk-js in the map viewer and
-DHIS2 Maps, GDAL's Icechunk driver, the QGIS Datacube Viewer), and say in the release notes which
-of them it leaves behind.
+- Within a major version, minor spec versions are compatible both ways: any 2.x library reads
+  and writes any spec 2.y repository, ignoring features of a newer minor version it does not know.
+- A library of major version N reads and writes spec major versions N and N-1, and reads older
+  ones on a best-effort basis. Icechunk 3.x will still read and write today's stores; Icechunk 1.x
+  cannot read them.
+- A new major version may need a migration, which rewrites metadata only
+  (`icechunk.upgrade_icechunk_repository` from 1 to 2). The previous major version gets bug and
+  security fixes for at least a year.
+
+So raising the bound to a new major version is a deliberate change. It writes a format that
+readers on the previous major version cannot open: first check that every reader of an
+instance's stores opens it (icechunk-js in the map viewer and DHIS2 Maps, GDAL's Icechunk driver,
+the QGIS Datacube Viewer), and say in the release notes which of them it leaves behind.
 
 ## Moving an instance to this layout
 
