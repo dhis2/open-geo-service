@@ -414,8 +414,9 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
             "title": "Icechunk store (native SDK access)",
             "description": (
                 "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
-                "JavaScript, with the dataset's version history. GDAL opens it through its repo file: "
-                "ICECHUNK:/vsicurl/<href>repo."
+                "JavaScript, with the dataset's version history. Open the published branch; main can hold "
+                "a sync in progress. GDAL opens it through its repo file: "
+                "ICECHUNK:/vsicurl/<href>repo?branch=published."
             ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
