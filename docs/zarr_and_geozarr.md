@@ -79,7 +79,7 @@ Dimensions are normalised before writing, regardless of the source naming conven
 
 Every period an ingestion or sync writes carries a `fetched_at` coordinate along `t`: the UTC instant it was fetched. The sync uses it to fetch preliminary periods again once their final values are expected; see [Preliminary periods](architecture.md#preliminary-periods).
 
-It is stored as float64 seconds since 1970, so a period with no known fetch time is NaN (NaT when decoded). A pyramid holds it on every level, not at the root. It is chunked as `t` is beside it: in blocks of up to 4096 values on a flat store, rechunked at the end of each sync, so the planner reads it in a few requests, and one value per chunk on a pyramid's levels. It is bookkeeping, so the accessor drops it unless a caller asks for it: it does not reach aggregation, openEO, exports, STAC or the map. Stores written before it existed get it at their next sync, NaT for the periods they already hold.
+It is stored as float64 seconds since 1970, so a period with no known fetch time is NaN (NaT when decoded). A pyramid holds it on every level, not at the root. It is chunked as `t` is beside it: in blocks of up to 4096 values on a flat store, rechunked at the end of each sync, and in blocks of 4096 on every level of a pyramid, set when the pyramid is built, so the planner reads it in a few requests. A pyramid built before then keeps one value per chunk until it is rebuilt. It is bookkeeping, so the accessor drops it unless a caller asks for it: it does not reach aggregation, openEO, exports, STAC or the map. Stores written before it existed get it at their next sync, NaT for the periods they already hold.
 
 ---
 

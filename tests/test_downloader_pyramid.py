@@ -162,7 +162,7 @@ def test_topozarr_nearest_keeps_the_top_left_cell() -> None:
     from topozarr_core import block_reduce
 
     block = np.arange(16, dtype="int16").reshape(4, 4)
-    out = np.asarray(block_reduce(block, (2, 2), "nearest", 0, True))
+    out = np.asarray(block_reduce(block, (2, 2), "nearest", 0))
     np.testing.assert_array_equal(out, np.array([[0, 2], [8, 10]], dtype="int16"))
 
 
