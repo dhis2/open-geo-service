@@ -608,6 +608,16 @@ def test_a_person_is_one_principal_by_web_sign_in_and_by_bearer_token(
     assert any(c.startswith("geoservice_oidc=") and "Max-Age=0" in c for c in set_cookies), "the transaction ends"
     cookie = {"Cookie": next(c for c in set_cookies if c.startswith("geoservice_session=")).split(";")[0]}
     assert client.get(callback, headers=transaction).status_code == 401, "a sign-in is used once"
+    # A cancelled sign-in offers to try again for the page the person was going to.
+    state, transaction, _ = start()
+    cancelled = client.get(f"/sign-in/oidc/idp/callback?state={state}&error=access_denied", headers=transaction)
+    assert cancelled.status_code == 401 and 'href="/sign-in/oidc/idp?next=/datasets"' in cancelled.text
+    # Anyone may start a sign-in, so past the limit the oldest open one is dropped.
+    monkeypatch.setattr(oidc, "_PENDING_LIMIT", 1)
+    state, transaction, query = start()
+    start()
+    dropped = f"/sign-in/oidc/idp/callback?state={state}&code={provider.approve_query(query, 'alice')}"
+    assert client.get(dropped, headers=transaction).status_code == 401
     # Under a deployment prefix the cookie and the redirect follow the prefix.
     mounted = mounted_client_factory("/geoservice")
     mounted.base_url = httpx.URL("https://testserver")
@@ -641,6 +651,14 @@ def test_a_person_is_one_principal_by_web_sign_in_and_by_bearer_token(
     assert client.get("/me", headers=_bearer(provider.token("alice", key=rotated))).json() == alice
     monkeypatch.setattr(oidc, "_KEYS_TTL", 0)
     assert client.get("/me", headers=_bearer(provider.token("alice"))).status_code == 401
+
+    # A provider that cannot be reached is no refusal, so a client keeps its token and tries again.
+    def unreachable(url: str) -> Any:
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(oidc, "_get_json", unreachable)
+    assert client.get("/me", headers=provider.bearer("alice")).status_code == 503
+    monkeypatch.setattr(oidc, "_get_json", provider._get_json)
 
     # An explicit list replaces the default for both clients.
     _configure_oidc(monkeypatch, tokens=[notebook], gate_reads=True, scopes=["openid", "email"])

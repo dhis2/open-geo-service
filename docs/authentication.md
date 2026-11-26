@@ -93,7 +93,8 @@ reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet as
 One ASGI middleware decides every request before the application reads the request body. It
 finds the credential, resolves the principal, applies read-only mode, and compares the
 principal's tier with the route's. A missing or invalid credential gets `401` with
-`WWW-Authenticate: Bearer`, and a principal without the tier gets `403`. Routes never check
+`WWW-Authenticate: Bearer`, and a principal without the tier gets `403`. An OIDC token whose
+provider cannot be reached to check it gets `503`, so a client keeps the token and retries. Routes never check
 credentials themselves.
 
 The middleware sits inside CORS, so a `401` or `403` still carries the headers a browser needs to

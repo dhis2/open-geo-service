@@ -44,10 +44,16 @@ _KEY_REFRESH_INTERVAL = 60
 _RFC9068_CLAIMS = ("iss", "exp", "aud", "sub", "client_id", "iat", "jti")
 _HTTP_TIMEOUT = 10.0
 _PENDING_SECONDS = 10 * 60
+# Anyone may start a sign-in, so past this many open ones the oldest is dropped.
+_PENDING_LIMIT = 1000
 
 
 class TokenRejected(Exception):
     """A token that is not valid for this instance; the message says why, for the log only."""
+
+
+class ProviderUnavailable(TokenRejected):
+    """The provider could not be reached to check a token, which may well be valid."""
 
 
 @dataclass(frozen=True)
@@ -157,7 +163,9 @@ def _decoded(token: str, provider: OidcProvider) -> tuple[dict[str, Any], dict[s
             decoded = jwt.decode(token, _key_set(provider, refresh=True), algorithms=ALGORITHMS)
     except JoseError as exc:
         raise TokenRejected(f"{provider.id}: {exc}") from exc
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailable(f"{provider.id}: could not read its keys: {exc}") from exc
+    except ValueError as exc:
         raise TokenRejected(f"{provider.id}: could not read its keys: {exc}") from exc
     return dict(decoded.header), dict(decoded.claims)
 
@@ -228,7 +236,9 @@ def _require_access_token(header: dict[str, Any], claims: dict[str, Any], provid
 
 
 @dataclass(frozen=True)
-class _Pending:
+class PendingSignIn:
+    """A sign-in started in a browser, waiting for the provider to send it back."""
+
     provider_id: str
     transaction: str = field(repr=False)
     """The digest of the secret the starting browser holds in its transaction cookie."""
@@ -239,7 +249,7 @@ class _Pending:
     expires: float
 
 
-_pending: dict[str, _Pending] = {}
+_pending: dict[str, PendingSignIn] = {}
 _pending_lock = threading.Lock()
 
 
@@ -278,22 +288,19 @@ def begin_sign_in(provider: OidcProvider, *, redirect_uri: str, next_path: str) 
         # Abandoned sign-ins are dropped here, so the table stays bounded by recent attempts.
         for stale in [key for key, item in _pending.items() if item.expires <= now]:
             del _pending[stale]
-        _pending[state] = _Pending(
+        while len(_pending) >= _PENDING_LIMIT:
+            del _pending[next(iter(_pending))]
+        _pending[state] = PendingSignIn(
             provider.id, _digest(transaction), verifier, nonce, redirect_uri, next_path, now + _PENDING_SECONDS
         )
     return f"{endpoint}{'&' if '?' in endpoint else '?'}{query}", transaction
 
 
-def finish_sign_in(
-    state: str, code: str, *, transaction: str | None, provider_id: str, providers: tuple[OidcProvider, ...]
-) -> tuple[Person, str]:
-    """Exchange the code the provider returned for its ID token; return the person and where to go next.
+def claim_sign_in(state: str, *, transaction: str | None, provider_id: str) -> PendingSignIn:
+    """Take the sign-in *state* names, which this browser started with *provider_id*; it is used once.
 
-    The sign-in must be the one this browser started, with *provider_id*: its *transaction*
-    cookie and the provider are checked before the sign-in is used up or the code exchanged, so a
-    stray callback cannot spend someone else's. Raises TokenRejected for that, an unknown or
-    expired state, a provider no longer configured, a failed exchange, or an ID token that does
-    not check out. A sign-in is used once.
+    Its *transaction* cookie and the provider are checked before the sign-in is used up, so a stray
+    callback cannot spend someone else's. Raises TokenRejected for that, or an unknown or expired state.
     """
     with _pending_lock:
         pending = _pending.get(state)
@@ -305,6 +312,15 @@ def finish_sign_in(
         if pending.provider_id != provider_id:
             raise TokenRejected(f"the sign-in was started with {pending.provider_id}")
         del _pending[state]
+    return pending
+
+
+def finish_sign_in(pending: PendingSignIn, code: str, *, providers: tuple[OidcProvider, ...]) -> Person:
+    """Exchange the code the provider returned for its ID token, and return the person it names.
+
+    Raises TokenRejected for a provider no longer configured, a failed exchange, or an ID token
+    that does not check out.
+    """
     provider = next((p for p in providers if p.id == pending.provider_id), None)
     if provider is None:
         raise TokenRejected(f"provider {pending.provider_id} is no longer configured")
@@ -332,4 +348,4 @@ def finish_sign_in(
     _check(claims, provider, (provider.client_id,))
     if claims.get("nonce") != pending.nonce:
         raise TokenRejected(f"{provider.id}: the ID token answers another sign-in")
-    return _person(claims, provider), pending.next_path
+    return _person(claims, provider)

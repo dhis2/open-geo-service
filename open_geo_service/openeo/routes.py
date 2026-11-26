@@ -208,7 +208,7 @@ def credentials_basic(request: Request) -> dict[str, str]:
 def me(request: Request) -> dict[str, Any]:
     """Return the principal this request runs as: `anonymous` without a credential.
 
-    A person signed in through a provider is `oidc:<provider>:<subject>`, with their username as `name`.
+    A person signed in through a provider is `oidc:<issuer>#<subject>`, with their username as `name`.
     """
     principal = principal_of(request)
     return {"user_id": principal.id, **({"name": principal.name} if principal.name else {}), "links": []}

@@ -115,7 +115,14 @@ class AccessMiddleware:
                 principal = session or ANONYMOUS
                 by_cookie = session is not None
             else:
-                resolved = await _authenticate(authorization, settings)
+                try:
+                    resolved = await _authenticate(authorization, settings)
+                except oidc.ProviderUnavailable as exc:
+                    # Not a 401: a client would discard a token that may well be valid.
+                    logger.warning("Could not check a token: %s", exc)
+                    message = "The sign-in provider that issued the token cannot be reached. Try again later."
+                    await _refuse(503, "authentication", "ServiceUnavailable", message)(scope, receive, send)
+                    return
                 if resolved is None:
                     log_rejected_credential()
                     message = "The credential is not valid for this instance."
@@ -161,6 +168,8 @@ class AccessMiddleware:
 async def _authenticate(authorization: str | None, settings: AccessSettings) -> Principal | None:
     """The principal an ``Authorization`` header names, as `tokens.authenticate` decides it, or a person.
 
+    Raises oidc.ProviderUnavailable when the provider cannot be reached to check a token.
+
     A person sends an OIDC access token as openEO's ``Bearer oidc/<provider>/<token>``, or as a
     plain ``Bearer <token>`` that a configured provider issued. Checking it may fetch the
     provider's keys, so it runs off the event loop.
@@ -170,6 +179,8 @@ async def _authenticate(authorization: str | None, settings: AccessSettings) -> 
         return authenticate(authorization, settings.tokens)
     try:
         person = await anyio.to_thread.run_sync(oidc.person_from_access_token, token, provider)
+    except oidc.ProviderUnavailable:
+        raise
     except oidc.TokenRejected as exc:
         logger.debug("Rejected an OIDC token: %s", exc)
         return None

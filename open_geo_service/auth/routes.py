@@ -158,29 +158,30 @@ def provider_callback(
     from open_geo_service.system.templates import render_sign_in_page
 
     mount = mount_prefix(request)
-    failed = f"Signing in with {provider.title} did not succeed. Try again."
-    response: Response
-    if error is not None or code is None:
-        # The person cancelled, or the provider refused; its `error` is a short code such as access_denied.
-        logger.info("Sign-in with %s returned %s", provider.id, error or "no code")
-        response = HTMLResponse(render_sign_in_page(mount, next_path=f"{mount}/", error=failed), status_code=401)
-    else:
-        try:
-            person, next_path = oidc.finish_sign_in(
-                state,
-                code,
-                transaction=request.cookies.get(_TRANSACTION_COOKIE),
-                provider_id=provider.id,
-                providers=access_settings().providers,
-            )
-        except oidc.TokenRejected as exc:
-            log_rejected_credential()
-            logger.info("Sign-in with %s rejected: %s", provider.id, exc)
-            response = HTMLResponse(render_sign_in_page(mount, next_path=f"{mount}/", error=failed), status_code=401)
+    next_path = f"{mount}/"
+    person: oidc.Person | None = None
+    try:
+        pending = oidc.claim_sign_in(
+            state, transaction=request.cookies.get(_TRANSACTION_COOKIE), provider_id=provider.id
+        )
+        # Trying again after a failure leads to the page the person was going to.
+        next_path = pending.next_path
+        if error is not None or code is None:
+            # The person cancelled, or the provider refused; its `error` is a short code such as access_denied.
+            logger.info("Sign-in with %s returned %s", provider.id, error or "no code")
         else:
-            response = RedirectResponse(next_path, status_code=303)
-            session_id = sessions.start(person)
-            response.headers.append("set-cookie", sessions.cookie(session_id, session_cookie_path(request)))
+            person = oidc.finish_sign_in(pending, code, providers=access_settings().providers)
+    except oidc.TokenRejected as exc:
+        log_rejected_credential()
+        logger.info("Sign-in with %s rejected: %s", provider.id, exc)
+    response: Response
+    if person is None:
+        failed = f"Signing in with {provider.title} did not succeed. Try again."
+        response = HTMLResponse(render_sign_in_page(mount, next_path=next_path, error=failed), status_code=401)
+    else:
+        response = RedirectResponse(next_path, status_code=303)
+        session_id = sessions.start(person)
+        response.headers.append("set-cookie", sessions.cookie(session_id, session_cookie_path(request)))
     # The transaction ends here, whatever the outcome.
     ended = sessions.set_cookie(_TRANSACTION_COOKIE, "", _callback_path(mount, provider), 0)
     response.headers.append("set-cookie", ended)
