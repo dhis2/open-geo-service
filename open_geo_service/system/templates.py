@@ -26,6 +26,7 @@ from open_geo_service.scheduler.presets import form_values, schedule_description
 from open_geo_service.shared.classes import class_colors, classification_from_template
 from open_geo_service.shared.display import DEFAULT_RANGE, display_midpoint, range_spec
 from open_geo_service.shared.time import datetime_to_period_string, has_calendar_periods
+from open_geo_service.tables.templates import is_table_template
 
 from .schemas import Link, RootResponse
 
@@ -550,6 +551,10 @@ def _dataset_page_context(
         "refresh_href": f"/data-sources/{template['id']}" if vector and template and refreshable else None,
         "refresh_blocked": refresh_blocked,
         "table": _table_view(record.dataset_id) if summary["kind"] == "table" else None,
+        # A table from a data source, rather than one a pipeline computes.
+        "table_source_href": f"/data-sources/{template['id']}"
+        if template.get("id") and is_table_template(template)
+        else None,
     }
 
 
@@ -830,6 +835,9 @@ def _ingest_defaults(template: dict[str, Any], today: date) -> dict[str, Any]:
     """
     direction = str(template.get("temporal_direction") or "past")
     period = str(template.get("period_type") or "")
+    if is_table_template(template):
+        # A table template: blank bounds read every period its source has.
+        return {"start": "", "end": "", "start_required": False, "direction": "table"}
     if registry_datasets.is_timeless(template):
         # No time axis (CLIM-1448): the dataset is fetched whole, so there is no range to choose.
         return {"start": "", "end": "", "start_required": False, "direction": "static"}
@@ -903,6 +911,8 @@ def _data_source_page_context(
         ("Units", str(template.get("units") or ""), None),
         ("Cell methods", str(template.get("cell_methods") or ""), None),
         ("Period type", str(template.get("period_type") or ""), None),
+        ("Table schema", str(template.get("schema") or ""), None),
+        ("Feature collection", str(template.get("collection") or ""), None),
         ("Available", _coverage_label(temporal.get("begin"), temporal.get("end")), None),
         ("Direction", str(template.get("temporal_direction") or ""), None),
         ("Resolution", str(template.get("resolution") or ""), None),
@@ -1171,9 +1181,31 @@ def render_data_sources_page(mount: str) -> str:
         styles=_read_asset("geoservice_ui.css"),
         list_script=_read_asset("geoservice_list.js"),
         nav=page_nav(mount, "data-sources"),
-        sources=[_source_view(t) for t in _ingestable_templates(templates)]
-        + [_feature_source_view(t) for t in _load_feature_templates()],
+        sources=_fetchable_sources(templates, _load_feature_templates(), _load_table_templates()),
     )
+
+
+def _fetchable_sources(
+    templates: list[dict[str, Any]],
+    feature_templates: list[dict[str, Any]] | None,
+    table_templates: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The data sources this instance can fetch, as cards: rasters, then vectors, then tables."""
+    return (
+        [_source_view(t) for t in _ingestable_templates(templates)]
+        + [_feature_source_view(t) for t in feature_templates or []]
+        + [{**_source_view(t), "kind": "table"} for t in table_templates or []]
+    )
+
+
+def _load_table_templates() -> list[dict[str, Any]]:
+    try:
+        from open_geo_service.tables.templates import list_table_templates
+
+        return list_table_templates()
+    except Exception:
+        _log.exception("Unexpected error loading table templates")
+        return []
 
 
 def _load_workflows(viewer: Principal | None) -> list[Any]:
@@ -1929,6 +1961,7 @@ def _landing_catalogue(
     templates: list[dict[str, Any]],
     workflows: list[Any],
     feature_templates: list[dict[str, Any]] | None = None,
+    table_templates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Split templates between the Data sources and Workflows areas by what can be ingested.
 
@@ -1938,8 +1971,7 @@ def _landing_catalogue(
     Workflows as an output of an unknown workflow, rather than silently dropped.
     """
     sources = sorted(
-        [_source_view(t) for t in _ingestable_templates(templates)]
-        + [_feature_source_view(t) for t in feature_templates or []],
+        _fetchable_sources(templates, feature_templates, table_templates),
         key=lambda source: (source["provider"].lower(), source["name"].lower()),
     )
     workflow_ids = {workflow.id for workflow in workflows}
@@ -2080,7 +2112,9 @@ def render_landing(version: str, mount: str, viewer: Principal | None = None) ->
     """
     extent = _load_extent()
     templates = _load_templates()
-    catalogue = _landing_catalogue(templates, _load_workflows(viewer), _load_feature_templates())
+    catalogue = _landing_catalogue(
+        templates, _load_workflows(viewer), _load_feature_templates(), _load_table_templates()
+    )
     return get_template("landing_page.html").render(
         version=version,
         mount=mount,

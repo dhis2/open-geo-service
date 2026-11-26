@@ -286,7 +286,9 @@ def _table_readme(dataset_id: str, artifact: ArtifactRecord, template: dict[str,
     lines += ["", "## Licence", ""]
     licences = [licence for licence in sources.licences if licence.identifier or licence.name]
     if not licences:
-        lines.append("Not declared by the datasets it was computed from.")
+        lines.append(
+            "Not declared." if sources.own is not None else "Not declared by the datasets it was computed from."
+        )
     else:
         if len(sources.licences) > 1:
             lines += ["Computed from several datasets, so the licence of each applies:", ""]
@@ -300,7 +302,7 @@ def _table_readme(dataset_id: str, artifact: ArtifactRecord, template: dict[str,
         lines.append(f"- {name}{roles}")
     for link in services._derived_from(artifact, request):
         lines.append(f"- Computed from: [{link['title']}]({link['href']})")
-    for source_url in services._source_pages(dataset_id, {}):
+    for source_url in services._source_pages(dataset_id, template):
         lines.append(f"- Source: {source_url}")
     lines.append(f"- Last updated: {artifact.created_at.isoformat()}")
 

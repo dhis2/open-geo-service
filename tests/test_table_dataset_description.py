@@ -355,6 +355,8 @@ STATION_SCHEMA = """
     - {name: day, type: date, required: true, nullable: false, represents: period_start, description: Day observed.}
     - {name: rainfall, type: double, unit: mm, represents: value, description: Rainfall over the day.}
     - {name: gauges, type: int32, description: Gauges read.}
+    - {name: reading, type: double, represents: value, description: Reading of the station's other gauge.}
+    - {name: unit, type: string, description: Unit of the reading.}
   key: [station, day]
 - id: district_daily
   name: Daily district values, by a feature column named as the latest values name a period
@@ -383,7 +385,10 @@ def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_
         return store.write_rows(dataset_id="stations", rows=rows, dataset_name="Station rainfall", **arguments)
 
     record = write(
-        [{"station": "S1", "day": "2026-01-02", "rainfall": 4.0}, {"station": "S1", "day": "2026-01-01"}],
+        [
+            {"station": "S1", "day": "2026-01-02", "rainfall": 4.0, "reading": 0.2, "unit": "in"},
+            {"station": "S1", "day": "2026-01-01"},
+        ],
         schema="station_daily",
         period_type="daily",
     )
@@ -403,15 +408,17 @@ def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_
         ("S1", "2026-01-02", "2026-01-02", "2026-01-02", 4.0),
     ]
     header = client.get("/tables/stations/rows", params={"format": "csv"}).text.splitlines()[0]
-    assert header == "station,period,day,period_end,rainfall,gauges,written_at"
+    assert header == "station,period,day,period_end,rainfall,gauges,reading,unit,written_at"
     assert client.get("/tables/stations/rows", params={"feature": "S1"}).status_code == 400
     assert client.get("/tables/stations/rows", params={"reducer": "mean"}).status_code == 400
 
     collection = client.get("/stac/tables/stations/collection.json").json()
     assert collection["description"] == "Station rainfall: values per daily period."
-    columns = ["station", "day", "rainfall", "gauges", "written_at"]
+    columns = ["station", "day", "rainfall", "gauges", "reading", "unit", "written_at"]
     assert [column["name"] for column in collection["table:columns"]] == columns
-    assert collection["table:columns"][2]["unit"] == "mm"
+    # A unit the schema declares for a column stands; the unit column gives the other values theirs.
+    units = {column["name"]: column.get("unit") for column in collection["table:columns"]}
+    assert (units["rainfall"], units["reading"]) == ("mm", "in")
     assert collection["extent"]["temporal"]["interval"] == [["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"]]
     assert collection["extent"]["spatial"]["bbox"] == [[-180.0, -90.0, 180.0, 90.0]]
 
