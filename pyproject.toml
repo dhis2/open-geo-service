@@ -89,8 +89,9 @@ server = [
     "geozarr-toolkit==0.1.*",
     # 0.2.2 writes each level's `proj:`/`spatial:` attrs, its `spatial_ref` coordinate and its
     # affine in `multiscales.layout`, and sizes time shards from the source's time chunks. 0.3.0
-    # applies the encoding's codecs and drops the 4-D limit. `mode` is still ours (topozarr#26).
-    "topozarr>=0.3.0,<0.4",
+    # applies the encoding's codecs and drops the 4-D limit. 0.4.0 packs CF-scaled integers per
+    # tile and drops `block_reduce`'s `skipna`. `mode` is still ours (topozarr#26).
+    "topozarr>=0.4.0,<0.5",
     "rioxarray>=0.17",
     # Directly imported (shared/time.py, streaming, openeo). Capped to 2.x; pandas
     # 3.0 is a breaking major and not yet validated against this stack.

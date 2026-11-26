@@ -563,7 +563,9 @@ directory is not reachable through it.
 
 `GET /features/{collection_id}/data.pmtiles` serves the collection's vector tiles, a PMTiles
 archive the map viewer draws from, with range requests. Every refresh builds it from the stored
-GeoParquet, simplified per zoom, so it is for display only: aggregation reads the GeoParquet. A
+GeoParquet, simplified per zoom, so it is for display only: aggregation reads the GeoParquet.
+Zoomed out, polygons keep every feature large enough to draw, so boundaries show no gaps, while
+dense points and lines are thinned to keep tiles small. A
 failed build is logged and does not fail the refresh; the route then answers 404 and the STAC
 collection has no `tiles` asset.
 
