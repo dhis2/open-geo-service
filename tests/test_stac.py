@@ -572,6 +572,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
 
     bands = collection["assets"]["zarr"]["bands"]
     assert bands[0]["statistics"] == {"minimum": 0.0, "maximum": 6.0, "mean": pytest.approx(12.0 / 7)}
+    assert collection["assets"]["icechunk"]["bands"] == bands
     assert collection["renders"]["default"]["nodata"] == 0.0
 
 
