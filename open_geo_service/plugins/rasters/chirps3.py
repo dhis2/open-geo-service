@@ -27,12 +27,12 @@ _STORE_URLS = {
 _SOURCE_VARIABLE = "precipitation_surface"
 _SOURCE_TIME_DIM = "time"
 _VARIABLE = "precip"
-# The source is a rate in kg m-2 s-1, which is mm/s.
+# The source is a rate in kg m-2 s-1, which is mm/s, so a day's rate times this is its total in mm.
 _SECONDS_PER_DAY = 86400
 
 
 class CHIRPS3DailyPlugin(BaseDatasetPlugin):
-    """Streaming plugin for CHIRPS3 daily precipitation, stored as mm/d.
+    """Streaming plugin for CHIRPS3 daily precipitation, stored as each day's total in mm.
 
     Args:
         stage: ``final`` or ``prelim`` CHIRPS3 release stage.
@@ -75,7 +75,7 @@ class CHIRPS3DailyPlugin(BaseDatasetPlugin):
         return self._read_days(day, day + np.timedelta64(1, "D"), bbox)
 
     def _read_days(self, start: np.datetime64, end: np.datetime64, bbox: list[float]) -> xr.Dataset:
-        """The days in ``[start, end)`` over the bbox, in mm/d, with time on ``t``."""
+        """The daily totals in ``[start, end)`` over the bbox, in mm, with time on ``t``."""
         ds = self._zarr.slice_time(start, end, prepare=lambda source: self._prepare(source, bbox))
         ds = ds.rename({_SOURCE_VARIABLE: _VARIABLE})
         expected = int((end - start) // np.timedelta64(1, "D"))
@@ -87,7 +87,7 @@ class CHIRPS3DailyPlugin(BaseDatasetPlugin):
 
         precip = ds[_VARIABLE] * _SECONDS_PER_DAY
         # The source attributes describe the rate in kg m-2 s-1, so they are replaced, not kept.
-        precip.attrs = {"long_name": "Precipitation rate", "units": "mm/d"}
+        precip.attrs = {"long_name": "Precipitation", "units": "mm"}
         return ds.assign({_VARIABLE: precip}).rename({_SOURCE_TIME_DIM: "t"})
 
     def _prepare(self, source: xr.Dataset, bbox: list[float]) -> xr.Dataset:

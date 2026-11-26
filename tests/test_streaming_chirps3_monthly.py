@@ -87,9 +87,14 @@ def test_template_is_registered_with_the_monthly_plugin() -> None:
     assert template["ingestion"]["plugin"].endswith("CHIRPS3MonthlyPlugin")
 
 
-def test_template_units_match_the_monthly_normal() -> None:
-    """An anomaly pairs these two, so their units must agree."""
-    loaded = {d["id"]: d for d in registry.list_datasets()}
-    assert loaded["chirps3_precipitation_monthly"]["units"] == "mm/d"
-    assert loaded["chirps3_precipitation_monthly_normal_1991_2020"]["units"] == "mm/d"
-    assert loaded["era5land_precipitation_monthly"]["units"] == "mm/d"
+def test_precipitation_templates_declare_totals() -> None:
+    """Every precipitation dataset is a total in mm (CLIM-1638), so an observed month, its
+    normal and their absolute anomaly agree, and only a relative anomaly is in percent."""
+    precipitation = [d for d in registry.list_datasets() if d.get("variable") in {"precip", "tp"}]
+    assert len(precipitation) >= 15
+    for template in precipitation:
+        expected = "%" if "relative_anomaly" in template["id"] else "mm"
+        assert template["units"] == expected, template["id"]
+        if template.get("ingestion") and template["period_type"] != "climatology":
+            assert template["standard_name"] == "lwe_thickness_of_precipitation_amount", template["id"]
+            assert template["cell_methods"] == "time: sum", template["id"]

@@ -55,7 +55,7 @@ def test_daily_periods_end_at_the_newest_day_in_the_store(monkeypatch: pytest.Mo
     assert periods == ["2025-03-10", "2025-03-11", "2025-03-12"]
 
 
-def test_a_day_is_stored_in_mm_per_day_north_up(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_day_is_stored_as_its_total_in_mm_north_up(monkeypatch: pytest.MonkeyPatch) -> None:
     _serve(monkeypatch, _store("2025-01-31"))
 
     day = CHIRPS3DailyPlugin().fetch_period("2025-01-08", _BBOX)
@@ -64,7 +64,7 @@ def test_a_day_is_stored_in_mm_per_day_north_up(monkeypatch: pytest.MonkeyPatch)
     assert day.t.values[0] == np.datetime64("2025-01-08", "ns")
     assert float(day.precip.mean()) == pytest.approx(7.0)
     # The source's attributes describe kg m-2 s-1, so none of them survive the conversion.
-    assert day.precip.attrs == {"long_name": "Precipitation rate", "units": "mm/d"}
+    assert day.precip.attrs == {"long_name": "Precipitation", "units": "mm"}
     assert day.y.values.tolist() == [-1.5, -2.0, -2.5]
 
 

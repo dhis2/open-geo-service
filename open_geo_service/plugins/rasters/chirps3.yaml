@@ -2,9 +2,9 @@
   name: Precipitation (CHIRPS3)
   short_name: Precipitation
   description: >-
-    Daily rainfall over land at 5 km, from satellite estimates calibrated against station
+    Daily rainfall total over land at 5 km, from satellite estimates calibrated against station
     observations. Covers 60 degrees south to 60 degrees north from 1981 onwards.
-  standard_name: lwe_precipitation_rate
+  standard_name: lwe_thickness_of_precipitation_amount
   variable: precip
   period_type: daily
   sync:
@@ -18,10 +18,10 @@
       resolution: P1D
   ingestion:
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin
-  # Daily precipitation as a rate (mm/day), which is what xclim drought indices (SPI/SPEI)
-  # consume directly. The source rate is in kg m-2 s-1 (mm/s); the plugin converts it.
-  units: mm/d
-  cell_methods: "time: mean"
+  # Every precipitation dataset is a total (CLIM-1638). xclim indices take a rate: convert
+  # with the amount2rate process (docs/climate_indices.md).
+  units: mm
+  cell_methods: "time: sum"
   resolution: 5 km x 5 km
   source: CHIRPS v3, via dynamical.org
   # The page of the mirror the data is read from, as for the other mirrored datasets; CHC, where
@@ -71,8 +71,8 @@
     plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin
     params:
       stage: prelim
-  units: mm/d
-  cell_methods: "time: mean"
+  units: mm
+  cell_methods: "time: sum"
   resolution: 5 km x 5 km
   source: CHIRPS v3 preliminary, via dynamical.org
   source_url: https://dynamical.org/catalog/ucsb-chc-chirps-analysis-preliminary/
