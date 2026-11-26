@@ -64,7 +64,14 @@ def cancel_ingestion_job(job_id: str) -> JobRecord:
 
 
 def _ingestable_template_or_404(dataset_id: str) -> dict[str, Any]:
+    from open_geo_service.tables.templates import table_template_is_hidden
+
     template = services.get_ingestable_template(dataset_id)
+    if template is None and table_template_is_hidden(dataset_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{dataset_id}' is declared as a table and as a raster or vector data source; rename one of them",
+        )
     if template is None:
         raise HTTPException(status_code=404, detail=f"Data source '{dataset_id}' not found")
     return template

@@ -31,13 +31,28 @@ PERIOD_TYPES = ("daily", "weekly", "dekadal", "monthly", "yearly")
 
 
 def list_table_templates() -> list[dict[str, Any]]:
-    """Every table template, each with its `schema` filled in."""
-    return list(_templates_cached(*_cache_key()).values())
+    """Every table template, each with its `schema` filled in, but those whose id is taken.
+
+    A table template whose id a raster or vector template also declares is left out and logged,
+    as a vector template sharing a raster's id is (`usable_feature_templates`). The other keeps
+    the id, so listings, pages, ingest and sync all resolve it to the same data source.
+    """
+    templates = _templates_cached(*_cache_key()).values()
+    taken = _ids_of_other_templates()
+    return [template for template in templates if not _is_taken(template, taken)]
 
 
 def get_table_template(template_id: str) -> dict[str, Any] | None:
-    """The table template with *template_id*, or None when no table template declares it."""
-    return _templates_cached(*_cache_key()).get(template_id)
+    """The table template with *template_id*, or None when none declares it or its id is taken."""
+    template = _templates_cached(*_cache_key()).get(template_id)
+    if template is None or _is_taken(template, _ids_of_other_templates()):
+        return None
+    return template
+
+
+def table_template_is_hidden(template_id: str) -> bool:
+    """Whether a table template declares *template_id* but a raster or vector template has taken it."""
+    return template_id in _templates_cached(*_cache_key()) and template_id in _ids_of_other_templates()
 
 
 def is_table_template(template: dict[str, Any]) -> bool:
@@ -54,6 +69,26 @@ def reset_table_template_caches() -> None:
     """Forget the parsed templates, for a test that changes `plugins_dir` or installs a plugin."""
     _builtin.cache_clear()
     _templates_cached.cache_clear()
+
+
+def _ids_of_other_templates() -> set[str]:
+    """The ids raster and vector templates declare."""
+    from open_geo_service.data_registry.services import datasets as raster_templates
+    from open_geo_service.features import templates as feature_templates
+
+    rasters = raster_templates.list_datasets()
+    return {str(template["id"]) for template in [*rasters, *feature_templates.list_feature_templates()]}
+
+
+def _is_taken(template: dict[str, Any], taken: set[str]) -> bool:
+    if str(template["id"]) not in taken:
+        return False
+    logger.warning(
+        "Table template '%s' has the same id as a raster or vector data source; "
+        "it is not listed and cannot be ingested until one of them is renamed",
+        template["id"],
+    )
+    return True
 
 
 def _cache_key() -> tuple[str | None, str | None]:

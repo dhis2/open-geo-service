@@ -44,7 +44,11 @@ class BaseTablePlugin:
         raise NotImplementedError("Table plugins must implement periods()")
 
     def fetch_period(self, period_id: str) -> Iterable[Mapping[str, Any]]:
-        """The rows of one period, each naming its columns as the template's schema does."""
+        """The rows of one period, each naming its columns as the template's schema does.
+
+        Called only for a period the last `periods` call returned. The rows are the period's in
+        full: a stored row of the period that they lack is removed.
+        """
         raise NotImplementedError("Table plugins must implement fetch_period()")
 
 
@@ -72,7 +76,7 @@ class FieldsTablePlugin(BaseTablePlugin):
             raise ValueError(f"columns or constants name columns schema '{self.schema.id}' lacks: {unknown}")
         # Read as a field is, so `period_start: 2020` gives a source without a period field its year.
         self.constants = {name: _typed(value, declared[name], "constants") for name, value in (constants or {}).items()}
-        self._by_period: dict[str, list[dict[str, Any]]] = {}
+        self._by_period: dict[str, list[dict[str, Any]]] | None = None
 
     def records(self, start: date | None, end: date | None) -> Iterable[tuple[str, Mapping[str, Any]]]:
         """Each record from the first day of *start*'s period to the last of *end*'s, and where it is.
@@ -92,7 +96,10 @@ class FieldsTablePlugin(BaseTablePlugin):
         return sorted(self._by_period)
 
     def fetch_period(self, period_id: str) -> list[dict[str, Any]]:
-        return self._by_period.get(period_id, [])
+        # An empty answer would remove the period's stored rows, so a period not read is an error.
+        if self._by_period is None or period_id not in self._by_period:
+            raise ValueError(f"period {period_id} was not among those the last periods() call returned")
+        return self._by_period[period_id]
 
     def _grouped(
         self, records: Iterable[tuple[str, Mapping[str, Any]]], first: str | None, last: str | None
@@ -108,9 +115,13 @@ class FieldsTablePlugin(BaseTablePlugin):
             for column in self.schema.columns
             if column.name not in self.constants and column != period_column
         ]
+        # The mapped fields and those of required columns, so a typo in a header is named where it is.
+        needed = set(self.columns.values()) | {field for column, field in read if column.required}
+        if period_column.name not in self.constants:
+            needed.add(period_field)
         by_period: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for where, record in records:
-            if missing := sorted(set(self.columns.values()) - set(record)):
+            if missing := sorted(needed - set(record)):
                 raise ValueError(f"{where}: no fields {missing}")
             start = self.constants.get(period_column.name) or _typed(record.get(period_field), period_column, where)
             if not isinstance(start, date):

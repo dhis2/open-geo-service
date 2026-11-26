@@ -873,7 +873,7 @@ def plugins_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def test_a_table_template_is_listed_ingested_synced_and_described_by_its_template(
-    client: TestClient, plugins_dir: Path
+    client: TestClient, plugins_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     listed = {source["id"]: source for source in client.get("/data-sources").json()}
     assert listed["district_rainfall"]["itemType"] == "table"
@@ -947,6 +947,29 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
 
     _write([_row("D1", 1.0)])
     assert client.post("/sync/precip_districts", json={}).status_code == 409
+
+    # A header that misspells a required column is named, with the line.
+    (plugins_dir / "visits.csv").write_text("distrct,month,visits\nD1,2026-02,12\n", encoding="utf-8")
+    misspelt = client.post("/ingestions", json={"dataset_id": "district_visits"})
+    assert misspelt.status_code == 400
+    assert "CSV line 2: no fields ['district']" in misspelt.json()["detail"]
+
+    # A vector template declaring the table's id keeps it: everything resolves it to the vector.
+    from open_geo_service.features import templates as feature_templates
+
+    (plugins_dir / "plugins" / "vectors").mkdir()
+    (plugins_dir / "plugins" / "vectors" / "visits.yaml").write_text(
+        "- id: district_visits\n  name: Clinics\n  id_property: code\n  provider: fake\n"
+        "  source_url: https://example.org/clinics\n",
+        encoding="utf-8",
+    )
+    feature_templates.reset_feature_template_caches()
+    listed = [source for source in client.get("/data-sources").json() if source["id"] == "district_visits"]
+    assert [source["itemType"] for source in listed] == ["feature"]
+    assert any("district_visits" in record.getMessage() for record in caplog.records)
+    assert client.post("/ingestions", json={"dataset_id": "district_visits"}).status_code == 409
+    assert client.get("/data-sources/district_visits").json()["itemType"] == "feature"
+    assert "Clinic visits by district" not in client.get("/data-sources", params={"f": "html"}).text
 
     # A schema file that cannot be read refuses startup, naming the file, rather than failing every listing.
     from open_geo_service.main import app

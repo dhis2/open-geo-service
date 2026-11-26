@@ -770,7 +770,12 @@ period may be a date or a period id (`2026-01`, `2026-W01`, `2026`).
 
 - `open_geo_service.plugins.tables.csv_file.CsvTablePlugin` reads one CSV file, once per ingestion
   or sync, from `path`: a file path relative to the config file, or an http(s) URL. Most files on
-  the Humanitarian Data Exchange (data.humdata.org) can be read this way.
+  the Humanitarian Data Exchange (data.humdata.org) can be read this way. The file is read whole
+  into memory.
+
+A template, with its `ingestion.params`, is public at `GET /data-sources`, so it holds no secrets:
+a plugin reads a key or token from an environment variable, as raster plugins do (see
+[Credentials](adding_custom_datasets.md#helpers-grid-inference-and-tuning)).
 
 Rows name their features by id, and the store refuses an id the collection lacks. Use boundaries
 of the same edition as the table: HDX's 2020 Sierra Leone population counts code Kambia and Port

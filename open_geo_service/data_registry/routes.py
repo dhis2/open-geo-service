@@ -69,24 +69,14 @@ def list_data_sources(request: Request, response: Response) -> list[dict[str, An
     rasters = [_with_ingestability(dataset) for dataset in datasets.list_datasets()]
     providers = feature_providers.load_feature_providers()
     features = [_feature_template_view(template, providers) for template in usable_feature_templates()]
-    return (
-        rasters
-        + features
-        + [_table_template_view(template) for template in _usable_table_templates(rasters + features)]
-    )
+    from open_geo_service.tables.templates import list_table_templates
+
+    return rasters + features + [_table_template_view(template) for template in list_table_templates()]
 
 
 def _table_template_view(template: dict[str, Any]) -> dict[str, Any]:
     """A table template, marked as one; it declares its plugin, so it can be ingested."""
     return {**template, "itemType": "table", "ingestable": True}
-
-
-def _usable_table_templates(listed: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Table templates whose id no raster or feature template in *listed* has; those keep the id."""
-    from open_geo_service.tables.templates import list_table_templates
-
-    taken = {str(template["id"]) for template in listed}
-    return [template for template in list_table_templates() if str(template["id"]) not in taken]
 
 
 def _get_dataset_or_404(dataset_id: str) -> dict[str, Any]:
