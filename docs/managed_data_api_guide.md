@@ -720,6 +720,74 @@ checked and the README has no join example; without a `period_start` column, the
 extent and no latest values. A table without a `collection_id` column reports the whole world as
 its spatial extent.
 
+### Table templates
+
+Data that arrives already aggregated, such as station series per district, DHIS2 data values or
+model outputs, comes in through a table template, as rasters and vectors do through theirs. Table
+templates are YAML lists in a `tables/` folder, read from core, then installed plugin packages,
+then the instance `plugins_dir`; a later template with the same id replaces an earlier one. They
+are listed at `GET /data-sources` with `itemType: "table"`, beside raster and vector data sources.
+
+```yaml
+- id: district_rainfall
+  name: Rainfall by district
+  description: Monthly rainfall per district, from the met office's stations.
+  source: Met Office
+  source_url: https://met.example.org/rainfall
+  license: CC-BY-4.0
+  providers:
+    - {name: Met Office, url: https://met.example.org, roles: [producer, licensor]}
+  period_type: monthly        # daily, weekly, dekadal, monthly or yearly
+  schema: aggregation         # the default; a schema from a tables/schemas/ file
+  collection: districts       # the feature collection the rows report on
+  ingestion:
+    plugin: open_geo_service.plugins.tables.csv_file.CsvTablePlugin
+    params:
+      path: data/rainfall.csv   # relative to the config file, or an http(s) URL
+      columns: {feature_id: district, period_start: month, value: rainfall_mm}
+      constants: {unit: mm}
+```
+
+A template names its schema by id; it cannot declare one inline, so a schema is written once
+and shared. The schema must have a column representing `period_start`, since rows are fetched and
+synced per period, and `collection` is required when it has one representing `collection_id`.
+The template's description, source, licence and providers are the table's, on `/datasets`, its
+STAC collection, README and page, and its `source_url` is the collection's `via` link.
+
+`POST /ingestions` with the template's id fetches the periods from `start` to `end` and writes
+their rows to the table dataset of the same id. Either may be left out: from the first, or to the
+last, period the source has. Rows are checked against the schema and written once per ingestion,
+so a refused row leaves the table as it was. A fetched period's rows replace the stored ones, so a
+value the source has revised or withdrawn is revised or removed. `POST /sync/{dataset_id}` fetches
+the periods after the table's last one; a table a pipeline computes has no template and refuses
+sync with 409.
+
+Plugins built on `FieldsTablePlugin`, such as the built-in one, read columns the same way: each
+schema column from the source field of the same name, or of the name `columns` maps it to, while
+`constants` gives a column one value for every row (`period_start: 2020` gives a source without a
+period field its year). Values are read as their column's type, an empty one is missing, and a
+period may be a date or a period id (`2026-01`, `2026-W01`, `2026`).
+
+- `open_geo_service.plugins.tables.csv_file.CsvTablePlugin` reads one CSV file, once per ingestion
+  or sync, from `path`: a file path relative to the config file, or an http(s) URL. Most files on
+  the Humanitarian Data Exchange (data.humdata.org) can be read this way. The file is read whole
+  into memory.
+
+A template, with its `ingestion.params`, is public at `GET /data-sources`, so it holds no secrets:
+a plugin reads a key or token from an environment variable, as raster plugins do (see
+[Credentials](adding_custom_datasets.md#helpers-grid-inference-and-tuning)).
+
+Rows name their features by id, and the store refuses an id the collection lacks. Use boundaries
+of the same edition as the table: HDX's 2020 Sierra Leone population counts code Kambia and Port
+Loko as they were before Karene and Falaba were created, and the current COD-AB boundaries
+renumber both.
+
+A plugin for another source subclasses `open_geo_service.tables.plugin.BaseTablePlugin` and
+implements `periods(start, end)`, the period ids the source has, and `fetch_period(period_id)`,
+that period's rows; one returning records of named fields subclasses `FieldsTablePlugin` and
+implements only `records(start, end)`. The constructor gets the template's `ingestion.params`,
+its `schema` and its `period_type`.
+
 ## 13. `/sync`
 
 `/sync` advances an existing managed dataset from its latest local coverage toward a requested upstream period.

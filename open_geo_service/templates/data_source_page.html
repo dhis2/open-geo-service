@@ -52,7 +52,7 @@
               </p>
               {% if can_ingest %}
               <p class="note">
-                Ingesting again adds to it, or replaces it when <em>Overwrite</em> is checked.
+                {% if defaults.direction == "table" %}Ingesting again replaces the rows of the periods it fetches and keeps the rest.{% else %}Ingesting again adds to it, or replaces it when <em>Overwrite</em> is checked.{% endif %}
               </p>
               {% endif %}
               {% endif %}
@@ -82,7 +82,7 @@
                       aria-describedby="start-hint"
                     />
                     <span class="hint" id="start-hint">
-                      {% if defaults.direction == "future" %}Leave blank to ingest the full forecast window from now.{% elif format_hint %}Format {{ format_hint }}.{% endif %}
+                      {% if defaults.direction == "future" %}Leave blank to ingest the full forecast window from now.{% elif defaults.direction == "table" %}Leave blank to start from the first period the source has.{% elif format_hint %}Format {{ format_hint }}.{% endif %}
                     </span>
                   </div>
                   <div class="field">
@@ -103,7 +103,9 @@
                 {% endif %}
                 <div class="checks">
                   <label><input type="checkbox" name="publish" checked /> Publish after ingestion</label>
+                  {% if defaults.direction != "table" %}
                   <label><input type="checkbox" name="overwrite" /> Overwrite if already ingested</label>
+                  {% endif %}
                 </div>
                 <div class="form-actions">
                   <button type="submit" class="primary" id="ingest-button">Ingest</button>

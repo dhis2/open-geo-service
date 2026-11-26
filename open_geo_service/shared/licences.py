@@ -90,6 +90,7 @@ _SPDX_OBLIGATIONS: dict[str, frozenset[str]] = {
     "MIT": frozenset({ATTRIBUTION}),
     "Apache-2.0": frozenset({ATTRIBUTION}),
     "CC-BY-3.0": frozenset({ATTRIBUTION}),
+    "CC-BY-3.0-IGO": frozenset({ATTRIBUTION}),
     "CC-BY-4.0": frozenset({ATTRIBUTION}),
     "OGL-UK-3.0": frozenset({ATTRIBUTION}),
     "ODbL-1.0": frozenset({ATTRIBUTION, SHARE_ALIKE}),

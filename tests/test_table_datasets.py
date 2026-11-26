@@ -806,3 +806,219 @@ def test_a_schema_that_cannot_hold_its_rules_is_refused_naming_its_file(column: 
     declared = {"id": "stations", "columns": [{"name": "station", "type": "string"}, column], "key": key}
     with pytest.raises(ValueError, match=f"table schema 'stations' in stations.yaml.*{message}"):
         parse_schema(declared, source="stations.yaml")
+
+
+# --- table templates and their plugins (CLIM-1556) ------------------------------------------
+
+RAINFALL_TEMPLATE = """\
+- id: district_rainfall
+  name: Rainfall by district
+  description: Monthly rainfall per district, from the met office's stations.
+  source: Met Office
+  source_url: https://met.example.org/rainfall
+  license: CC-BY-4.0
+  providers:
+    - {name: Met Office, url: https://met.example.org, roles: [producer, licensor]}
+  period_type: monthly
+  collection: districts
+  ingestion:
+    plugin: open_geo_service.plugins.tables.csv_file.CsvTablePlugin
+    params:
+      path: rainfall.csv
+      columns: {feature_id: district, period_start: month, value: rainfall_mm}
+      constants: {unit: mm}
+"""
+
+VISITS_SCHEMA = """\
+- id: district_visits
+  name: Clinic visits per district and month
+  columns:
+    - {name: collection_id, type: string, nullable: false}
+    - {name: district, type: string, required: true, nullable: false, represents: feature_id}
+    - {name: month, type: date, required: true, nullable: false, represents: period_start}
+    - {name: visits, type: int32, unit: visits, represents: value}
+  key: [collection_id, district, month]
+"""
+
+VISITS_TEMPLATE = """\
+- id: district_visits
+  name: Clinic visits by district
+  period_type: monthly
+  schema: district_visits
+  collection: districts
+  ingestion:
+    plugin: open_geo_service.plugins.tables.csv_file.CsvTablePlugin
+    params: {path: visits.csv}
+"""
+
+
+@pytest.fixture
+def plugins_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """An instance whose plugins_dir holds the rainfall table template, reading rainfall.csv beside its config,
+    and a visits template with a schema of its own."""
+    root = tmp_path / "plugins"
+    (root / "tables" / "schemas").mkdir(parents=True)
+    (root / "tables" / "rainfall.yaml").write_text(RAINFALL_TEMPLATE, encoding="utf-8")
+    (root / "tables" / "visits.yaml").write_text(VISITS_TEMPLATE, encoding="utf-8")
+    (root / "tables" / "schemas" / "visits.yaml").write_text(VISITS_SCHEMA, encoding="utf-8")
+    (tmp_path / "rainfall.csv").write_text(
+        "district,month,rainfall_mm,station_count\nD1,2026-01,120.5,3\nD2,2026-01,98,2\nD1,2026-02,,0\nD2,2026-02,80,2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "visits.csv").write_text("district,month,visits\nD1,2026-01,12\nD2,2026-01,7\n", encoding="utf-8")
+    config = api_config.get_config()
+    monkeypatch.setattr(api_config, "get_config", lambda: {**config, "plugins_dir": str(root)})
+    monkeypatch.setattr(api_config, "get_config_path", lambda: tmp_path / "geoservice.yaml")
+    return tmp_path
+
+
+def test_a_table_template_is_listed_ingested_synced_and_described_by_its_template(
+    client: TestClient, plugins_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    listed = {source["id"]: source for source in client.get("/data-sources").json()}
+    assert listed["district_rainfall"]["itemType"] == "table"
+    assert listed["district_rainfall"]["schema"] == "aggregation"
+    assert "Rainfall by district" in client.get("/data-sources", params={"f": "html"}).text
+    page = client.get("/data-sources/district_rainfall", params={"f": "html"}).text
+    assert "Feature collection" in page
+    assert 'name="overwrite"' not in page  # rows of a fetched period replace the stored ones; others stay
+    assert client.get("/data-sources/district_rainfall").json()["has_data"] is False
+
+    assert client.post("/ingestions", json={"dataset_id": "district_rainfall"}).status_code == 200
+    rows = client.get("/tables/district_rainfall/rows").json()["items"]
+    assert [(row["feature_id"], row["period"], row["value"], row["unit"]) for row in rows] == [
+        ("D1", "2026-01", 120.5, "mm"),
+        ("D1", "2026-02", None, "mm"),
+        ("D2", "2026-01", 98.0, "mm"),
+        ("D2", "2026-02", 80.0, "mm"),
+    ]
+    # The source withdraws D2's February value: ingesting February again removes it and keeps January.
+    source = plugins_dir / "rainfall.csv"
+    source.write_text(source.read_text(encoding="utf-8").replace("D2,2026-02,80,2\n", ""), encoding="utf-8")
+    assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "start": "2026-02"}).status_code == 200
+    rows = client.get("/tables/district_rainfall/rows").json()["items"]
+    kept = [("D1", "2026-01"), ("D1", "2026-02"), ("D2", "2026-01")]
+    assert [(row["feature_id"], row["period"]) for row in rows] == kept
+
+    dataset = client.get("/datasets/district_rainfall").json()
+    assert dataset["description"] == "Monthly rainfall per district, from the met office's stations."
+    assert (dataset["license"], dataset["source"]) == ("CC-BY-4.0", "Met Office")
+    assert [provider["name"] for provider in dataset["providers"]] == ["Met Office"]
+    stac = client.get("/stac/district_rainfall/collection.json").json()
+    assert stac["license"] == "CC-BY-4.0"
+    assert stac["providers"][0] == {
+        "name": "Met Office",
+        "url": "https://met.example.org",
+        "roles": ["producer", "licensor"],
+    }
+    assert [link["href"] for link in stac["links"] if link["rel"] == "via"] == ["https://met.example.org/rainfall"]
+    assert "Monthly rainfall per district" in client.get("/stac/district_rainfall/README.md").text
+    assert "its data source" in client.get("/datasets/district_rainfall", params={"f": "html"}).text
+
+    assert client.post("/sync/district_rainfall", json={}).json()["status"] == "up_to_date"
+    with (plugins_dir / "rainfall.csv").open("a", encoding="utf-8") as csv_file:
+        csv_file.write("D1,2026-03-31,40,3\n")
+    assert client.get("/sync/district_rainfall/plan").json()["delta_start"] == "2026-03"
+    plan = client.get("/sync/district_rainfall/plan", params={"end": "2026-12"}).json()
+    assert (plan["target_end"], plan["target_end_source"]) == ("2026-03", "source")
+    synced = client.post("/sync/district_rainfall", json={}).json()
+    assert (synced["status"], synced["dataset"]["extent"]["temporal"]["end"]) == ("completed", "2026-03")
+
+    with (plugins_dir / "rainfall.csv").open("a", encoding="utf-8") as csv_file:
+        csv_file.write("D3,2026-04,lots,1\n")
+    refused = client.post("/ingestions", json={"dataset_id": "district_rainfall", "start": "2026-04"})
+    assert refused.status_code == 400
+    assert "CSV line 6: value 'lots' is not a double" in refused.json()["detail"]
+    assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "end": "2026-03"}).status_code == 200
+
+    # A template whose schema is the instance's own, with columns named as the source's fields.
+    assert client.post("/ingestions", json={"dataset_id": "district_visits"}).status_code == 200
+    rows = client.get("/tables/district_visits/rows").json()["items"]
+    assert [(row["district"], row["month"], row["visits"]) for row in rows] == [
+        ("D1", "2026-01-01", 12),
+        ("D2", "2026-01-01", 7),
+    ]
+    columns = client.get("/stac/district_visits/collection.json").json()["table:columns"]
+    assert [(column["name"], column.get("unit")) for column in columns][1:4] == [
+        ("district", None),
+        ("month", None),
+        ("visits", "visits"),
+    ]
+
+    _write([_row("D1", 1.0)])
+    assert client.post("/sync/precip_districts", json={}).status_code == 409
+
+    # A header that misspells a required column is named, with the line.
+    (plugins_dir / "visits.csv").write_text("distrct,month,visits\nD1,2026-02,12\n", encoding="utf-8")
+    misspelt = client.post("/ingestions", json={"dataset_id": "district_visits"})
+    assert misspelt.status_code == 400
+    assert "CSV line 2: no fields ['district']" in misspelt.json()["detail"]
+
+    # A vector template declaring the table's id keeps it: everything resolves it to the vector.
+    from open_geo_service.features import templates as feature_templates
+
+    (plugins_dir / "plugins" / "vectors").mkdir()
+    (plugins_dir / "plugins" / "vectors" / "visits.yaml").write_text(
+        "- id: district_visits\n  name: Clinics\n  id_property: code\n  provider: fake\n"
+        "  source_url: https://example.org/clinics\n",
+        encoding="utf-8",
+    )
+    feature_templates.reset_feature_template_caches()
+    listed = [source for source in client.get("/data-sources").json() if source["id"] == "district_visits"]
+    assert [source["itemType"] for source in listed] == ["feature"]
+    assert any("district_visits" in record.getMessage() for record in caplog.records)
+    assert client.post("/ingestions", json={"dataset_id": "district_visits"}).status_code == 409
+    assert client.get("/data-sources/district_visits").json()["itemType"] == "feature"
+    assert "Clinic visits by district" not in client.get("/data-sources", params={"f": "html"}).text
+
+    # A schema file that cannot be read refuses startup, naming the file, rather than failing every listing.
+    from open_geo_service.main import app
+    from open_geo_service.tables.schemas import reset_schema_caches
+    from open_geo_service.tables.templates import reset_table_template_caches
+
+    schema_file = plugins_dir / "plugins" / "tables" / "schemas" / "visits.yaml"
+    schema_file.write_text(VISITS_SCHEMA.replace("unit: visits", "units: visits"), encoding="utf-8")
+    reset_schema_caches()
+    reset_table_template_caches()
+    with pytest.raises(ValueError, match=r"table schema 'district_visits' in .*\(visits.yaml\)"), TestClient(app):
+        pass
+
+
+def test_a_table_template_in_an_installed_plugin_package_is_discovered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from open_geo_service import plugin_discovery
+    from open_geo_service.tables.templates import get_table_template, reset_table_template_caches
+
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "tables" / "rainfall.yaml").write_text(RAINFALL_TEMPLATE, encoding="utf-8")
+    monkeypatch.setattr(
+        plugin_discovery, "iter_plugin_subdirs", lambda _sub: iter([("met", "met", tmp_path / "tables")])
+    )
+    reset_table_template_caches()
+    try:
+        template = get_table_template("district_rainfall")
+    finally:
+        reset_table_template_caches()
+    assert template is not None and template["collection"] == "districts"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"collection": None}, "reports on features; name their feature collection"),
+        ({"schema": "stations"}, "no table schema 'stations'"),
+        ({"period_type": "hourly"}, "must define a period_type"),
+        ({"ingestion": None}, "must define 'ingestion.plugin'"),
+    ],
+)
+def test_a_table_template_that_cannot_be_ingested_is_refused_naming_its_file(
+    change: dict[str, Any], message: str
+) -> None:
+    import yaml
+
+    from open_geo_service.tables.templates import _validated
+
+    template = {**yaml.safe_load(RAINFALL_TEMPLATE)[0], **change}
+    with pytest.raises(ValueError, match=f"Table template 'district_rainfall' in rainfall.yaml.*{message}"):
+        _validated({key: value for key, value in template.items() if value is not None}, source="rainfall.yaml")
