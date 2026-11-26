@@ -103,8 +103,8 @@ def test_monthly_periods_stop_at_the_newest_complete_month(monkeypatch: pytest.M
 
 
 @pytest.mark.parametrize("period", ["2025-01", "2025-02", "2025-04", "2025-04-17"])
-def test_a_month_is_the_mean_daily_rate_on_its_first_day(monkeypatch: pytest.MonkeyPatch, period: str) -> None:
-    """The month's total over its own number of days: CHC's monthly total divided as before."""
+def test_a_month_is_the_total_of_its_days_on_its_first_day(monkeypatch: pytest.MonkeyPatch, period: str) -> None:
+    """Summed over the month's own number of days, as CHC's monthly total is."""
     rain = np.arange(400, dtype="float32") % 7
     _serve(monkeypatch, _store("2025-12-31", rain))
 
@@ -115,8 +115,8 @@ def test_a_month_is_the_mean_daily_rate_on_its_first_day(monkeypatch: pytest.Mon
     offset = int((first - np.datetime64("2025-01-01", "D")) // np.timedelta64(1, "D"))
     assert dict(month.sizes) == {"t": 1, "y": 3, "x": 3}
     assert month.t.values[0] == first.astype("datetime64[ns]")
-    assert float(month.precip.mean()) == pytest.approx(rain[offset : offset + days].sum() / days, rel=1e-6)
-    assert month.precip.attrs["units"] == "mm/d"
+    assert float(month.precip.mean()) == pytest.approx(rain[offset : offset + days].sum(), rel=1e-6)
+    assert month.precip.attrs["units"] == "mm"
 
 
 def test_the_monthly_plugin_always_reads_the_final_stage() -> None:

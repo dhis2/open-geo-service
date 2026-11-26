@@ -113,13 +113,10 @@ class CHIRPS3DailyPlugin(BaseDatasetPlugin):
 
 
 class CHIRPS3MonthlyPlugin(CHIRPS3DailyPlugin):
-    """Streaming plugin for CHIRPS3 monthly precipitation: the mean of the final daily values, in mm/d.
+    """Streaming plugin for CHIRPS3 monthly precipitation: the sum of the final daily totals, in mm.
 
     CHC's own monthly product is the month's total, which equals the sum of the same month's
-    daily values, so the mean of the dailies is that total divided by the days in the month. The
-    store holds the mean daily rate rather than the total because every other monthly
-    precipitation dataset here is mm/d, including ``chirps3_precipitation_monthly_normal_1991_2020``,
-    the natural partner for a monthly anomaly.
+    daily values, so the stored values are the same as CHC's monthly product.
     """
 
     commit_batch_size = 12
@@ -135,7 +132,7 @@ class CHIRPS3MonthlyPlugin(CHIRPS3DailyPlugin):
         return monthly_period_ids(start, end, cutoff=cutoff)
 
     def fetch_period(self, period_id: str, bbox: list[float], **_: Any) -> xr.Dataset:
-        """Fetch one month of days, clipped to the bbox, and return their mean on the first of the month."""
+        """Fetch one month of days, clipped to the bbox, and return their total on the first of the month."""
         try:
             month = np.datetime64(normalize_period_string(str(period_id), "monthly"), "M")
         except (ValueError, TypeError) as exc:
@@ -143,4 +140,4 @@ class CHIRPS3MonthlyPlugin(CHIRPS3DailyPlugin):
         start = month.astype("datetime64[ns]")
         days = self._read_days(start, (month + np.timedelta64(1, "M")).astype("datetime64[ns]"), bbox)
         # Every day is present (checked by _read_days), so no day is skipped.
-        return days.mean("t", skipna=False, keep_attrs=True).expand_dims(t=[start])
+        return days.sum("t", skipna=False, keep_attrs=True).expand_dims(t=[start])

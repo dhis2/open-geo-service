@@ -105,9 +105,7 @@ Monthly CHIRPS precipitation, computed from the final daily product. Prefer it o
 
 **Sync behaviour** — a month is ingested once the final daily product covers all of it, two to three weeks after it ends.
 
-**Transforms** — each month is the mean of its daily values, a mean daily rate (`mm/d`). That equals CHC's own monthly total divided by the number of days in the month.
-
-That choice keeps every monthly precipitation dataset on the same units, which matters because `chirps3_precipitation_monthly_normal_1991_2020` is also `mm/d` and is the natural partner for a monthly anomaly — storing the raw total under the same label would make that comparison wrong by a factor of about 30. It is also the form xclim's drought indices expect.
+**Transforms** — each month is the sum of its daily totals in mm, which equals CHC's own monthly total. Every precipitation dataset, normal and absolute anomaly is a total in mm, so they combine directly. xclim's drought indices take a rate instead: see [Precipitation totals and rates](climate_indices.md#precipitation-totals-and-rates).
 
 ---
 
