@@ -753,8 +753,10 @@ STAC collection, README and page, and its `source_url` is the collection's `via`
 `POST /ingestions` with the template's id fetches the periods from `start` to `end` and writes
 their rows to the table dataset of the same id. Either may be left out: from the first, or to the
 last, period the source has. Rows are checked against the schema and written once per ingestion,
-so a refused row leaves the table as it was. `POST /sync/{dataset_id}` fetches the periods after
-the table's last one; a table a pipeline computes has no template and refuses sync with 409.
+so a refused row leaves the table as it was. A fetched period's rows replace the stored ones, so a
+value the source has revised or withdrawn is revised or removed. `POST /sync/{dataset_id}` fetches
+the periods after the table's last one; a table a pipeline computes has no template and refuses
+sync with 409.
 
 Plugins built on `FieldsTablePlugin`, such as the built-in one, read columns the same way: each
 schema column from the source field of the same name, or of the name `columns` maps it to, while

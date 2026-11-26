@@ -33,9 +33,10 @@ def ingest_table(
 ) -> ArtifactRecord:
     """Fetch the periods from *start* to *end* and write their rows to the template's table dataset.
 
-    Either bound may be None: from the first, or to the last, period the source has. Rows of a
-    period the table already holds replace the stored ones. *plugin* and *periods* are a sync's,
-    which has asked the source already. Raises ValueError for rows the store refuses.
+    Either bound may be None: from the first, or to the last, period the source has. The rows of
+    a fetched period replace the stored ones, so a row the source no longer has is removed.
+    *plugin* and *periods* are a sync's, which has asked the source already. Raises ValueError
+    for rows the store refuses.
     """
     plugin = plugin or load_plugin(template)
     if periods is None:
@@ -66,6 +67,7 @@ def ingest_table(
         dataset_name=str(template["name"]),
         period_type=str(template["period_type"]),
         publish=publish,
+        complete_periods=periods,
     )
 
 

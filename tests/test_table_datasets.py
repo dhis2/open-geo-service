@@ -851,6 +851,13 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
         ("D2", "2026-01", 98.0, "mm"),
         ("D2", "2026-02", 80.0, "mm"),
     ]
+    # The source withdraws D2's February value: ingesting February again removes it and keeps January.
+    source = plugins_dir / "rainfall.csv"
+    source.write_text(source.read_text(encoding="utf-8").replace("D2,2026-02,80,2\n", ""), encoding="utf-8")
+    assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "start": "2026-02"}).status_code == 200
+    rows = client.get("/tables/district_rainfall/rows").json()["items"]
+    kept = [("D1", "2026-01"), ("D1", "2026-02"), ("D2", "2026-01")]
+    assert [(row["feature_id"], row["period"]) for row in rows] == kept
 
     dataset = client.get("/datasets/district_rainfall").json()
     assert dataset["description"] == "Monthly rainfall per district, from the met office's stations."
@@ -880,7 +887,7 @@ def test_a_table_template_is_listed_ingested_synced_and_described_by_its_templat
         csv_file.write("D3,2026-04,lots,1\n")
     refused = client.post("/ingestions", json={"dataset_id": "district_rainfall", "start": "2026-04"})
     assert refused.status_code == 400
-    assert "CSV line 7: value 'lots' is not a double" in refused.json()["detail"]
+    assert "CSV line 6: value 'lots' is not a double" in refused.json()["detail"]
     assert client.post("/ingestions", json={"dataset_id": "district_rainfall", "end": "2026-03"}).status_code == 200
 
     _write([_row("D1", 1.0)])
