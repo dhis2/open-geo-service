@@ -403,7 +403,7 @@ A private instance can gate reads too:
 
 ```yaml
 authentication:
-  gate_reads: true
+  require_for_read: true
   tokens: [...]
 ```
 
@@ -443,7 +443,7 @@ STAC Browser 3.3.4 then signs in through the provider and sends the access token
 as plain images, which carry no credential, so they stay blank until signed URLs arrive
 (CLIM-1482); a collection's own page shows its thumbnail. Every response is marked
 `Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
-another. Open Geo Service refuses to start with `gate_reads` and neither a token nor a provider.
+another. Open Geo Service refuses to start with `require_for_read` and neither a token nor a provider.
 
 The design and the later steps are in [Authentication and authorization](authentication.md).
 

@@ -23,7 +23,7 @@ from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
 from open_geo_service.auth.oidc import discovery_url
-from open_geo_service.auth.tokens import access_settings, reads_gated
+from open_geo_service.auth.tokens import access_settings, auth_required_for_read
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -298,7 +298,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
     Only links and assets on this instance are marked; a source page or licence elsewhere is
     not. With reads public the document is returned unchanged.
     """
-    if not reads_gated():
+    if not auth_required_for_read():
         return document
     base = absolute_base(request)
     schemes = _auth_schemes()

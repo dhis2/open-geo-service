@@ -66,7 +66,7 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+Reads stay public by default. A private deployment gates them with `authentication.require_for_read`:
 every public route then needs the authenticated tier, except the few a client needs to find out
 how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
 sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which

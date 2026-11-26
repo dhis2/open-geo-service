@@ -4,7 +4,7 @@ A route the application serves that the table does not list gets the operator ti
 `tests/test_authentication.py` fails until it is listed. A path no route serves is left to the
 application, which answers 404. HEAD is decided as GET.
 
-With `authentication.gate_reads`, every public route outside `UNGATED` needs the authenticated
+With `authentication.require_for_read`, every public route outside `UNGATED` needs the authenticated
 tier. The table's tiers stay as listed, since read-only mode reads them.
 """
 
