@@ -131,9 +131,9 @@ def test_initial_ingestion_emits_one_event_and_hands_it_on_once(instance: dict[s
         "dataset_id": _DATASET_ID,
         "artifact_id": record.result["ingestion_id"],
         "action": "ingest",
-        "previous_end": None,  # nothing was stored before: every period is new
-        "current_start": "2026-01-01",
-        "current_end": "2026-01-02",
+        "changes": [{"start": "2026-01-01", "end": "2026-01-02"}],  # nothing was stored before: every period is new
+        "coverage_start": "2026-01-01",
+        "coverage_end": "2026-01-02",
     }
     assert _handed_on(instance) == [event]
 
@@ -153,7 +153,9 @@ def test_extending_ingestion_reports_what_was_stored_before(instance: dict[str, 
     extended = _ingest(instance, end="2026-01-03")
 
     [event] = extended.events
-    assert (event.data["previous_end"], event.data["current_end"]) == ("2026-01-02", "2026-01-03")
+    # From the last period stored before, re-sent so an overwrite at a destination completes it.
+    assert event.data["changes"] == [{"start": "2026-01-02", "end": "2026-01-03"}]
+    assert event.data["coverage_end"] == "2026-01-03"
     assert len(_handed_on(instance, expected=2)) == 2
 
 
@@ -267,7 +269,7 @@ def test_recovered_ingestion_emits_the_event_its_committed_attempt_owed(instance
         return
     [event] = record.events
     assert event.event_id == "interrupted:0"
-    assert event.data["previous_end"] is None
+    assert event.data["changes"] == [{"start": "2026-01-01", "end": "2026-01-02"}]
     assert len(_handed_on(instance)) == 1
 
 
@@ -325,6 +327,6 @@ def test_inline_sync_is_recorded_as_a_completed_job_with_its_event(
     [event] = record.events
     # The action is the sync planner's own choice; the event reports it as planned.
     assert event.data["action"] in {"append", "rematerialize"}
-    expected_previous_end = "2026-01-02" if event.data["action"] == "append" else None
-    assert (event.data["previous_end"], event.data["current_end"]) == (expected_previous_end, "2026-01-03")
+    expected_start = "2026-01-02" if event.data["action"] == "append" else "2026-01-01"
+    assert event.data["changes"] == [{"start": expected_start, "end": "2026-01-03"}]
     assert len(_handed_on(instance, expected=2)) == 2

@@ -2639,9 +2639,9 @@ def _update_event(event_id: str = "evt-1", *, dataset_id: str = "rain_monthly", 
             "dataset_id": dataset_id,
             "artifact_id": "artifact-7",
             "action": "append",
-            "previous_end": "2025-01-31",
-            "current_start": "2024-01-01",
-            "current_end": "2025-02-28",
+            "changes": [{"start": "2025-01-31", "end": "2025-02-28"}],
+            "coverage_start": "2024-01-01",
+            "coverage_end": "2025-02-28",
         },
     )
 
@@ -2766,24 +2766,35 @@ def test_history_pruning_keeps_every_unresolved_run(
 # --- dataset updates: semantics and the event checkpoint -------------------------------------
 
 
-def test_an_update_names_the_interval_it_affected() -> None:
-    appended = {"previous_end": "2025-01-31", "current_start": "2020-01-01", "current_end": "2025-02-28"}
-    assert runner.update_interval(appended) == ("2025-01-31", "2025-02-28", "appended")
-    rewritten = {"previous_end": None, "current_start": "2020-01-01", "current_end": "2025-02-28"}
-    assert runner.update_interval(rewritten) == ("2020-01-01", "2025-02-28", "rewritten")
-    assert runner.update_interval({"previous_end": None, "current_end": "2025-02-28"}) is None
-
-
-def test_a_rewrite_runs_the_whole_coverage(
+def test_an_update_runs_each_range_it_changed_once(
     instance: None, openeo: _FakeOpenEO, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _dhis2(monkeypatch)
     _validated()
+    # A sync that replaced an old preliminary period and added a new one (CLIM-2029).
     event = _update_event()
-    event.data.update({"previous_end": None, "action": "rematerialize"})
+    event.data["changes"] = [{"start": "2024-10-31", "end": "2024-10-31"}, {"start": "2025-01-31", "end": "2025-02-28"}]
     runner.consume([event])
-    run = store.get_record("rain-to-dhis2").runs[0]  # type: ignore[union-attr]
-    assert (run.start, run.end) == ("2024-01-01", "2025-02-28") and run.source["update"] == "rewritten"
+    runner.consume([event])  # delivered twice
+    record = store.get_record("rain-to-dhis2")
+    assert record is not None and "evt-1" in record.events.handled
+    assert sorted((run.start, run.end) for run in record.runs) == [
+        ("2024-10-31", "2024-10-31"),
+        ("2025-01-31", "2025-02-28"),
+    ]
+    assert len({run.job_id for run in record.runs}) == 2 and len(openeo.started) == 2
+
+    # An update in the shape before CLIM-2029 lists no changes: skipped, not run.
+    old = _update_event("evt-old")
+    for key in ("changes", "coverage_start", "coverage_end"):
+        del old.data[key]
+    old.data.update({"previous_end": "2025-01-31", "current_start": "2024-01-01", "current_end": "2025-02-28"})
+    runner.consume([old])
+    record = store.get_record("rain-to-dhis2")
+    assert record is not None and len(record.runs) == 2
+    assert [(item.event_id, item.reason) for item in record.events.skipped] == [
+        ("evt-old", "the update lists no changed periods")
+    ]
 
 
 def test_out_of_order_and_delayed_updates_are_each_run_once(
@@ -2976,7 +2987,7 @@ def test_updates_while_paused_are_listed_not_run_on_resume(
     assert record is not None and record.runs == [] and openeo.started == []
     skipped = record.events.skipped
     assert [(item.event_id, item.reason) for item in skipped] == [("evt-paused", "the pipeline was paused")]
-    assert (skipped[0].start, skipped[0].end) == ("2025-01-31", "2025-02-28")  # the interval to run by hand
+    assert skipped[0].intervals == [("2025-01-31", "2025-02-28")]  # the interval to run by hand
 
 
 def test_a_refused_update_is_listed_with_its_interval(
@@ -2993,7 +3004,7 @@ def test_a_refused_update_is_listed_with_its_interval(
     record = store.get_record("rain-to-dhis2")
     assert record is not None and record.runs == [] and "evt-1" in record.events.handled
     assert record.events.skipped[0].reason == "the pipeline changed since it was last validated; re-check it"
-    assert (record.events.skipped[0].start, record.events.skipped[0].end) == ("2025-01-31", "2025-02-28")
+    assert record.events.skipped[0].intervals == [("2025-01-31", "2025-02-28")]
 
 
 def test_an_unreachable_destination_does_not_stop_an_update_run(
@@ -3071,9 +3082,9 @@ def _openeo_owned_update(event_id: str, *, dataset_id: str = "rain_monthly") -> 
         dataset_id=dataset_id,
         artifact_id="derived-artifact",
         action=FULL_REWRITE_EVENT_ACTION,
-        previous_end=None,
-        current_start="2024-01",
-        current_end="2025-02",
+        changes=[("2024-01", "2025-02")],
+        coverage_start="2024-01",
+        coverage_end="2025-02",
         producer_type="openeo",
         producer_job_id="derived-job",
         output_snapshot_id="SNAPSHOT00000000000A",
@@ -3101,7 +3112,7 @@ def test_an_update_owned_by_an_openeo_job_runs_a_pipeline_like_any_other(
     [run] = record.runs
     assert run.trigger == "dataset_update" and run.event_id == event.event_id
     # A full rewrite covers the whole committed coverage.
-    assert (run.start, run.end) == ("2024-01", "2025-02") and run.source["update"] == "rewritten"
+    assert (run.start, run.end) == ("2024-01", "2025-02")
     assert run.source["action"] == "full_rewrite"
     assert len(openeo.started) == 1
 
@@ -3722,7 +3733,8 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
         )
         [update] = anomaly.events
         assert update.data["dataset_id"] == derived and update.data["action"] == "full_rewrite"
-        assert update.data["previous_end"] is None and update.data["producer_job_id"] == "anomaly-job"
+        assert update.data["changes"] == [{"start": update.data["coverage_start"], "end": update.data["coverage_end"]}]
+        assert update.data["producer_job_id"] == "anomaly-job"
         [artifact] = [record for record in ingestion_services._load_records() if record.dataset_id == derived]
         assert (
             artifact.provenance is not None

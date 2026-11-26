@@ -1524,7 +1524,7 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
     persists it, so it is later than any read of the job store that did not see it.
     """
     from open_geo_service.ingestions import services as ingestion_services
-    from open_geo_service.ingestions.processes import FULL_REWRITE_EVENT_ACTION, dataset_update_event
+    from open_geo_service.ingestions.processes import FULL_REWRITE_EVENT_ACTION, dataset_update_event, written_since
     from open_geo_service.ingestions.schemas import ArtifactProvenance, ArtifactRecord, PublicationStatus
 
     job = store_get_job(job_id)
@@ -1548,10 +1548,10 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
             dataset_id=publication.dataset_id,
             artifact_id=stored.artifact_id,
             action=FULL_REWRITE_EVENT_ACTION,
-            # The store was replaced as a whole: nothing before current_end is known unchanged.
-            previous_end=None,
-            current_start=stored.coverage.temporal.start,
-            current_end=stored.coverage.temporal.end,
+            # The store was replaced as a whole: no period is known unchanged.
+            changes=written_since(None, stored.coverage.temporal.start, stored.coverage.temporal.end),
+            coverage_start=stored.coverage.temporal.start,
+            coverage_end=stored.coverage.temporal.end,
             producer_type="openeo",
             producer_job_id=job_id,
             output_snapshot_id=snapshot_id,
@@ -1600,7 +1600,7 @@ def _refuse_coverage_shrink(record: Any) -> None:
     """Refuse a full-store rewrite that would shorten a published managed dataset.
 
     The writer replaces the whole store, so a job that computes only recent periods (a trigger
-    over ``[$event.previous_end, $event.current_end]``) would silently drop the history a
+    over the event's ``changes``) would silently drop the history a
     published dataset holds. Until derived datasets can be appended to, a rewrite must cover
     at least the published coverage: it may start earlier and end later, never start later or
     end earlier. The same rule a release sync follows. A boundary the published dataset has

@@ -344,8 +344,7 @@ class SkippedUpdate(BaseModel):
     event_id: str
     time: str
     dataset_id: str | None = None
-    start: str | None = None
-    end: str | None = None
+    intervals: list[tuple[str, str]] = Field(default_factory=list)
     reason: str
 
 

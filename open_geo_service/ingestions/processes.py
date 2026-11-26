@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import timedelta
 from typing import Any
 
 from fastapi import HTTPException
@@ -13,7 +12,6 @@ from open_geo_service.extents import services as extent_services
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.schemas import ArtifactRecord, SyncAction, SyncResponse
 from open_geo_service.jobs.models import DATASET_UPDATED_EVENT_TYPE, JobEventDraft, JobExecutionResult
-from open_geo_service.shared.time import datetime_to_period_string, parse_period_string_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ INGEST_EVENT_ACTION = "ingest"
 FULL_REWRITE_EVENT_ACTION = "full_rewrite"
 """`action` of an update that replaced the whole stored dataset, such as an openEO publication.
 
-Paired with ``previous_end=None``: every period up to ``current_end`` may have changed."""
+Its one change is the whole coverage: every period may have changed."""
 """`action` of the update event an ingestion emits; syncs report their planner action instead."""
 
 _UPDATE_MARKER = "dataset_update_planned"
@@ -38,18 +36,19 @@ def dataset_update_event(
     dataset_id: str,
     artifact_id: str | None,
     action: str,
-    previous_end: str | None,
-    current_start: str | None,
-    current_end: str | None,
+    changes: list[tuple[str, str]],
+    coverage_start: str | None,
+    coverage_end: str | None,
     producer_type: str | None = None,
     producer_job_id: str | None = None,
     output_snapshot_id: str | None = None,
 ) -> JobEventDraft:
     """Describe one change to a managed dataset, for the derived datasets and pipelines that follow it.
 
-    `previous_end` is the coverage end before the change; None means every period up to
-    `current_end` is new or rewritten. `current_start` and `current_end` describe the
-    coverage after it. `action` says how the store changed, not who changed it.
+    `changes` lists the ranges of periods the change wrote, first and last period of each, in
+    the order they were planned and never joined; a whole-store rewrite lists its whole
+    coverage. `coverage_start` and `coverage_end` describe the coverage after the change.
+    `action` says how the store changed, not who changed it.
 
     The producer fields are optional and only present when given, so an ingestion's or a
     sync's event keeps its shape: `producer_type` (for example ``openeo``), the producing
@@ -59,9 +58,9 @@ def dataset_update_event(
         "dataset_id": dataset_id,
         "artifact_id": artifact_id,
         "action": action,
-        "previous_end": previous_end,
-        "current_start": current_start,
-        "current_end": current_end,
+        "changes": [{"start": start, "end": end} for start, end in changes],
+        "coverage_start": coverage_start,
+        "coverage_end": coverage_end,
     }
     for key, value in (
         ("producer_type", producer_type),
@@ -129,11 +128,21 @@ def ingest_dataset(
         dataset_id=str(dataset["id"]),
         artifact_id=artifact.artifact_id,
         action=INGEST_EVENT_ACTION,
-        previous_end=marker.get("previous_end"),
-        current_start=temporal.start,
-        current_end=temporal.end,
+        changes=written_since(marker.get("previous_end"), temporal.start, temporal.end),
+        coverage_start=temporal.start,
+        coverage_end=temporal.end,
     )
     return artifact, [event]
+
+
+def written_since(previous_end: str | None, start: str | None, end: str | None) -> list[tuple[str, str]]:
+    """The range a write changed, from the coverage end before it: None means the whole coverage.
+
+    A write after ``previous_end`` is listed from ``previous_end`` itself, re-sending the last
+    period already stored, so an overwrite at a destination completes it.
+    """
+    first = previous_end if previous_end is not None else start
+    return [(first, end)] if first is not None and end is not None else []
 
 
 def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEventDraft]:
@@ -149,33 +158,27 @@ def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEvent
         }
     ):
         return []
-    # A rematerialization may rewrite every historical value, so workflows must process the
-    # complete post-update coverage rather than only the periods after the old boundary. An
-    # append that replaces preliminary periods changed everything from the first of them.
-    previous_end = detail.current_end if detail.action == SyncAction.APPEND else None
-    if previous_end is not None and detail.refresh_start is not None and response.dataset is not None:
-        previous_end = _period_before(detail.refresh_start, response.dataset.period_type)
+    if detail.action == SyncAction.REMATERIALIZE:
+        # A rematerialization may rewrite every historical value.
+        changes = written_since(None, detail.current_start, detail.target_end)
+    else:
+        # An append lists the preliminary periods it replaced with final values (CLIM-931) and
+        # the new periods it added, as two ranges: the stored periods between them did not change.
+        changes = []
+        if detail.refresh_start is not None and detail.refresh_end is not None:
+            changes.append((detail.refresh_start, detail.refresh_end))
+        if detail.delta_start is not None:
+            changes += written_since(detail.current_end, detail.current_start, detail.target_end)
     return [
         dataset_update_event(
             dataset_id=dataset_id,
             artifact_id=response.sync_id,
             action=detail.action.value,
-            previous_end=previous_end,
-            current_start=detail.current_start,
-            current_end=detail.target_end,
+            changes=changes,
+            coverage_start=detail.current_start,
+            coverage_end=detail.target_end,
         )
     ]
-
-
-def _period_before(period: str, period_type: str | None) -> str | None:
-    """The period just before ``period``, or None, meaning every period may have changed, when it cannot be told."""
-    if period_type is None:
-        return None
-    try:
-        start = parse_period_string_to_datetime(period)
-        return datetime_to_period_string(start - timedelta(microseconds=1), period_type)
-    except ValueError:
-        return None
 
 
 def record_inline_update(*, label: str, request: dict[str, Any], result: Any, events: list[JobEventDraft]) -> None:

@@ -62,6 +62,8 @@ def _sync_response(action: SyncAction, *, status: str = "completed") -> SyncResp
             current_end="2026-01-02",
             target_end="2026-01-03",
             target_end_source="request",
+            delta_start="2026-01-03",
+            delta_end="2026-01-03",
         ),
     )
 
@@ -330,14 +332,14 @@ def test_successful_job_persists_result_and_events_atomically(monkeypatch: pytes
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_previous_end"),
+    ("action", "expected_start"),
     [
         (SyncAction.APPEND, "2026-01-02"),
-        (SyncAction.REMATERIALIZE, None),
+        (SyncAction.REMATERIALIZE, "2026-01-01"),
     ],
 )
 def test_execute_sync_returns_dataset_updated_after_completed_change(
-    action: SyncAction, expected_previous_end: str | None, monkeypatch: pytest.MonkeyPatch
+    action: SyncAction, expected_start: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(processes.services, "sync_dataset", lambda **_: _sync_response(action))
 
@@ -351,9 +353,9 @@ def test_execute_sync_returns_dataset_updated_after_completed_change(
         "dataset_id": "managed-dataset",
         "artifact_id": "artifact-2",
         "action": action.value,
-        "previous_end": expected_previous_end,
-        "current_start": "2026-01-01",
-        "current_end": "2026-01-03",
+        "changes": [{"start": expected_start, "end": "2026-01-03"}],
+        "coverage_start": "2026-01-01",
+        "coverage_end": "2026-01-03",
     }
 
 

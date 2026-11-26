@@ -158,7 +158,7 @@ def _update(number: int, dataset_id: str = "rain") -> JobEvent:
         time=datetime(2026, 11, 1, tzinfo=UTC) + timedelta(days=number),
         type=DATASET_UPDATED_EVENT_TYPE,
         source=f"/datasets/{dataset_id}",
-        data={"dataset_id": dataset_id, "current_start": "1991-01", "current_end": f"2026-0{number}"},
+        data={"dataset_id": dataset_id, "coverage_start": "1991-01", "coverage_end": f"2026-0{number}"},
     )
 
 
