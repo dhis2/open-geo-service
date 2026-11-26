@@ -324,6 +324,14 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
     assert client.get(f"/stac/vectors/regions/{unpublished.name}").status_code == 200
     assert client.get("/stac/vectors/regions/collection.json").status_code == 404
     assert client.get("/stac/../artifacts/records.json").status_code == 404
+    assert client.get("/stac/rasters/%2E%2E/%2E%2E/artifacts/records.json").status_code == 404
+    # A kind folder on another disk, linked into the catalog, is served as any other.
+    elsewhere = data.parent / "big-disk" / "rasters"
+    elsewhere.parent.mkdir()
+    (data / "catalog" / "rasters").rename(elsewhere)
+    (data / "catalog" / "rasters").symlink_to(elsewhere, target_is_directory=True)
+    assert client.get("/stac/rasters/rain/rain.icechunk/repo").status_code == 200
+    assert client.get("/stac/rasters/rain/collection.json").status_code == 200
     assert client.get("/stac/rasters/districts/README.md").status_code == 404
 
 

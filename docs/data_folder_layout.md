@@ -93,6 +93,6 @@ openEO's `/collections` are still built on request, with absolute links.
 ## Moving an instance to this layout
 
 An instance written by an earlier version keeps its datasets in `rasters/`, `vectors/`,
-`tables/` and `thumbnails/` at the top of the data folder, and this version does not read them:
-the server logs a warning at startup. Move them with `migrate_layout`; nothing is downloaded
-again. See [Upgrading](instance_guide.md#moving-to-a-new-data-folder-layout).
+`tables/` and `thumbnails/` at the top of the data folder. A writable server refuses to start
+until they are moved, and a read-only one logs a warning. Move them with `migrate_layout`;
+nothing is downloaded again. See [Upgrading](instance_guide.md#moving-to-a-new-data-folder-layout).

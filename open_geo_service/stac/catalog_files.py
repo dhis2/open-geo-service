@@ -127,8 +127,10 @@ def _catalog_documents(published: dict[str, ArtifactRecord]) -> dict[str, portol
             agents = documents.collection_agents(kind, dataset_id, request)
             data_files = _data_files(dataset_id, artifact)
             assets = collection.get("assets")
-            if configured_base() and isinstance(assets, dict) and "style" in assets:
-                tiles_url = f"{base}/stac/{data_files[f'/features/{dataset_id}/data.pmtiles']}"
+            # Not for tiles outside the dataset's folder, which the catalog does not hold.
+            tiles_key = data_files.get(f"/features/{dataset_id}/data.pmtiles")
+            if configured_base() and isinstance(assets, dict) and "style" in assets and tiles_key:
+                tiles_url = f"{base}/stac/{tiles_key}"
                 styles[style_key] = features_services.published_collection_style_or_404(dataset_id, tiles_url)
                 data_files[f"/features/{dataset_id}/styles/default.json"] = style_key
         except Exception:
@@ -334,10 +336,6 @@ _MEDIA_TYPES = {
 }
 
 
-_IMMUTABLE_STORE_FOLDERS = frozenset({"chunks", "manifests", "snapshots", "transactions"})
-"""An Icechunk store's folders whose files never change once written; `repo` and the refs do."""
-
-
 def cache_control(file: Path) -> str:
     """Immutable for an Icechunk store's write-once files; revalidated for everything else here.
 
@@ -346,8 +344,8 @@ def cache_control(file: Path) -> str:
     """
     parts = file.parts
     for index, part in enumerate(parts[:-1]):
-        if part.endswith(".icechunk") and parts[index + 1] in _IMMUTABLE_STORE_FOLDERS:
-            return "max-age=31536000, immutable"
+        if part.endswith(".icechunk") and parts[index + 1] in ingestion_services.IMMUTABLE_ICECHUNK_FOLDERS:
+            return ingestion_services.IMMUTABLE_CACHE
     return "no-cache"
 
 
@@ -357,9 +355,11 @@ def served_file(path: str) -> tuple[Path, str]:
     No records are read: a dataset written but not yet published is not ready rather than private,
     as wherever else the folder is served (`docs/data_folder_layout.md`), and no catalog links to it.
     """
-    root = layout.catalog_root().resolve()
-    target = (root / path).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
+    # Checked on the path as given rather than resolved, so a folder that is a symlink to another
+    # disk is served; a `..` segment is what could leave the folder.
+    parts = PurePosixPath(path).parts
+    target = layout.catalog_root().joinpath(*parts)
+    if path.startswith("/") or "\\" in path or ".." in parts or not target.is_file():
         raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
     if target.parent.name == portolan.STYLES and target.suffix == ".json":
         return target, tiles.STYLE_MEDIA_TYPE

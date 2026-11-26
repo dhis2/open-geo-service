@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,14 @@ def test_running_it_again_changes_nothing(instance: Path, capsys: pytest.Capture
     assert migrate_layout.main([]) == 0
     assert "Nothing to migrate" in capsys.readouterr().out
     assert (instance / "data" / "artifacts" / "records.json").read_text() == records
+
+    # An old folder holding only macOS folder metadata is removed, so the writer can start.
+    (instance / "data" / "rasters").mkdir()
+    (instance / "data" / "rasters" / ".DS_Store").write_bytes(b"")
+    assert migrate_layout.pending_migration() is not None
+    assert migrate_layout.main([]) == 0
+    assert not (instance / "data" / "rasters").exists()
+    assert migrate_layout.pending_migration() is None
 
     # A mistyped data_dir is reported as having nothing to migrate, and not created.
     (instance / "geoservice.yaml").write_text(f"data_dir: {instance / 'data-typo'}\n")
@@ -231,7 +240,12 @@ def old_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return data
 
 
-def test_an_old_data_folder_is_served_from_the_catalog_after_the_migration(old_data: Path, client: TestClient) -> None:
+def test_an_old_data_folder_is_served_from_the_catalog_after_the_migration(
+    old_data: Path, client: TestClient, restart_writer: Callable[[], None]
+) -> None:
+    # A writer refuses to start before the migration, so no sync writes a second store into catalog/.
+    with pytest.raises(RuntimeError, match="migrate_layout"):
+        restart_writer()
     # As a run stopped after moving the store and before its pending-collection marker left it.
     moved = old_data / "catalog" / "rasters" / "rain" / "rain.icechunk"
     moved.parent.mkdir(parents=True)

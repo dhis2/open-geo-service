@@ -102,15 +102,22 @@ def _zarr_asset_of(get: Callable[[str], Any], base_url: str, dataset_id: str) ->
     """The Zarr asset of a raster: from its STAC collection, or from openEO's when the STAC has none.
 
     The written catalog carries the `/zarr` URL only on an instance that knows its public
-    address; openEO's collection, built on request, always does.
+    address, and lacks a collection the writer has not written yet; openEO's collection, built
+    on request, always has it.
     """
-    collection = get(_collection_url(base_url, dataset_id))
+    openeo_collection = f"{base_url}/collections/{dataset_id.rpartition('/')[2]}"
+    try:
+        collection = get(_collection_url(base_url, dataset_id))
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 404:
+            raise
+        return _zarr_asset(get(openeo_collection), dataset_id, base_url)
     if (
         isinstance(collection, dict)
         and isinstance(collection.get("assets"), dict)
         and "zarr" not in collection["assets"]
     ):
-        collection = get(f"{base_url}/collections/{dataset_id.rpartition('/')[2]}")
+        collection = get(openeo_collection)
     return _zarr_asset(collection, dataset_id, base_url)
 
 

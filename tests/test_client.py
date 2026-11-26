@@ -345,8 +345,24 @@ def test_an_unknown_collection_names_what_was_missing(client: TestClient) -> Non
 
 
 def test_open_dataset_names_the_missing_collection(client: TestClient) -> None:
-    with pytest.raises(httpx.HTTPStatusError, match="No file 'rasters/missing/collection.json' in the catalog"):
+    # Not in the written catalog, so openEO's collection is asked, which names it too.
+    with pytest.raises(httpx.HTTPStatusError, match="Collection 'missing' not found"):
         _service_on(client).open_dataset("missing")
+
+
+def test_a_raster_the_catalog_has_not_written_opens_from_openeo(tmp_path: Path) -> None:
+    """As on a read-only server before the writer has written `catalog/`."""
+    store = tmp_path / "rain.zarr"
+    xr.Dataset({"precip": (["x"], np.ones(2, dtype="float32"))}).to_zarr(str(store), mode="w", consolidated=True)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/collections/rain":
+            return httpx.Response(200, json=_make_collection(str(store)))
+        return httpx.Response(404, json={"detail": "No file in the catalog"})
+
+    service = _service_on(httpx.Client(transport=httpx.MockTransport(reply)), "http://ogs.example")
+    with service.open_dataset("rain") as opened:
+        assert "precip" in opened.data_vars
 
 
 def test_an_openeo_error_message_reaches_the_caller() -> None:

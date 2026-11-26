@@ -2251,7 +2251,8 @@ def reconcile_published_branches() -> int:
             continue
         try:
             any_published = any(r.publication.status == PublicationStatus.PUBLISHED for r in records)
-            adopted = _adopt_write_branch(store_path, any_published)
+            if adopted := _adopt_write_branch(store_path, any_published):
+                logger.info("Moved '%s' to the current branch layout", store_path.name)
             tip = published_snapshot(open_or_create_repo(store_path))
             newest = max(records, key=lambda record: record.created_at)
             published = newest.publication.status == PublicationStatus.PUBLISHED
@@ -2263,7 +2264,8 @@ def reconcile_published_branches() -> int:
                 _record_publication(newest)
             elif tip is not None and newest.publication.snapshot_id != tip:
                 _record_publication(_describing_published(newest, store_path))
-            elif not adopted:
+            else:
+                changed += adopted
                 continue
         except Exception:
             logger.warning("Could not reconcile the publication of '%s'", store_path, exc_info=True)
@@ -2395,8 +2397,8 @@ def get_dataset_zarr_store_file_or_404(
 
 # Icechunk names every file in these by its id and never rewrites one, so a browser can keep it.
 # Anything else, the `repo` file above all, changes when a branch moves (CLIM-1580).
-_IMMUTABLE_ICECHUNK_DIRS = frozenset({"chunks", "manifests", "snapshots", "transactions"})
-_IMMUTABLE = "max-age=31536000, immutable"
+IMMUTABLE_ICECHUNK_FOLDERS = frozenset({"chunks", "manifests", "snapshots", "transactions"})
+IMMUTABLE_CACHE = "max-age=31536000, immutable"
 
 
 def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
@@ -2413,7 +2415,7 @@ def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
         raise HTTPException(status_code=404, detail=f"Icechunk store file not found: {file_path}")
 
     top = full_path.relative_to(store_root).parts[0]
-    cache = _IMMUTABLE if top in _IMMUTABLE_ICECHUNK_DIRS else "no-cache"
+    cache = IMMUTABLE_CACHE if top in IMMUTABLE_ICECHUNK_FOLDERS else "no-cache"
     return FileResponse(full_path, media_type="application/octet-stream", headers={"Cache-Control": cache})
 
 

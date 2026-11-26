@@ -249,8 +249,8 @@ def build_catalog(request: Request) -> dict[str, object]:
     return _declare_authentication(catalog, request)
 
 
-def build_subcatalog(kind: layout.Kind, request: Request) -> dict[str, object]:
-    """Build the sub-catalog of one kind of dataset, or 404 when no collection of that kind is published."""
+def published_of_kind_or_404(kind: layout.Kind) -> dict[str, ArtifactRecord]:
+    """The published datasets of one kind, by id, or 404 when there are none: it has no sub-catalog."""
     artifacts = {
         dataset_id: artifact
         for dataset_id, artifact in _eligible_artifacts_by_dataset().items()
@@ -258,6 +258,12 @@ def build_subcatalog(kind: layout.Kind, request: Request) -> dict[str, object]:
     }
     if not artifacts:
         raise HTTPException(status_code=404, detail=f"No published collections in '{kind.value}'")
+    return artifacts
+
+
+def build_subcatalog(kind: layout.Kind, request: Request) -> dict[str, object]:
+    """Build the sub-catalog of one kind of dataset, or 404 when no collection of that kind is published."""
+    artifacts = published_of_kind_or_404(kind)
     catalog_href = absolute_url(request, CATALOG_PATH)
     links = [
         {"rel": "self", "href": self_url(request), "type": "application/json"},

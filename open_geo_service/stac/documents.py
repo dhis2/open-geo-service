@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.features import store
@@ -47,9 +47,7 @@ def catalog_readme(request: Request) -> str:
 
 def subcatalog_readme(kind: layout.Kind, request: Request) -> str:
     """What one sub-catalog holds: its collections."""
-    artifacts = services._eligible_artifacts_by_dataset()
-    if kind not in services.published_kinds(artifacts):
-        raise HTTPException(status_code=404, detail=f"No published collections in '{kind.value}'")
+    artifacts = services.published_of_kind_or_404(kind)
     title, description = services.SUBCATALOGS[kind]
     lines = [f"# {title}", "", f"{description} Part of the {_instance_name()} catalog.", "", "## Collections", ""]
     return "\n".join([*lines, *_collection_list(kind, artifacts, request)]) + "\n"
@@ -99,8 +97,7 @@ def catalog_agents(request: Request) -> str:
 
 def subcatalog_agents(kind: layout.Kind, request: Request) -> str:
     """How an agent reads one sub-catalog."""
-    if kind not in services.published_kinds(services._eligible_artifacts_by_dataset()):
-        raise HTTPException(status_code=404, detail=f"No published collections in '{kind.value}'")
+    services.published_of_kind_or_404(kind)
     here = absolute_url(request, services.subcatalog_path(kind))
     return "\n".join(
         [

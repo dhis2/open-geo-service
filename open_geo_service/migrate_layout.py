@@ -49,7 +49,8 @@ _RASTER_STORE = re.compile(r"(?P<id>.+)\.(?:icechunk|zarr)")
 _VECTOR_FILE = re.compile(r"(?P<id>.+)\.[0-9a-f]{32}\.(?:parquet|pmtiles)")
 # Left beside the data by a write an earlier version was killed in, and by the old feature rule:
 # the empty per-store lock files (unused since CLIM-1998), half-written files and `.superseded` markers.
-_DISCARDED = (".icechunk.lock", ".writing", ".tmp.png", ".superseded")
+# And the macOS folder metadata, so a folder holding only that is removed.
+_DISCARDED = (".icechunk.lock", ".writing", ".tmp.png", ".superseded", ".DS_Store")
 
 
 @dataclass
@@ -67,7 +68,7 @@ class CatalogPlan:
 
     @property
     def empty(self) -> bool:
-        return not (self.records or self.jobs or self.moves or self.deletions)
+        return not (self.records or self.jobs or self.moves or self.deletions or self.old_folders)
 
 
 def _catalog_key(key: PurePosixPath) -> PurePosixPath | None:
@@ -254,7 +255,27 @@ def build_catalog_plan() -> CatalogPlan:
     kinds = _plan_catalog_records(root, plan)
     _plan_catalog_jobs(root, plan)
     _plan_catalog_files(root, kinds, plan)
+    # Removed once emptied; one holding a leftover stays, and the leftover is named.
+    plan.old_folders = [folder for folder in plan.old_folders if all(path.parent != folder for path in plan.leftovers)]
     return plan
+
+
+def pending_migration() -> str | None:
+    """Why the data folder needs this migration before a writer may start on it, or None.
+
+    A writer started first would sync into `catalog/` beside the old stores, downloading the data
+    again, and the migration would then refuse to merge the two.
+    """
+    try:
+        plan = build_catalog_plan()
+    except MigrationError as exc:
+        return str(exc)
+    if plan.empty:
+        return None
+    folders = sorted(
+        {path.relative_to(plan.root).parts[0] + "/" for path in [*plan.old_folders, *(s for s, _ in plan.moves)]}
+    )
+    return f"it holds {', '.join(folders) or 'records'} from the layout before catalog/"
 
 
 def apply_catalog(plan: CatalogPlan) -> None:

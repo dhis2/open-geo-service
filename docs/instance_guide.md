@@ -229,9 +229,10 @@ Pinning to a released version (`==X.Y.Z`) is recommended over tracking `main`: a
 
 ### Moving to a new data folder layout
 
-A release that changes the [data folder layout](data_folder_layout.md) reads only the new one,
-and logs a warning at startup while old folders remain. Move the data with `migrate_layout`,
-which renames files on the same disk and downloads nothing:
+A release that changes the [data folder layout](data_folder_layout.md) reads only the new one.
+A writable server refuses to start until the data is moved, as its syncs would otherwise download
+the data again into the new layout; a read-only one logs a warning. Move the data with
+`migrate_layout`, which renames files on the same disk and downloads nothing:
 
 1. Stop every server on the data folder, the read-only ones too.
 2. Back up the data folder.
