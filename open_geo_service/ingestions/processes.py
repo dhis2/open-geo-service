@@ -12,6 +12,7 @@ from open_geo_service.extents import services as extent_services
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.schemas import ArtifactRecord, SyncAction, SyncResponse
 from open_geo_service.jobs.models import DATASET_UPDATED_EVENT_TYPE, JobEventDraft, JobExecutionResult
+from open_geo_service.shared.time import next_period_string
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,8 @@ def dataset_update_event(
 ) -> JobEventDraft:
     """Describe one change to a managed dataset, for the derived datasets and pipelines that follow it.
 
-    `changes` lists the ranges of periods the change wrote, first and last period of each, in
-    the order they were planned and never joined; a whole-store rewrite lists its whole
+    `changes` lists the ranges of periods the change wrote, first and last period of each,
+    both inclusive, in the order they were planned; a whole-store rewrite lists its whole
     coverage. `coverage_start` and `coverage_end` describe the coverage after the change.
     `action` says how the store changed, not who changed it.
 
@@ -124,25 +125,23 @@ def ingest_dataset(
     if marker is None:
         return artifact, []
     temporal = artifact.coverage.temporal
+    previous_end = marker.get("previous_end")
+    # An ingestion extending a store added the periods after its previous end; otherwise every period is new.
+    first = next_period_string(previous_end, str(dataset["period_type"])) if previous_end else temporal.start
     event = dataset_update_event(
         dataset_id=str(dataset["id"]),
         artifact_id=artifact.artifact_id,
         action=INGEST_EVENT_ACTION,
-        changes=written_since(marker.get("previous_end"), temporal.start, temporal.end),
+        changes=period_range(first, temporal.end),
         coverage_start=temporal.start,
         coverage_end=temporal.end,
     )
     return artifact, [event]
 
 
-def written_since(previous_end: str | None, start: str | None, end: str | None) -> list[tuple[str, str]]:
-    """The range a write changed, from the coverage end before it: None means the whole coverage.
-
-    A write after ``previous_end`` is listed from ``previous_end`` itself, re-sending the last
-    period already stored, so an overwrite at a destination completes it.
-    """
-    first = previous_end if previous_end is not None else start
-    return [(first, end)] if first is not None and end is not None else []
+def period_range(first: str | None, last: str | None) -> list[tuple[str, str]]:
+    """``changes`` holding the one range from ``first`` to ``last``, both inclusive; empty when either is unknown."""
+    return [(first, last)] if first is not None and last is not None else []
 
 
 def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEventDraft]:
@@ -160,15 +159,14 @@ def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEvent
         return []
     if detail.action == SyncAction.REMATERIALIZE:
         # A rematerialization may rewrite every historical value.
-        changes = written_since(None, detail.current_start, detail.target_end)
+        changes = period_range(detail.current_start, detail.target_end)
     else:
         # An append lists the preliminary periods it replaced with final values (CLIM-931) and
         # the new periods it added, as two ranges: the stored periods between them did not change.
         changes = []
         if detail.refresh_start is not None and detail.refresh_end is not None:
             changes.append((detail.refresh_start, detail.refresh_end))
-        if detail.delta_start is not None:
-            changes += written_since(detail.current_end, detail.current_start, detail.target_end)
+        changes += period_range(detail.delta_start, detail.target_end)
     return [
         dataset_update_event(
             dataset_id=dataset_id,

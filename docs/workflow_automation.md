@@ -37,12 +37,12 @@ the recovered job finds the data current and still emits the event it owed, exac
 
 The event says what changed: `dataset_id`, `artifact_id`, `action` (`ingest`, the sync
 planner's `append` or `rematerialize`, or `full_rewrite` for a dataset an openEO job
-published), `changes` (the ranges of periods the update wrote, each `{"start", "end"}`), and
-`coverage_start` and `coverage_end` (the coverage after it). An append lists the periods it
-added from the last one already stored; a sync that also replaced preliminary periods with final
-values lists those as a range of their own, so the periods between are not included; a new or
-rewritten store lists its whole coverage. Ranges are listed as planned, never joined, so two may
-touch or overlap. A pipeline runs each range; a recipe always recomputes the whole coverage.
+published), `changes` (the ranges of periods the update wrote, each `{"start", "end"}` with
+both ends inclusive), and `coverage_start` and `coverage_end` (the coverage after it). An append
+lists the periods it added; a sync that also replaced preliminary periods with final values
+lists those as a range of their own, so the periods between are not included; a new or
+rewritten store lists its whole coverage. Ranges never overlap, and two that touch are not
+joined. A pipeline runs each range; a recipe always recomputes the whole coverage.
 
 ## Updates from derived datasets
 

@@ -334,7 +334,7 @@ def test_successful_job_persists_result_and_events_atomically(monkeypatch: pytes
 @pytest.mark.parametrize(
     ("action", "expected_start"),
     [
-        (SyncAction.APPEND, "2026-01-02"),
+        (SyncAction.APPEND, "2026-01-03"),
         (SyncAction.REMATERIALIZE, "2026-01-01"),
     ],
 )

@@ -371,9 +371,8 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     )
     assert _stored(store_path) == ([101.0, 102.0, 103.0], [refreshed_at, later, later])
     assert response.dataset is not None and response.dataset.provisional_periods == []
-    # The added day is run from the last day stored before, as for any append, which re-sends it.
-    # The two ranges overlap and are run as listed, not joined.
-    assert _pipeline_runs(response) == [[("2026-01-02", "2026-01-02"), ("2026-01-02", "2026-01-03")]]
+    # The replaced day and the added one touch, and are run as listed, not joined.
+    assert _pipeline_runs(response) == [[("2026-01-02", "2026-01-02"), ("2026-01-03", "2026-01-03")]]
     # Chunked as `t`, rechunked at the end of each sync, so the refresh and the append above
     # wrote into a chunk of several periods, and the planner reads the array in few requests.
     root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
@@ -383,13 +382,16 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     # replaced and a new day added, and a pipeline runs those two alone, not the days in between.
     clock["now"] = datetime(2026, 1, 21, 6, tzinfo=UTC)
     plugin.available += [f"2026-01-{day:02d}" for day in range(4, 14)]
-    _sync("2026-01-13")  # 2026-01-11 through 2026-01-13 are still preliminary
+    # A day is final from ten days after it ends, at midnight UTC: 2026-01-10 from 2026-01-21
+    # 00:00, so fetched at 06:00 it is final, and 2026-01-11 through 2026-01-13 are preliminary.
+    _sync("2026-01-13")
     clock["now"] = datetime(2026, 1, 22, 6, tzinfo=UTC)
     plugin.available.append("2026-01-14")
     response = _sync("2026-01-14")
-    assert response.sync_detail is not None
+    assert response.sync_detail is not None and response.dataset is not None
     assert (response.sync_detail.refresh_start, response.sync_detail.refresh_end) == ("2026-01-11", "2026-01-11")
-    assert _pipeline_runs(response) == [[("2026-01-11", "2026-01-11"), ("2026-01-13", "2026-01-14")]]
+    assert [p.period for p in response.dataset.provisional_periods] == ["2026-01-12", "2026-01-13", "2026-01-14"]
+    assert _pipeline_runs(response) == [[("2026-01-11", "2026-01-11"), ("2026-01-14", "2026-01-14")]]
 
     # Fetched after maturity, no period is due again: each was fetched at most twice.
     assert _sync("2026-01-03").status == "up_to_date"

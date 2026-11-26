@@ -153,8 +153,7 @@ def test_extending_ingestion_reports_what_was_stored_before(instance: dict[str, 
     extended = _ingest(instance, end="2026-01-03")
 
     [event] = extended.events
-    # From the last period stored before, re-sent so an overwrite at a destination completes it.
-    assert event.data["changes"] == [{"start": "2026-01-02", "end": "2026-01-03"}]
+    assert event.data["changes"] == [{"start": "2026-01-03", "end": "2026-01-03"}]  # the added period alone
     assert event.data["coverage_end"] == "2026-01-03"
     assert len(_handed_on(instance, expected=2)) == 2
 
@@ -327,6 +326,6 @@ def test_inline_sync_is_recorded_as_a_completed_job_with_its_event(
     [event] = record.events
     # The action is the sync planner's own choice; the event reports it as planned.
     assert event.data["action"] in {"append", "rematerialize"}
-    expected_start = "2026-01-02" if event.data["action"] == "append" else "2026-01-01"
+    expected_start = "2026-01-03" if event.data["action"] == "append" else "2026-01-01"
     assert event.data["changes"] == [{"start": expected_start, "end": "2026-01-03"}]
     assert len(_handed_on(instance, expected=2)) == 2

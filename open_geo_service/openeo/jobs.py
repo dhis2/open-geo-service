@@ -1524,7 +1524,7 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
     persists it, so it is later than any read of the job store that did not see it.
     """
     from open_geo_service.ingestions import services as ingestion_services
-    from open_geo_service.ingestions.processes import FULL_REWRITE_EVENT_ACTION, dataset_update_event, written_since
+    from open_geo_service.ingestions.processes import FULL_REWRITE_EVENT_ACTION, dataset_update_event, period_range
     from open_geo_service.ingestions.schemas import ArtifactProvenance, ArtifactRecord, PublicationStatus
 
     job = store_get_job(job_id)
@@ -1549,7 +1549,7 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
             artifact_id=stored.artifact_id,
             action=FULL_REWRITE_EVENT_ACTION,
             # The store was replaced as a whole: no period is known unchanged.
-            changes=written_since(None, stored.coverage.temporal.start, stored.coverage.temporal.end),
+            changes=period_range(stored.coverage.temporal.start, stored.coverage.temporal.end),
             coverage_start=stored.coverage.temporal.start,
             coverage_end=stored.coverage.temporal.end,
             producer_type="openeo",

@@ -275,8 +275,7 @@ so a delivery the framework had already reserved is found rather than sent twice
 [Workflow automation](workflow_automation.md)), and the pipeline starts one run per range, not
 one over the dataset's whole coverage:
 
-- an *append* lists the periods it added, from the last period already stored, which is re-sent
-  as an overwrite at the destination;
+- an *append* lists the periods it added;
 - a sync that replaces preliminary periods with final values (see
   [Preliminary periods](architecture.md#preliminary-periods)) lists them as a range of their own,
   so their final values reach the destination without rerunning the periods in between;
