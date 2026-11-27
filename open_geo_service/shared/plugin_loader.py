@@ -89,9 +89,20 @@ def _load_class(plugin_path: str) -> Any:
         raise PluginLoadError(
             f"its plugin '{plugin_path}' cannot be imported: the module raised an error (see the server log)"
         ) from exc
-    if not hasattr(module, name):
-        raise PluginLoadError(f"its plugin '{plugin_path}' cannot be imported: '{module_path}' has no '{name}'")
-    return getattr(module, name)
+    # A module may export its plugin lazily through a module-level __getattr__, which can raise
+    # anything; only an AttributeError means the name is not there.
+    try:
+        return getattr(module, name)
+    except AttributeError as exc:
+        raise PluginLoadError(
+            f"its plugin '{plugin_path}' cannot be imported: '{module_path}' has no '{name}'"
+        ) from exc
+    except Exception as exc:
+        logger.warning("Plugin '%s' raised while being looked up", plugin_path, exc_info=True)
+        raise PluginLoadError(
+            f"its plugin '{plugin_path}' cannot be imported: "
+            "the module raised an error looking it up (see the server log)"
+        ) from exc
 
 
 def _check_raster_class(plugin_class: Any, plugin_path: str, *, static: bool) -> None:

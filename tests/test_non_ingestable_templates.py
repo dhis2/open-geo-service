@@ -12,6 +12,8 @@ the request was well formed, it just named a dataset with no upstream.
 """
 
 import re
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -267,6 +269,16 @@ _BROKEN_RASTER = """\
   source_url: https://example.org
   sync: {kind: temporal}
   ingestion: {plugin: open_geo_service.plugins.rasters.copdem.CopDEMPlugin}
+- id: lazy_rainfall
+  name: A plugin exported lazily by a module that fails to load it
+  description: A raster template whose module raises ImportError from its __getattr__.
+  variable: precip
+  units: mm
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: lazy_plugins.LazyPlugin}
 """
 
 _BROKEN_TABLE = """\
@@ -292,6 +304,13 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
 
     plugin_loader._plugin_error.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
+    def missing_dependency(name: str) -> Any:
+        raise ImportError(f"an optional dependency of {name} is not installed")
+
+    lazy = types.ModuleType("lazy_plugins")
+    lazy.__getattr__ = missing_dependency  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lazy_plugins", lazy)
+
     (tmp_path / "rasters").mkdir()
     (tmp_path / "rasters" / "typo.yaml").write_text(_BROKEN_RASTER, encoding="utf-8")
     (tmp_path / "tables").mkdir()
@@ -307,6 +326,7 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
         ("typo_rainfall", "cannot be imported"),
         ("monthly_elevation", "does not implement periods() and fetch_period()"),
         ("wrong_class_table", "is not a BaseTablePlugin"),
+        ("lazy_rainfall", "raised an error looking it up"),
     ]
     for dataset_id, reason in broken:
         assert listed[dataset_id]["ingestable"] is False
@@ -326,5 +346,5 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
     assert listed["chirps3_precipitation_daily"]["ingestable"] is True
     assert "ingestion_error" not in listed["chirps3_precipitation_daily"]
     logged = [r.getMessage() for r in caplog.records if "cannot be ingested" in r.getMessage()]
-    for plugin in ("CHIRPS3MonthlyPlugn", "copdem.CopDEMPlugin", "chirps3.CHIRPS3MonthlyPlugin"):
+    for plugin in ("CHIRPS3MonthlyPlugn", "copdem.CopDEMPlugin", "chirps3.CHIRPS3MonthlyPlugin", "LazyPlugin"):
         assert sum(f"{plugin}'" in message for message in logged) == 1, logged
