@@ -82,6 +82,8 @@ def _open_worldpop_raster(url: str, **open_kwargs: Any) -> xr.DataArray:
         import httpx
         import portalocker
 
+        from open_geo_service.shared.persistence import lock_exclusive
+
         # Hold an exclusive per-entry lock across the download so concurrent
         # ingestions (or worker processes) sharing this cache can't race on the
         # same file and corrupt it. Re-check existence inside the lock: a holder
@@ -89,7 +91,7 @@ def _open_worldpop_raster(url: str, **open_kwargs: Any) -> xr.DataArray:
         # sentinel is left on disk on purpose — unlinking it would reopen the race.
         lock_path = target.with_name(target.name + ".lock")
         with open(lock_path, "w") as lock_fh:
-            portalocker.lock(lock_fh, portalocker.LOCK_EX)
+            lock_exclusive(lock_fh)
             try:
                 if not target.exists():
                     with httpx.stream("GET", url, follow_redirects=True, timeout=300) as response:
