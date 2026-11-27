@@ -37,6 +37,9 @@ _held: dict[Path, portalocker.Lock] = {}
 _held_mutex = threading.Lock()
 # Set by a read-only server, which must never become the writer, not even when none is running.
 _read_only = False
+# One per feature collection or table dataset written in this process (`dataset_lock`).
+_dataset_locks: dict[str, threading.Lock] = {}
+_dataset_locks_mutex = threading.Lock()
 
 
 class WriterLeaseHeld(RuntimeError):
@@ -76,6 +79,19 @@ def ensure_held(role: str = "a script or notebook") -> None:
         # runs, the server refuses to start.
         level = logging.INFO if role == "server" else logging.WARNING
         logger.log(level, "Took the writer lease of %s for this process, as %s", data_root, role)
+
+
+def dataset_lock(dataset_id: str) -> threading.Lock:
+    """The lock that serializes writes to one feature collection or table dataset, in this process.
+
+    A write puts a new file and then the record naming it, so two writes to one dataset take
+    turns, or one could register a file the other's cleanup removes. Within one process is
+    enough: the lease keeps every other process from writing. Raises :class:`WriterLeaseHeld`,
+    as every write does, when this process may not write.
+    """
+    ensure_held()
+    with _dataset_locks_mutex:
+        return _dataset_locks.setdefault(dataset_id, threading.Lock())
 
 
 def refuse_writes() -> None:
@@ -133,17 +149,20 @@ def _release(data_root: Path) -> None:
 
 
 def _forget_after_fork() -> None:
-    """Start a forked child with no lease, so it is refused while its parent holds one.
+    """Start a forked child with no lease and no dataset locks, so it is refused while its parent holds one.
 
     The child inherits the parent's locked file and `_held`. Only the child's copy of the file
     is closed: unlocking it would release the lock the two share, and with it the parent's lease.
+    The child also inherits the dataset locks, held for good if another thread held them at the fork.
     """
-    global _held_mutex
+    global _held_mutex, _dataset_locks, _dataset_locks_mutex
     _held_mutex = threading.Lock()  # another thread may have held it at the fork
     for lock in _held.values():
         if lock.fh is not None:
             lock.fh.close()
     _held.clear()
+    _dataset_locks = {}
+    _dataset_locks_mutex = threading.Lock()
 
 
 if hasattr(os, "register_at_fork"):  # not on Windows, which has no fork

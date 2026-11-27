@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -250,32 +254,60 @@ def test_xclim_returns_schema_is_datacube() -> None:
     assert schema.get("subtype") == "datacube", f"expected datacube subtype in returns schema, got {schema}"
 
 
-def test_dry_spell_via_process_graph(client: TestClient, daily_precip: xr.DataArray) -> None:
-    """A dry spell process should be callable through the openEO synchronous result endpoint."""
-    from unittest.mock import patch
+@pytest.mark.parametrize("path", ["result", "job"])
+@pytest.mark.parametrize(
+    ("process_id", "arguments"),
+    [
+        # With a freq, xclim's metadata step reads `missing_options`; without one, `metadata_locales`.
+        ("dry_spell_max_length", {"pr": {"from_node": "load"}, "thresh": "1 mm"}),
+        ("water_budget", {"pr": {"from_node": "load"}, "evspsblpot": {"from_node": "load"}}),
+    ],
+)
+def test_an_xclim_process_runs_in_a_request_and_in_a_job(
+    path: str,
+    process_id: str,
+    arguments: dict[str, Any],
+    client: TestClient,
+    daily_precip: xr.DataArray,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both run the graph in a thread other than the one that imported xclim (CLIM-2042)."""
+    import rioxarray  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio
+    from openeo_pg_parser_networkx.process_registry import Process
 
-    def mock_run(process: dict, request: object = None, **kwargs: object) -> object:
-        procs = dict(load_plugin_processes())
-        cdd_fn = procs["dry_spell_max_length"]
-        # Return a plain dict so the route serialises it as JSON
-        result = cdd_fn(pr=daily_precip, thresh="1 mm")
-        return {"cdd": float(result.mean().item())}  # type: ignore[union-attr]
+    from open_geo_service.openeo import execution
 
-    with patch("open_geo_service.openeo.execution.run_process_graph", mock_run):
-        resp = client.post(
-            "/result",
-            json={
-                "process_graph": {
-                    "load": {
-                        "process_id": "load_collection",
-                        "arguments": {"id": "chirps3_precipitation_daily"},
-                    },
-                    "cdd": {
-                        "process_id": "dry_spell_max_length",
-                        "arguments": {"pr": {"from_node": "load"}, "thresh": "1 mm"},
-                        "result": True,
-                    },
-                }
-            },
-        )
-    assert resp.status_code == 200
+    cube = (
+        daily_precip.rename(time="t")
+        .expand_dims(y=[9.0, 8.0], x=[-12.0, -11.0])
+        .transpose("t", "y", "x")
+        .rio.write_crs("EPSG:4326")
+    )
+    registry = execution._new_process_registry()
+    registry["load_collection"] = Process(spec={}, implementation=lambda **_: cube)
+    monkeypatch.setattr(execution, "_build_process_registry", lambda: registry)
+    graph = {
+        "load": {"process_id": "load_collection", "arguments": {"id": "chirps3_precipitation_daily"}},
+        "index": {"process_id": process_id, "arguments": arguments},
+        "save": {
+            "process_id": "save_result",
+            "arguments": {"data": {"from_node": "index"}, "format": "netCDF"},
+            "result": True,
+        },
+    }
+
+    if path == "result":
+        # Sent from a new thread: a server's event loop does not have the context this test
+        # imported xclim in, because the server imports xclim in a worker thread at startup.
+        with ThreadPoolExecutor(max_workers=1) as fresh:
+            response = fresh.submit(client.post, "/result", json={"process_graph": graph}).result()
+        assert response.status_code == 200, response.text
+        return
+    job_id = client.post("/jobs", json={"process": {"process_graph": graph}}).json()["id"]
+    assert client.post(f"/jobs/{job_id}/results").status_code == 202
+    deadline = time.monotonic() + 60
+    while (status := client.get(f"/jobs/{job_id}").json()["status"]) not in ("finished", "error"):
+        assert time.monotonic() < deadline, "job did not end within 60 s"
+        time.sleep(0.05)
+    logs = client.get(f"/jobs/{job_id}/logs", params={"level": "error"}).json()["logs"]
+    assert status == "finished", logs

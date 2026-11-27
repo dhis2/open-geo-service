@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from open_geo_service import config as api_config
 from open_geo_service.data_registry.services import datasets as registry_datasets
+from open_geo_service.streaming.base import BaseDatasetPlugin
 from open_geo_service.system import templates as landing
 
 # What a browser sends: `text/html` ahead of anything else.
@@ -26,8 +27,21 @@ def _template(template_id: str, **fields: Any) -> dict[str, Any]:
     return {"id": template_id, "name": template_id.replace("_", " "), "sync": {"kind": "static"}, **fields}
 
 
+class AnyPlugin(BaseDatasetPlugin):
+    """A plugin that fits a template with or without a time axis; the page never calls it."""
+
+    async def periods(self, start: str, end: str) -> list[str]:
+        raise AssertionError("not called")
+
+    def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> Any:
+        raise AssertionError("not called")
+
+    def fetch(self, bbox: list[float], **params: Any) -> Any:
+        raise AssertionError("not called")
+
+
 def _ingestable(template_id: str, **fields: Any) -> dict[str, Any]:
-    return _template(template_id, ingestion={"plugin": "some.Plugin"}, **fields)
+    return _template(template_id, ingestion={"plugin": "tests.test_data_source_page.AnyPlugin"}, **fields)
 
 
 class _VisibleText(HTMLParser):

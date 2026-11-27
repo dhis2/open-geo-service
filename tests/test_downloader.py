@@ -11,7 +11,6 @@ import zarr
 from open_geo_service.data_accessor.services.accessor import (
     _coverage_from_dataset,
     open_icechunk_dataset,
-    open_zarr_dataset,
 )
 from open_geo_service.data_manager.services import downloader
 from open_geo_service.ingestions import services as ingestion_services
@@ -64,54 +63,6 @@ def _make_dataset() -> xr.Dataset:
             "lon": [30.0, 31.0, 32.0],
         },
     )
-
-
-# ---------------------------------------------------------------------------
-# open_zarr_dataset
-# ---------------------------------------------------------------------------
-
-
-def test_open_zarr_dataset_flat(tmp_path: Path) -> None:
-    """Flat zarr store is opened directly and exposes its data variables."""
-    ds = _make_dataset()
-    zarr_path = tmp_path / "flat.zarr"
-    ds.to_zarr(str(zarr_path), mode="w")
-
-    result = open_zarr_dataset(str(zarr_path))
-    try:
-        assert "pop_total" in result.data_vars
-    finally:
-        result.close()
-
-
-def test_open_zarr_dataset_pyramid_falls_back_to_level_0(tmp_path: Path) -> None:
-    """Pyramid zarr store (no root data vars) opens level 0 automatically."""
-    ds = _make_dataset()
-    zarr_path = tmp_path / "pyramid.zarr"
-    ds.to_zarr(str(zarr_path) + "/0", mode="w")
-    zarr.open_group(str(zarr_path), mode="a", zarr_format=3)
-
-    result = open_zarr_dataset(str(zarr_path))
-    try:
-        assert "pop_total" in result.data_vars
-        assert result.sizes["t"] == 2
-    finally:
-        result.close()
-
-
-def test_open_zarr_dataset_pyramid_with_root_time_still_opens_level_0(tmp_path: Path) -> None:
-    """Root time coord in a pyramid store does not prevent level 0 fallback."""
-    ds = _make_dataset()
-    zarr_path = tmp_path / "pyramid-with-time.zarr"
-    ds.to_zarr(str(zarr_path) + "/0", mode="w")
-    ds[["t"]].to_zarr(str(zarr_path), mode="a")
-
-    result = open_zarr_dataset(str(zarr_path))
-    try:
-        assert "pop_total" in result.data_vars
-        assert result.sizes["t"] == 2
-    finally:
-        result.close()
 
 
 # ---------------------------------------------------------------------------

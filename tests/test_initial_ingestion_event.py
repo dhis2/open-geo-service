@@ -33,6 +33,8 @@ class _Plugin(BaseDatasetPlugin):
         self.available = ["2026-01-01", "2026-01-02"]
         self.fail = False
         self.on_fetch: Any = None
+        # Periods the source lists before it has values for them.
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         return [period for period in self.available if start <= period <= end]
@@ -43,7 +45,7 @@ class _Plugin(BaseDatasetPlugin):
         if self.fail:
             raise RuntimeError("source unavailable")
         data = xr.DataArray(
-            np.full((2, 2), int(period_id[-2:]), dtype="float32"),
+            np.full((2, 2), np.nan if period_id in self.empty else int(period_id[-2:]), dtype="float32"),
             dims=("y", "x"),
             coords={"y": [3.5, 2.5], "x": [1.5, 2.5]},
         )
@@ -59,7 +61,7 @@ def instance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[s
         "name": "Rolling precipitation",
         "variable": "precip",
         "period_type": "daily",
-        "ingestion": {"plugin": "example.RollingPlugin"},
+        "ingestion": {"plugin": "open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin"},
     }
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: plugin)
     monkeypatch.setattr(services.downloader, "get_icechunk_path", lambda _: tmp_path / "rolling.icechunk")
@@ -131,9 +133,9 @@ def test_initial_ingestion_emits_one_event_and_hands_it_on_once(instance: dict[s
         "dataset_id": _DATASET_ID,
         "artifact_id": record.result["ingestion_id"],
         "action": "ingest",
-        "previous_end": None,  # nothing was stored before: every period is new
-        "current_start": "2026-01-01",
-        "current_end": "2026-01-02",
+        "changes": [{"start": "2026-01-01", "end": "2026-01-02"}],  # nothing was stored before: every period is new
+        "coverage_start": "2026-01-01",
+        "coverage_end": "2026-01-02",
     }
     assert _handed_on(instance) == [event]
 
@@ -153,8 +155,17 @@ def test_extending_ingestion_reports_what_was_stored_before(instance: dict[str, 
     extended = _ingest(instance, end="2026-01-03")
 
     [event] = extended.events
-    assert (event.data["previous_end"], event.data["current_end"]) == ("2026-01-02", "2026-01-03")
+    assert event.data["changes"] == [{"start": "2026-01-03", "end": "2026-01-03"}]  # the added period alone
+    assert event.data["coverage_end"] == "2026-01-03"
     assert len(_handed_on(instance, expected=2)) == 2
+
+    # A new day listed before the source has values for it is held back: nothing was stored,
+    # so nothing is announced.
+    instance["plugin"].available.append("2026-01-04")
+    instance["plugin"].empty.add("2026-01-04")
+    held = _ingest(instance, end="2026-01-04")
+    assert held.status == JobStatus.SUCCESSFUL, held.error
+    assert held.events == []
 
 
 def test_failed_ingestion_emits_nothing(instance: dict[str, Any]) -> None:
@@ -267,7 +278,7 @@ def test_recovered_ingestion_emits_the_event_its_committed_attempt_owed(instance
         return
     [event] = record.events
     assert event.event_id == "interrupted:0"
-    assert event.data["previous_end"] is None
+    assert event.data["changes"] == [{"start": "2026-01-01", "end": "2026-01-02"}]
     assert len(_handed_on(instance)) == 1
 
 
@@ -325,6 +336,6 @@ def test_inline_sync_is_recorded_as_a_completed_job_with_its_event(
     [event] = record.events
     # The action is the sync planner's own choice; the event reports it as planned.
     assert event.data["action"] in {"append", "rematerialize"}
-    expected_previous_end = "2026-01-02" if event.data["action"] == "append" else None
-    assert (event.data["previous_end"], event.data["current_end"]) == (expected_previous_end, "2026-01-03")
+    expected_start = "2026-01-03" if event.data["action"] == "append" else "2026-01-01"
+    assert event.data["changes"] == [{"start": expected_start, "end": "2026-01-03"}]
     assert len(_handed_on(instance, expected=2)) == 2

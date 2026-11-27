@@ -117,6 +117,8 @@
                 </div>
                 <div class="notice error" data-job-error role="alert" hidden></div>
               </form>
+              {% elif plugin_error %}
+              <p class="note">This data source cannot be ingested here: {{ plugin_error }}.</p>
               {% elif not ingestable %}
               <p class="note">
                 This dataset is not fetched from a provider{% if produced_by %}; it is produced by the

@@ -55,26 +55,14 @@ read whole whatever the window. Portolan caps row groups at 150,000 rows; this s
 """
 
 
-_collection_locks: dict[str, threading.Lock] = {}
-_collection_locks_mutex = threading.Lock()
-
-
 def collection_lock(dataset_id: str) -> threading.Lock:
-    """Return the exclusive lock for one collection, creating it on first use.
+    """The lock for one collection (`writer_lease.dataset_lock`).
 
-    Serializes a refresh end to end — write, replace, register — rather than only the write.
-    Those are separate operations on the same collection, so without this two refreshes can
-    interleave: both replace the file, and whichever registers last stamps its count, extent and
-    CRS onto whatever bytes happen to be on disk.
-
-    In-process, like `ingestions.services._acquire_store_lock` for raster stores. The record
-    index itself is guarded across processes by portalocker; a store is guarded within one, which
-    is the deployment this serves — one instance owning its data directory, which the writer
-    lease enforces: a process that is not the instance's writer is refused here.
+    Held across a whole refresh (write, replace, register), not only the write: otherwise two
+    refreshes can interleave, and whichever registers last stamps its count, extent and CRS onto
+    whatever file is current.
     """
-    writer_lease.ensure_held()
-    with _collection_locks_mutex:
-        return _collection_locks.setdefault(dataset_id, threading.Lock())
+    return writer_lease.dataset_lock(dataset_id)
 
 
 def validate_collection_id(dataset_id: str) -> str:

@@ -201,6 +201,13 @@ def _refresh_locked(recipe: Recipe) -> OpenEOJobRecord | None:
     if recipe.input not in updates:
         return None
     position, update = updates[recipe.input]
+    coverage = [update.data.get("coverage_start"), update.data.get("coverage_end")]
+    if not all(isinstance(value, str) for value in coverage):
+        # An event recorded before CLIM-2029 renamed the coverage fields.
+        logger.warning(
+            "Not refreshing derived dataset %s: update %s does not name its coverage", recipe.output, update.event_id
+        )
+        return None
     record = workflow_registry.get_workflow(recipe.workflow)
     if record is None:
         raise LookupError(f"workflow '{recipe.workflow}' is not registered")
@@ -236,7 +243,7 @@ def _refresh_locked(recipe: Recipe) -> OpenEOJobRecord | None:
     arguments: dict[str, Any] = {
         **resolve_feature_references(recipe.arguments, feature_nodes, feature_versions(recipe.arguments)),
         OUTPUT_PARAMETER: recipe.output,
-        interval: [update.data.get("current_start"), update.data.get("current_end")],
+        interval: coverage,
     }
     call = {**feature_nodes, "derive": {"process_id": recipe.workflow, "arguments": arguments, "result": True}}
     job, _ = service.create_triggered_job(

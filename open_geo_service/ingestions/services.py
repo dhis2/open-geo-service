@@ -233,13 +233,13 @@ def group_datasets() -> dict[str, list[ArtifactRecord]]:
     return grouped
 
 
-LOADABLE_RASTER_FORMATS = frozenset({ArtifactFormat.ICECHUNK, ArtifactFormat.ZARR})
+LOADABLE_RASTER_FORMATS = frozenset({ArtifactFormat.ICECHUNK})
 """Stored formats a raster reader can open as a datacube.
 
 Kept beside the gate that applies it so the two cannot drift: admitting a format no reader
 opens turns a catalogue entry into a runtime failure, and excluding one a reader handles
-hides a dataset that works. `openeo/execution.py::_open_artifact` opens exactly these two —
-Icechunk through its own reader, a plain Zarr store through `open_zarr_dataset`.
+hides a dataset that works. `openeo/execution.py::_open_artifact` opens exactly these. Every
+raster GeoService writes is an Icechunk repository; the plain Zarr format went in CLIM-2017.
 
 NETCDF is absent deliberately: nothing opens it as a datacube, and `_dataset_links` offers it
 as a download instead. GEOPARQUET is absent for a stronger reason: it is not a datacube at all,
@@ -430,21 +430,30 @@ def get_latest_artifact_for_dataset_or_404(dataset_id: str) -> ArtifactRecord:
     return max(artifacts, key=lambda artifact: artifact.created_at)
 
 
-def ensure_ingestable(dataset: dict[str, object]) -> None:
-    """Raise 400 unless *dataset* declares a source to fetch from.
+def ensure_ingestable(dataset: dict[str, Any], *, check_plugin: bool = True) -> None:
+    """Raise 400 unless *dataset* declares a source to fetch from, through a plugin that loads.
 
     Called at every entrance to ingestion, not only inside `create_artifact`. The async
     branch of `POST /ingestions` (`Prefer: respond-async`) enqueues a job and returns 202
-    before `create_artifact` runs, so a check that lived only there turned a client mistake
-    into an accepted job that later failed — with a logged traceback, and with the 400 the
-    caller needed buried in the job record instead of in the response.
+    before `create_artifact` runs, and the web form answers in an event stream, so a check
+    that lived only there turned a client mistake into an accepted job that later failed —
+    with a logged traceback, and with the 400 the caller needed buried in the job record
+    instead of in the response.
 
     400 rather than 500. The request is well formed and the template is valid; it simply has
-    no upstream, which is a property of the dataset the caller named. A 500 says the server
-    broke and invites a retry that cannot succeed (CLIM-912).
+    no upstream it can reach, which is a property of the dataset the caller named. A 500 says
+    the server broke and invites a retry that cannot succeed (CLIM-912, CLIM-2043).
+
+    ``check_plugin=False`` checks only that a plugin is declared, for `create_artifact`, which
+    loads the plugin itself and so runs the same check on it.
     """
-    if registry_datasets.is_ingestable(dataset):
+    ingestable, reason = (
+        registry_datasets.ingestability(dataset) if check_plugin else (registry_datasets.is_ingestable(dataset), None)
+    )
+    if ingestable:
         return
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=f"Data source '{dataset['id']}' cannot be ingested: {reason}")
     raise HTTPException(
         status_code=400,
         detail=(
@@ -503,7 +512,7 @@ def create_artifact(
     # depend on the request, and checking it later meant an operator who picked a workflow
     # output was first told to supply a start period — advice for a request that could never
     # have succeeded.
-    ensure_ingestable(dataset)
+    ensure_ingestable(dataset, check_plugin=False)
 
     from open_geo_service.tables import templates as table_templates
 
@@ -2437,12 +2446,6 @@ def get_dataset_zarr_store_file_or_404(
     artifact = _latest_published_raster_artifacts_cached().get(dataset_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    if artifact.format == ArtifactFormat.ZARR:
-        return _get_filesystem_zarr_store_path_or_404(
-            artifact=artifact,
-            relative_path=relative_path,
-            range_header=range_header,
-        )
     session = _open_icechunk_store_or_404(artifact)
     return _get_icechunk_store_path_or_404(
         dataset_id=dataset_id, session=session, relative_path=relative_path, range_header=range_header
@@ -2838,44 +2841,6 @@ def _get_icechunk_store_path_or_404(
             meta["consolidated_metadata"] = _consolidated_metadata_for_group(session, group_path)
         return JSONResponse(content=meta)
     return _serve_bytes_ranged(payload, media_type, None)
-
-
-def _get_filesystem_zarr_store_path_or_404(
-    *,
-    artifact: ArtifactRecord,
-    relative_path: str,
-    range_header: str | None = None,
-) -> Response | dict[str, object]:
-    """Serve one key from a plain filesystem-backed Zarr store."""
-    store_path = artifact.path or (artifact.asset_paths[0] if artifact.asset_paths else None)
-    if store_path is None:
-        raise HTTPException(status_code=409, detail="Artifact has no resolvable store path")
-    store_root = Path(store_path).resolve()
-    if not store_root.is_dir():
-        raise HTTPException(status_code=404, detail="Zarr store path does not exist on disk")
-
-    target = _normalize_zarr_relative_path(relative_path)
-    if target == "":
-        # Prefer the Zarr v3 root document, while retaining access to legacy v2 stores.
-        for root_key in ("zarr.json", ".zgroup", ".zmetadata"):
-            if (store_root / root_key).is_file():
-                target = root_key
-                break
-        else:
-            raise HTTPException(status_code=404, detail="Zarr root metadata not found")
-
-    full_path = (store_root / target).resolve()
-    if not full_path.is_relative_to(store_root) or not full_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Zarr path '{relative_path}' not found")
-
-    payload = full_path.read_bytes()
-    if full_path.name in {"zarr.json", ".zgroup", ".zarray", ".zattrs", ".zmetadata"}:
-        try:
-            return JSONResponse(content=json.loads(payload.decode("utf-8")))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=500, detail=f"Invalid Zarr metadata at '{target}'") from exc
-    media_type, _ = mimetypes.guess_type(target)
-    return _serve_bytes_ranged(payload, media_type or "application/octet-stream", range_header)
 
 
 def _decode_record(item: dict[str, object]) -> ArtifactRecord:

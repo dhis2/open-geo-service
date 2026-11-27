@@ -9,7 +9,15 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from open_geo_service.ingestions import processes
-from open_geo_service.ingestions.schemas import SyncAction, SyncDetail, SyncKind, SyncResponse
+from open_geo_service.ingestions.schemas import (
+    ArtifactCoverage,
+    CoverageTemporal,
+    DatasetDetailRecord,
+    SyncAction,
+    SyncDetail,
+    SyncKind,
+    SyncResponse,
+)
 from open_geo_service.jobs.models import (
     JobEventDraft,
     JobExecutionResult,
@@ -51,7 +59,10 @@ def _sync_response(action: SyncAction, *, status: str = "completed") -> SyncResp
         sync_id="artifact-2" if status == "completed" else None,
         status=status,
         message="test",
-        dataset=None,
+        # Only the coverage the sync stored, which its update is built from.
+        dataset=DatasetDetailRecord.model_construct(
+            extent=ArtifactCoverage.model_construct(temporal=CoverageTemporal(start="2026-01-01", end="2026-01-03"))
+        ),
         sync_detail=SyncDetail(
             source_dataset_id="source",
             sync_kind=SyncKind.TEMPORAL,
@@ -62,6 +73,8 @@ def _sync_response(action: SyncAction, *, status: str = "completed") -> SyncResp
             current_end="2026-01-02",
             target_end="2026-01-03",
             target_end_source="request",
+            delta_start="2026-01-03",
+            delta_end="2026-01-03",
         ),
     )
 
@@ -330,14 +343,14 @@ def test_successful_job_persists_result_and_events_atomically(monkeypatch: pytes
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_previous_end"),
+    ("action", "expected_start"),
     [
-        (SyncAction.APPEND, "2026-01-02"),
-        (SyncAction.REMATERIALIZE, None),
+        (SyncAction.APPEND, "2026-01-03"),
+        (SyncAction.REMATERIALIZE, "2026-01-01"),
     ],
 )
 def test_execute_sync_returns_dataset_updated_after_completed_change(
-    action: SyncAction, expected_previous_end: str | None, monkeypatch: pytest.MonkeyPatch
+    action: SyncAction, expected_start: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(processes.services, "sync_dataset", lambda **_: _sync_response(action))
 
@@ -351,9 +364,9 @@ def test_execute_sync_returns_dataset_updated_after_completed_change(
         "dataset_id": "managed-dataset",
         "artifact_id": "artifact-2",
         "action": action.value,
-        "previous_end": expected_previous_end,
-        "current_start": "2026-01-01",
-        "current_end": "2026-01-03",
+        "changes": [{"start": expected_start, "end": "2026-01-03"}],
+        "coverage_start": "2026-01-01",
+        "coverage_end": "2026-01-03",
     }
 
 

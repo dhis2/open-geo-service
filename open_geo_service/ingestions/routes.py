@@ -74,6 +74,7 @@ def _ingestable_template_or_404(dataset_id: str) -> dict[str, Any]:
         )
     if template is None:
         raise HTTPException(status_code=404, detail=f"Data source '{dataset_id}' not found")
+    services.ensure_ingestable(template)
     return template
 
 
@@ -93,7 +94,7 @@ def create_ingestion(
         # through the job record, so a non-ingestable template would be accepted with 202 and
         # then fail — logging a traceback for what is a client mistake, and hiding the reason
         # from the response that was supposed to carry it (CLIM-912).
-        services.ensure_ingestable(_ingestable_template_or_404(request.dataset_id))
+        _ingestable_template_or_404(request.dataset_id)
         get_extent_or_404()
 
         from open_geo_service.ingestions.processes import execute_ingestion

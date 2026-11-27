@@ -22,7 +22,6 @@ from open_geo_service.shared.licences import STAC_LICENSE_OTHER
 class ArtifactFormat(StrEnum):
     """Supported stored artifact formats."""
 
-    ZARR = "zarr"
     NETCDF = "netcdf"
     ICECHUNK = "icechunk"
     GEOPARQUET = "geoparquet"

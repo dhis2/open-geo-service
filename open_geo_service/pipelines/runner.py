@@ -1,11 +1,11 @@
 """The one way a pipeline runs: `run_pipeline`, whoever asks.
 
-An operator's run, a retry and a source dataset update all resolve to a `RunContext` with an
-explicit interval and go through `run_pipeline`. It checks the pipeline may run, stores the
-run with its deterministic job id *before* the job exists, then submits the workflow as an
-openEO batch job. When the job finishes, `on_job_finished` hands the saved result to the
-export delivery framework, the same path as ``POST /exports/{id}``, under the run's
-idempotency key.
+An operator's run, a retry and each range a source dataset update changed all resolve to a
+`RunContext` with explicit intervals and go through `run_pipeline`. It checks the pipeline
+may run, stores the run with its deterministic job id *before* the job exists, then submits
+the workflow as an openEO batch job. When the job finishes, `on_job_finished` hands the saved
+result to the export delivery framework, the same path as ``POST /exports/{id}``, under the
+run's idempotency key.
 
 Recovery. `recover_runs` finishes what an interruption or a transient failure left open:
 it resubmits pending runs, hands off finished jobs whose completion was missed, records
@@ -14,7 +14,7 @@ deliveries that are eligible again. Transient failures are retried a bounded num
 times; permanent ones are not retried at all. It runs at startup and periodically.
 
 Dataset updates. Each pipeline keeps a durable checkpoint of the updates it has decided on
-(`EventCheckpoint`), recorded in the same write as the run an update starts. `consume`
+(`EventCheckpoint`), recorded in the same write as the runs an update starts. `consume`
 decides newly persisted updates; `reconcile_events`, at startup, decides any persisted
 update that was missed and advances the checkpoint only as far as no update still to be
 persisted can precede.
@@ -32,7 +32,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -200,10 +200,9 @@ class RunRefused(ValueError):
 
 @dataclass(frozen=True)
 class RunContext:
-    """Why a run happens and over which interval. Every run has an explicit interval."""
+    """Why a pipeline runs and over which intervals, each explicit: one run per interval."""
 
-    start: str
-    end: str
+    intervals: list[tuple[str, str]]
     trigger: RunTrigger = "manual"
     started_by: str | None = None
     mode: Literal["dry_run", "live"] | None = None
@@ -222,9 +221,16 @@ def trigger_id(pipeline_id: str) -> str:
     return f"{TRIGGER_PREFIX}{pipeline_id}"
 
 
+def _source_key(event_id: str | None, run_id: str, start: str, end: str) -> str:
+    """What a run's job is deterministic on: its range of a dataset update, or the run itself.
+
+    An update starts one run per range it changed, so the update's id alone does not tell them apart.
+    """
+    return f"pipeline-run:{run_id}" if event_id is None else f"{event_id}:{start}/{end}"
+
+
 def _source_event(run: PipelineRun) -> str:
-    """The durable event a run's job is deterministic on: the dataset update, or the run itself."""
-    return run.event_id or f"pipeline-run:{run.run_id}"
+    return _source_key(run.event_id, run.run_id, run.start, run.end)
 
 
 def _message(exc: BaseException) -> str:
@@ -266,10 +272,14 @@ def _refusal(record: PipelineRecord, context: RunContext, mode: str) -> str | No
     return None
 
 
-def run_pipeline(pipeline_id: str, context: RunContext) -> PipelineRun:
-    """Run the pipeline's workflow over ``context``'s interval and deliver it when it finishes.
+def run_pipeline(pipeline_id: str, context: RunContext) -> list[PipelineRun]:
+    """Run the pipeline's workflow over each of ``context``'s intervals and deliver each when it finishes.
 
-    Returns the run, or the existing one when the same event or request already produced it.
+    A run by hand or a retry has one interval; a dataset update has one per range it changed.
+    The runs and the decision on the update are written together, so a stop between them cannot
+    leave a range decided and never run.
+
+    Returns the runs, or the existing ones when the same event or request already produced them.
     Raises LookupError for an unknown pipeline and RunRefused when it may not run.
     """
     from open_geo_service.exports.service import resolve_named_export
@@ -292,61 +302,65 @@ def run_pipeline(pipeline_id: str, context: RunContext) -> PipelineRun:
     # The export must resolve by name, because the job saves and the delivery sends through it.
     resolve_named_export(plugin.format, {"export": spec.id})
 
-    run_id = uuid4().hex
-    event = context.event_id or f"pipeline-run:{run_id}"
-    process, resolved = workflow_binding.build_process(
-        spec.workflow, bound, start=context.start, end=context.end, save_format=plugin.format, export_id=spec.id
-    )
-    run = PipelineRun(
-        run_id=run_id,
-        trigger=context.trigger,
-        started_by=context.started_by,
-        event_id=context.event_id,
-        retry_of=context.retry_of,
-        revision=record.revision,
-        bindings=digest,
-        workflow_id=spec.workflow.id,
-        arguments=resolved,
-        process=process,
-        source={"datasets": list(bound.dataset_ids), **context.source},
-        job_id=triggered_job_id(event, trigger_id(spec.id)),
-        mode=mode,
-        start=context.start,
-        end=context.end,
-        submitted_at=utc_now().isoformat(),
-        idempotency_key=f"pipeline:{spec.id}:{event}:{mode}",
-        submission="pending",
-    )
-
-    def _record_intent(current: PipelineRecord) -> PipelineRun:
-        # One run per dataset update, whatever the mode: a replayed event after a switch to
-        # live must not deliver the earlier dry-run result live.
-        existing = next(
-            (
-                item
-                for item in current.runs
-                if item.idempotency_key == run.idempotency_key
-                or (run.event_id is not None and item.event_id == run.event_id)
-            ),
-            None,
+    runs: list[PipelineRun] = []
+    for start, end in context.intervals:
+        process, resolved = workflow_binding.build_process(
+            spec.workflow, bound, start=start, end=end, save_format=plugin.format, export_id=spec.id
         )
-        if existing is not None:
+        run_id = uuid4().hex
+        source = _source_key(context.event_id, run_id, start, end)
+        runs.append(
+            PipelineRun(
+                run_id=run_id,
+                trigger=context.trigger,
+                started_by=context.started_by,
+                event_id=context.event_id,
+                retry_of=context.retry_of,
+                revision=record.revision,
+                bindings=digest,
+                workflow_id=spec.workflow.id,
+                arguments=resolved,
+                process=process,
+                source={"datasets": list(bound.dataset_ids), **context.source},
+                job_id=triggered_job_id(source, trigger_id(spec.id)),
+                mode=mode,
+                start=start,
+                end=end,
+                submitted_at=utc_now().isoformat(),
+                idempotency_key=f"pipeline:{spec.id}:{source}:{mode}",
+                submission="pending",
+            )
+        )
+
+    keys = {run.idempotency_key for run in runs}
+    sources = {_source_event(run) for run in runs if run.event_id is not None}
+
+    def _record_intent(current: PipelineRecord) -> list[PipelineRun]:
+        # One run per range of a dataset update, whatever the mode: a replayed event after a
+        # switch to live must not deliver the earlier dry-run result live.
+        existing = [
+            item
+            for item in current.runs
+            if item.idempotency_key in keys or (item.event_id is not None and _source_event(item) in sources)
+        ]
+        if existing:
             return existing
-        if run.event_id is not None and _decided(current, run.event_id, context.event_time):
-            raise RunRefused(f"update {run.event_id} was already decided for this pipeline")
+        if context.event_id is not None and _decided(current, context.event_id, context.event_time):
+            raise RunRefused(f"update {context.event_id} was already decided for this pipeline")
         if current.revision != record.revision:
             raise RunRefused("the pipeline changed while the run was being prepared; run it again")
-        current.runs.insert(0, run)
-        if run.event_id is not None and context.event_time is not None:
-            # Decided in the same write as the run it starts.
-            current.events.handled[run.event_id] = context.event_time
+        for run in runs:
+            current.runs.insert(0, run)
+        if context.event_id is not None and context.event_time is not None:
+            # Decided in the same write as the runs it starts.
+            current.events.handled[context.event_id] = context.event_time
         _prune(current)
-        return run
+        return runs
 
     _, stored = store.update_record(pipeline_id, _record_intent)
-    if stored is not run:
+    if stored is not runs:
         return stored
-    return _submit(pipeline_id, run.run_id)
+    return [_submit(pipeline_id, run.run_id) for run in runs]
 
 
 def _submit(pipeline_id: str, run_id: str) -> PipelineRun:
@@ -381,6 +395,7 @@ def _submit(pipeline_id: str, run_id: str) -> PipelineRun:
             source_event_id=_source_event(run),
             trigger_id=trigger_id(pipeline_id),
             max_attempts=MAX_ATTEMPTS,
+            job_id=run.job_id,
         )
         job_service.start_triggered_job(job.id)
     except Exception as exc:
@@ -753,42 +768,33 @@ def _decided(record: PipelineRecord, event_id: str, event_time: str | None) -> b
     return through is not None and when is not None and when < through
 
 
-def update_interval(data: dict[str, Any]) -> tuple[str, str, Literal["appended", "rewritten"]] | None:
-    """The interval a dataset update affects, from the update's own description of itself.
+def update_intervals(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """The intervals a dataset update changed, as its ``changes`` list them; empty when it lists none.
 
-    An append (``previous_end`` set) changed the periods after ``previous_end`` and left the
-    earlier ones as they were: the run covers ``previous_end`` to ``current_end``, re-sending
-    the last period already stored, so an overwrite at the destination completes it. A sync
-    that replaced preliminary periods with final ones sets ``previous_end`` before the first
-    of them, so the run carries the final values on. A rewrite (``previous_end`` null: a new
-    store or a rematerialization) may have changed any period, so the run covers the whole
-    coverage after it.
+    Each is run by itself: the periods between two of them did not change. An update in the
+    shape before CLIM-2029, with no ``changes``, lists none.
     """
-    end = data.get("current_end")
-    previous = data.get("previous_end")
-    if not isinstance(end, str):
-        return None
-    if isinstance(previous, str):
-        return previous, end, "appended"
-    start = data.get("current_start")
-    return (start, end, "rewritten") if isinstance(start, str) else None
+    changes = data.get("changes")
+    if not isinstance(changes, list):
+        return []
+    intervals: list[tuple[str, str]] = []
+    for change in cast(list[Any], changes):
+        start, end = (change.get("start"), change.get("end")) if isinstance(change, dict) else (None, None)
+        if not isinstance(start, str) or not isinstance(end, str):
+            return []
+        intervals.append((start, end))
+    return intervals
 
 
-def _event_context(event: Any) -> RunContext | None:
-    interval = update_interval(event.data)
-    if interval is None:
-        return None
-    start, end, scope = interval
+def _event_context(event: Any) -> RunContext:
     data = event.data
-    source = {key: data[key] for key in ("dataset_id", "artifact_id", "action") if data.get(key) is not None}
     return RunContext(
-        start=start,
-        end=end,
+        intervals=update_intervals(data),
         trigger="dataset_update",
         started_by=PIPELINE_RUNNER,
         event_id=event.event_id,
         event_time=_utc(event.time).isoformat(),
-        source={**source, "update": scope},
+        source={key: data[key] for key in ("dataset_id", "artifact_id", "action") if data.get(key) is not None},
     )
 
 
@@ -800,13 +806,11 @@ def _skip(pipeline_id: str, event: Any, reason: str, *, decide: bool = True) -> 
     """
     from open_geo_service.pipelines.schemas import SkippedUpdate
 
-    interval = update_interval(event.data)
     entry = SkippedUpdate(
         event_id=event.event_id,
         time=_utc(event.time).isoformat(),
         dataset_id=event.data.get("dataset_id"),
-        start=interval[0] if interval else None,
-        end=interval[1] if interval else None,
+        intervals=update_intervals(event.data),
         reason=reason,
     )
 
@@ -912,8 +916,9 @@ def _dispatch(record: PipelineRecord, event: Any, *, live: bool = False) -> date
     if event.data.get("dataset_id") not in bound.dataset_ids:
         return None  # not this pipeline's source: decided the same way every time
     context = _event_context(event)
-    if context is None:
-        _skip(spec.id, event, "the update names no interval")
+    if not context.intervals:
+        logger.warning("Pipeline '%s' skips update %s: it lists no changed periods", spec.id, event.event_id)
+        _skip(spec.id, event, "the update lists no changed periods")
         return None
     try:
         run_pipeline(spec.id, context)

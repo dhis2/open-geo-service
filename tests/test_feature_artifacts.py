@@ -893,7 +893,7 @@ def test_the_feature_builder_needs_no_datacube_machinery(client: TestClient, mon
 
 
 def test_openeo_refuses_to_open_a_feature_collection_as_a_datacube() -> None:
-    """Enumerated formats, so this never falls through to open_zarr_dataset on a parquet file."""
+    """A format other than Icechunk is refused by name, not handed to the store reader."""
     with pytest.raises(HTTPException) as excinfo:
         openeo_execution._open_artifact(_feature_artifact())
 
