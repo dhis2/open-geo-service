@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import os
@@ -25,7 +24,7 @@ from xstac import xarray_to_stac
 
 from open_geo_service.auth.oidc import discovery_url
 from open_geo_service.auth.tokens import access_settings, auth_required_for_read
-from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
+from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.features import templates as feature_templates
@@ -1804,37 +1803,17 @@ def _keywords(artifact: ArtifactRecord, source_dataset: dict[str, Any]) -> list[
 
 
 def _zarr_asset_metadata(artifact: ArtifactRecord) -> dict[str, object]:
-    metadata: dict[str, object] = {"zarr:node_type": "group"}
-    if artifact.format == ArtifactFormat.ICECHUNK:
-        metadata["zarr:zarr_format"] = 3
-        return metadata
-    artifact_path = _artifact_store_path(artifact)
-    consolidated = _zarr_consolidated_flag(artifact_path)
-    if consolidated is not None:
-        metadata["zarr:consolidated"] = consolidated
-    if "://" in artifact_path:
-        return metadata
-    store_root = Path(artifact_path)
-    zarr_json = store_root / "zarr.json"
-    if zarr_json.exists():
-        metadata["zarr:zarr_format"] = 3
-    else:
-        zgroup = store_root / ".zgroup"
-        if zgroup.exists():
-            metadata["zarr:zarr_format"] = 2
-    return metadata
+    """The `zarr:` fields of a raster's `zarr` asset: `/zarr` serves every store as a Zarr v3 group."""
+    return {"zarr:node_type": "group", "zarr:zarr_format": 3}
 
 
 def _zarr_open_kwargs(artifact: ArtifactRecord) -> dict[str, bool | None]:
-    if artifact.format == ArtifactFormat.ICECHUNK:
-        return {"consolidated": True}
-    return {"consolidated": _zarr_consolidated_flag(_artifact_store_path(artifact))}
+    """How xarray opens the `zarr` asset: `/zarr` serves consolidated metadata on every group."""
+    return {"consolidated": True}
 
 
 def _open_published_store(artifact: ArtifactRecord) -> xr.Dataset:
-    if artifact.format == ArtifactFormat.ICECHUNK:
-        return open_icechunk_dataset(_artifact_store_path(artifact))
-    return open_zarr_dataset(_artifact_store_path(artifact))
+    return open_icechunk_dataset(_artifact_store_path(artifact))
 
 
 def _build_renders(artifact: ArtifactRecord, source_dataset: dict[str, Any]) -> dict[str, Any]:
@@ -1862,23 +1841,3 @@ def _build_renders(artifact: ArtifactRecord, source_dataset: dict[str, Any]) -> 
     # Units aren't duplicated here: they're published on the datacube-standard
     # ``cube:variables[<var>].unit``, which clients read instead.
     return {"default": render}
-
-
-def _zarr_consolidated_flag(artifact_path: str) -> bool | None:
-    if "://" in artifact_path:
-        return None
-
-    store_root = Path(artifact_path)
-    zarr_json = store_root / "zarr.json"
-    if zarr_json.exists():
-        try:
-            payload = json.loads(zarr_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return "consolidated_metadata" in payload
-
-    if (store_root / ".zmetadata").exists():
-        return True
-    if (store_root / ".zgroup").exists():
-        return False
-    return None

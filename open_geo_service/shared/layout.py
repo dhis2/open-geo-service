@@ -67,11 +67,6 @@ def raster_store(dataset_id: str) -> Path:
     return dataset_dir(Kind.RASTER, dataset_id) / f"{dataset_id}.icechunk"
 
 
-def raster_zarr(dataset_id: str) -> Path:
-    """The plain Zarr store of the raster dataset *dataset_id*, whether or not it exists."""
-    return dataset_dir(Kind.RASTER, dataset_id) / f"{dataset_id}.zarr"
-
-
 def raster_stores() -> Iterator[Path]:
     """Every raster dataset's Icechunk store in the data folder."""
     root = kind_root(Kind.RASTER)

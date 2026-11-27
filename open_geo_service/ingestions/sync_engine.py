@@ -720,8 +720,8 @@ def _icechunk_path_for(artifact: ArtifactRecord) -> str | None:
     """Return the Icechunk store path for a plugin-backed artifact.
 
     Explicitly raster-only, and None is the right answer for every other format rather than a
-    case to add. Append writes periods into a committed Icechunk store, so a plain Zarr, a
-    NetCDF download and a GeoParquet feature collection all fall back to rematerialize — and a
+    case to add. Append writes periods into a committed Icechunk store, so a NetCDF
+    download and a GeoParquet feature collection both fall back to rematerialize — and a
     feature collection never reaches here at all, since `services._refuse_non_raster_sync`
     turns it away before the planner runs.
     """

@@ -115,14 +115,13 @@ def test_an_id_that_is_not_a_template_is_still_404(client: TestClient) -> None:
 
 
 def test_get_data_raises_a_typed_error_when_no_source_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drives the real two-source fall-through rather than the exception the route catches.
+    """Drives the real store lookup rather than the exception the route catches.
 
     Typed rather than the bare `OSError: no files to open` that `open_mfdataset` produced: that
     message named no dataset and could not be told apart from a genuinely unreadable store, so
     a caller had nothing safe to catch.
     """
     monkeypatch.setattr(accessor, "get_icechunk_path", lambda _: __import__("pathlib").Path("/nonexistent/store"))
-    monkeypatch.setattr(accessor, "get_zarr_path", lambda _: None)
 
     with pytest.raises(accessor.DatasetDataUnavailable, match="has no ingested data"):
         accessor.get_data({"id": "never_ingested", "period_type": "daily"})
@@ -132,7 +131,6 @@ def test_reading_data_still_fails_while_describing_it_does_not(monkeypatch: pyte
     """The asymmetry is the point. Serving data that does not exist must error; describing a
     template that has not been ingested must not."""
     monkeypatch.setattr(accessor, "get_icechunk_path", lambda _: __import__("pathlib").Path("/nonexistent/store"))
-    monkeypatch.setattr(accessor, "get_zarr_path", lambda _: None)
     dataset = {"id": "never_ingested", "period_type": "daily"}
 
     with pytest.raises(accessor.DatasetDataUnavailable):

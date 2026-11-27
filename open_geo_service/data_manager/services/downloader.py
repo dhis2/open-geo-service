@@ -630,14 +630,6 @@ def _get_cache_prefix(dataset: dict[str, Any]) -> str:
     return str(dataset["id"])
 
 
-def get_zarr_path(dataset: dict[str, Any]) -> Path | None:
-    """Return the optimised zarr archive path if it exists."""
-    optimized = layout.raster_zarr(_get_cache_prefix(dataset))
-    if optimized.exists():
-        return optimized
-    return None
-
-
 def get_icechunk_path(dataset: dict[str, Any]) -> Path:
     """Return the Icechunk store path for a dataset."""
     return layout.raster_store(_get_cache_prefix(dataset))
