@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException
 
@@ -71,6 +71,24 @@ def dataset_update_event(
         if value is not None:
             data[key] = value
     return JobEventDraft(type=DATASET_UPDATED_EVENT_TYPE, source=f"/datasets/{dataset_id}", data=data)
+
+
+def update_intervals(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """The intervals a dataset update changed, as its ``changes`` list them; empty when it lists none.
+
+    Each is run by itself: the periods between two of them did not change. An update in the
+    shape before CLIM-2029, with no ``changes``, lists none.
+    """
+    changes = data.get("changes")
+    if not isinstance(changes, list):
+        return []
+    intervals: list[tuple[str, str]] = []
+    for change in cast(list[Any], changes):
+        start, end = (change.get("start"), change.get("end")) if isinstance(change, dict) else (None, None)
+        if not isinstance(start, str) or not isinstance(end, str):
+            return []
+        intervals.append((start, end))
+    return intervals
 
 
 def ingest_dataset(

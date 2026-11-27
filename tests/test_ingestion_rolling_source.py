@@ -14,7 +14,6 @@ from open_geo_service.data_accessor.services.accessor import open_icechunk_datas
 from open_geo_service.ingestions import processes, services, sync_engine
 from open_geo_service.ingestions.schemas import ArtifactVersion, CoverageTemporal, SyncAction
 from open_geo_service.openeo import execution as openeo_execution
-from open_geo_service.pipelines import runner
 from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.provisional import FETCHED_AT
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period, orchestrator
@@ -305,7 +304,9 @@ def _sync(end: str) -> services.SyncResponse:
 
 def _pipeline_runs(response: services.SyncResponse) -> list[list[tuple[str, str]]]:
     """The intervals a pipeline following the dataset runs, one each, for each update event the sync emits."""
-    return [runner.update_intervals(event.data) for event in processes.sync_update_events("rolling_precip", response)]
+    return [
+        processes.update_intervals(event.data) for event in processes.sync_update_events("rolling_precip", response)
+    ]
 
 
 def _stored(store_path: Path) -> tuple[list[float], list[datetime | None]]:
@@ -410,7 +411,7 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     plugin.empty.add("2026-01-15")
     response = _sync("2026-01-15")
     [event] = processes.sync_update_events("rolling_precip", response)
-    assert runner.update_intervals(event.data) == [("2026-01-12", "2026-01-12")]
+    assert processes.update_intervals(event.data) == [("2026-01-12", "2026-01-12")]
     assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-14")
 
 
