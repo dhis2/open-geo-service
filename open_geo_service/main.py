@@ -123,15 +123,15 @@ async def _replay_notifications_periodically() -> None:
 
 
 async def _refresh_derived_datasets_periodically() -> None:
-    """Refresh derived datasets whose input updated while no process could, for as long as the app runs."""
-    from open_geo_service.derivations.service import reconcile
+    """Start derived dataset refreshes left waiting, such as behind one that failed, for as long as the app runs."""
+    from open_geo_service.derivations.service import start_waiting
 
     while True:
         await asyncio.sleep(_MAINTENANCE_INTERVAL_S)
         try:
-            await asyncio.to_thread(reconcile)
+            await asyncio.to_thread(start_waiting)
         except Exception:
-            logger.exception("Derived dataset reconciliation failed; retrying at the next interval")
+            logger.exception("Starting waiting derived dataset refreshes failed; retrying at the next interval")
 
 
 # How often the writer retries a failed rewrite of the STAC catalog; between retries it lags the records.

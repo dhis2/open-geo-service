@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -125,7 +125,13 @@ class _FakeOpenEO:
         self.jobs: dict[str, OpenEOJobRecord] = {}
 
     def create_triggered_job(
-        self, body: Any, *, source_event_id: str, trigger_id: str, max_attempts: int = 1
+        self,
+        body: Any,
+        *,
+        source_event_id: str,
+        trigger_id: str,
+        max_attempts: int = 1,
+        merge_publication: bool = False,
     ) -> tuple[OpenEOJobRecord, bool]:
         job_id = openeo_jobs.triggered_job_id(source_event_id, trigger_id)
         if job_id in self.jobs:
@@ -140,10 +146,13 @@ class _FakeOpenEO:
             trigger_id=trigger_id,
             source_event_id=source_event_id,
             max_attempts=max_attempts,
+            merge_publication=merge_publication,
         )
         return self.jobs[job_id], True
 
     def start_triggered_job(self, job_id: str) -> bool:
+        if self.jobs[job_id].status != OpenEOJobStatus.CREATED:
+            return False
         self.set(job_id, OpenEOJobStatus.QUEUED)
         return True
 
@@ -152,13 +161,20 @@ class _FakeOpenEO:
         return self.jobs[job_id]
 
 
-def _update(number: int, dataset_id: str = "rain") -> JobEvent:
+def _update(day: int, dataset_id: str = "rain", *changes: tuple[str, str]) -> JobEvent:
+    """An update of ``dataset_id`` on day ``day`` of November 2026; by default it changed month ``day``."""
+    ranges = changes or ((f"2026-{day:02d}", f"2026-{day:02d}"),)
     return JobEvent(
-        event_id=f"sync-{number}:0",
-        time=datetime(2026, 11, 1, tzinfo=UTC) + timedelta(days=number),
+        event_id=f"{dataset_id}-{day}:0",
+        time=datetime(2026, 11, day, tzinfo=UTC),
         type=DATASET_UPDATED_EVENT_TYPE,
         source=f"/datasets/{dataset_id}",
-        data={"dataset_id": dataset_id, "coverage_start": "1991-01", "coverage_end": f"2026-0{number}"},
+        data={
+            "dataset_id": dataset_id,
+            "changes": [{"start": start, "end": end} for start, end in ranges],
+            "coverage_start": "1991-01",
+            "coverage_end": max(end for _, end in ranges),
+        },
     )
 
 
@@ -171,6 +187,14 @@ class _Instance:
         self.created: set[str] = set()
         self.recipes = [_ANOMALY]
 
+    def arrive(self, event: JobEvent) -> None:
+        """Persist an update and hand it to the live consumer."""
+        self.log.append(event)
+        derivations.consume([event])
+
+    def job(self, index: int) -> OpenEOJobRecord:
+        return list(self.openeo.jobs.values())[index]
+
 
 @pytest.fixture
 def instance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Instance:
@@ -180,56 +204,68 @@ def instance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Instance:
     monkeypatch.setattr(derivations.api_config, "get_data_root", lambda: tmp_path)
     monkeypatch.setattr(openeo_jobs, "get_openeo_job_service", lambda: state.openeo)
     monkeypatch.setattr(openeo_jobs, "store_list_jobs", lambda: list(state.openeo.jobs.values()))
-    monkeypatch.setattr(job_events, "persisted_events", lambda: list(state.log))
+    monkeypatch.setattr(job_events, "read_event_log", lambda: job_events.EventLog(list(state.log), None))
     monkeypatch.setattr(derivations, "list_recipes", lambda: state.recipes)
     monkeypatch.setattr(derivations, "_exists", lambda dataset_id: dataset_id in state.created)
     return state
 
 
-def _graph(end: str, recipe: Recipe = _ANOMALY) -> dict[str, Any]:
-    """The frozen graph a refresh of ``recipe`` over 1991-01 to ``end`` submits."""
-    arguments = {**recipe.arguments, "output_dataset_id": recipe.output, "temporal_extent": ["1991-01", end]}
+def _graph(start: str, end: str, recipe: Recipe = _ANOMALY) -> dict[str, Any]:
+    """The frozen graph a refresh of ``recipe`` over ``start`` to ``end`` submits."""
+    arguments = {**recipe.arguments, "output_dataset_id": recipe.output, "temporal_extent": [start, end]}
     return workflows.freeze_process_graph(
         {"derive": {"process_id": recipe.workflow, "arguments": arguments, "result": True}}
     )
 
 
-def test_a_derived_dataset_is_refreshed_once_per_latest_update_of_its_input(
+def test_a_derived_dataset_recomputes_each_range_its_input_changed_one_at_a_time(
     instance: _Instance, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake, log, created, current = instance.openeo, instance.log, instance.created, instance.recipes
+    fake = instance.openeo
+    queued, created, finished = OpenEOJobStatus.QUEUED, OpenEOJobStatus.CREATED, OpenEOJobStatus.FINISHED
 
-    def updated(number: int) -> None:
-        log.append(_update(number))
-        derivations.consume([log[-1]])
-
-    updated(1)
+    instance.arrive(_update(1))
     assert fake.jobs == {}  # never created, so nothing to keep current
-    created.add("rain_anomaly")
-    log.append(_update(1, "rain_anomaly"))  # an operator ran the workflow by hand
-    derivations.consume([log[-1]])
+    instance.created.add("rain_anomaly")
+    instance.log.append(_update(2, "rain_anomaly"))  # an operator ran the workflow by hand
     derivations.reconcile()
     assert fake.jobs == {}  # the creating run covers update 1
-    log.insert(0, log.pop())  # had it been created before update 1, at startup that update is refreshed
-    derivations.reconcile()
-    [first] = fake.jobs.values()
-    assert first.status == OpenEOJobStatus.QUEUED and first.trigger_id == "derive:rain_anomaly"
-    assert first.process["process_graph"] == _graph("2026-01")
-    derivations.consume([log[-1]])
-    updated(2)
-    updated(3)
-    assert list(fake.jobs) == [first.id]  # one refresh at a time
-    fake.set(first.id, OpenEOJobStatus.FINISHED)
+
+    # A sync that replaced a preliminary month and added one: each range alone, merged into the store.
+    instance.arrive(_update(3, "rain", ("2026-01", "2026-01"), ("2026-03", "2026-03")))
+    first, second = instance.job(0), instance.job(1)
+    assert [first.status, second.status] == [queued, created]  # one refresh at a time
+    assert first.process["process_graph"] == _graph("2026-01", "2026-01")
+    assert second.process["process_graph"] == _graph("2026-03", "2026-03")
+    assert first.merge_publication and second.merge_publication and first.trigger_id == "derive:rain_anomaly"
+    instance.arrive(_update(4))
+    derivations.consume([instance.log[-1]])  # the same update again
+    assert len(fake.jobs) == 3
+    fake.set(first.id, finished)
     derivations.on_job_finished(fake.jobs[first.id])
-    [_, latest] = fake.jobs.values()
-    assert latest.process["process_graph"] == _graph("2026-03")
-    fake.set(latest.id, OpenEOJobStatus.ERROR)
+    assert fake.jobs[second.id].status == queued
+
+    fake.set(second.id, OpenEOJobStatus.ERROR)
+    derivations.start_waiting()  # the maintenance pass starts what waited behind it
+    assert instance.job(2).status == queued
+    fake.set(instance.job(2).id, finished)
+    instance.arrive(_update(5))
+    full = instance.job(3)
+    # Month 3 was never written, so the next update recomputes the whole history.
+    assert not full.merge_publication and full.process["process_graph"] == _graph("1991-01", "2026-05")
+    fake.set(full.id, finished)
+    instance.arrive(_update(6))
+    assert instance.job(4).merge_publication  # back to the changed range
+    fake.set(instance.job(4).id, finished)
+
+    changed = replace(_ANOMALY, arguments={**_ANOMALY.arguments, "variable": "t2m"})
+    instance.recipes[0] = changed
     derivations.reconcile()
-    assert len(fake.jobs) == 2  # a failed refresh is left for an operator
-    current[0] = replace(_ANOMALY, arguments={**_ANOMALY.arguments, "variable": "t2m"})
+    assert len(fake.jobs) == 6  # a changed recipe recomputes the whole history at startup
+    assert instance.job(5).process["process_graph"] == _graph("1991-01", "2026-06", changed)
+    fake.set(instance.job(5).id, finished)
     derivations.reconcile()
-    assert len(fake.jobs) == 3  # a changed recipe is another refresh of the same update
-    fake.set(list(fake.jobs)[-1], OpenEOJobStatus.FINISHED)
+    assert len(fake.jobs) == 6
     registered = workflows.get_workflow
     edited = registered("climate_anomaly").model_copy(  # type: ignore[union-attr]
         update={"description": "edited", "process_graph": {**registered("climate_anomaly").process_graph, "note": {}}}  # type: ignore[union-attr]
@@ -237,11 +273,11 @@ def test_a_derived_dataset_is_refreshed_once_per_latest_update_of_its_input(
     monkeypatch.setattr(
         workflows, "get_workflow", lambda name: edited if name == "climate_anomaly" else registered(name)
     )
-    derivations.reconcile()
-    assert len(fake.jobs) == 4  # so is a changed workflow
+    instance.arrive(_update(7))
+    assert not instance.job(6).merge_publication  # so does a changed workflow, at its next update
     monkeypatch.setattr(derivations.api_config, "is_read_only", lambda: True)
-    updated(4)
-    assert len(fake.jobs) == 4
+    instance.arrive(_update(8))
+    assert len(fake.jobs) == 7
 
 
 def test_a_refresh_loads_a_feature_collection_bound_by_id_at_its_current_version(
@@ -259,8 +295,7 @@ def test_a_refresh_loads_a_feature_collection_bound_by_id_at_its_current_version
     bound = {**_ANOMALY.arguments, "geometries": {"from_features": "districts"}}
     instance.recipes = [replace(_ANOMALY, arguments=bound)]
     instance.created.add("rain_anomaly")
-    instance.log.append(_update(1))
-    derivations.consume([instance.log[-1]])
+    instance.arrive(_update(1))
 
     [job] = instance.openeo.jobs.values()
     assert job.process["process_graph"]["features_districts"] == {
@@ -280,69 +315,32 @@ def test_updates_handled_at_once_start_one_refresh(instance: _Instance, monkeypa
         return create(*args, **kwargs)
 
     monkeypatch.setattr(instance.openeo, "create_triggered_job", slow_create)
-    instance.log.append(_update(1))
-    first = threading.Thread(target=derivations.consume, args=([instance.log[-1]],))
+    first = threading.Thread(target=instance.arrive, args=(_update(1),))
     first.start()
     assert creating.wait(5)
-    instance.log.append(_update(2))
-    derivations.consume([instance.log[-1]])
+    instance.arrive(_update(2))
     first.join(5)
 
     assert not first.is_alive()
-    assert len(instance.openeo.jobs) == 1
-
-
-def test_a_caller_held_before_the_lock_refreshes_the_update_that_arrived_meanwhile(
-    instance: _Instance, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The latest update is read under the lock: one read before it would submit A's shorter
-    range after B arrived, and publishing that would shrink the dataset's coverage."""
-    from contextlib import contextmanager
-
-    from open_geo_service.shared import persistence
-
-    instance.created.add("rain_anomaly")
-    waiting, release = threading.Event(), threading.Event()
-    lock = persistence.index_lock
-
-    @contextmanager
-    def held_back(path: Path) -> Any:
-        waiting.set()
-        assert release.wait(5)
-        with lock(path):
-            yield
-
-    monkeypatch.setattr(persistence, "index_lock", held_back)
-    instance.log.append(_update(1))
-    caller = threading.Thread(target=derivations.consume, args=([instance.log[-1]],))
-    caller.start()
-    assert waiting.wait(5)
-    instance.log.append(_update(2))
-    release.set()
-    caller.join(5)
-
-    assert not caller.is_alive()
-    [job] = instance.openeo.jobs.values()
-    assert job.process["process_graph"] == _graph("2026-02")
+    assert [job.status for job in instance.openeo.jobs.values()] == [OpenEOJobStatus.QUEUED, OpenEOJobStatus.CREATED]
 
 
 def test_a_refresh_left_unstarted_waits_while_another_runs(instance: _Instance) -> None:
     """A process that stopped between creating and starting a refresh leaves it CREATED; the
-    next reconciliation starts it, but not beside a refresh another process queued since."""
+    maintenance pass starts it, but not beside a refresh another process queued since."""
     instance.created.add("rain_anomaly")
-    instance.log.append(_update(1))
     start = instance.openeo.start_triggered_job
     instance.openeo.start_triggered_job = lambda job_id: False  # stopped before starting it
-    derivations.reconcile()
+    instance.arrive(_update(1))
     [left] = instance.openeo.jobs.values()
     instance.openeo.start_triggered_job = start
     other = left.model_copy(update={"id": "queued-elsewhere", "status": OpenEOJobStatus.QUEUED})
     instance.openeo.jobs[other.id] = other
 
-    derivations.reconcile()
+    derivations.start_waiting()
     assert instance.openeo.jobs[left.id].status == OpenEOJobStatus.CREATED
     instance.openeo.set(other.id, OpenEOJobStatus.FINISHED)
-    derivations.reconcile()
+    derivations.start_waiting()
     assert instance.openeo.jobs[left.id].status == OpenEOJobStatus.QUEUED
 
 
@@ -360,7 +358,7 @@ def test_one_failing_consumer_does_not_keep_events_from_the_others(monkeypatch: 
 
     dispatch.consume([_update(1)])
 
-    assert received == ["sync-1:0"]
+    assert received == ["rain-1:0"]
 
 
 def test_an_input_update_refreshes_the_derived_dataset_and_its_pipeline_hears_of_it_across_a_restart(
@@ -434,12 +432,14 @@ def test_an_input_update_refreshes_the_derived_dataset_and_its_pipeline_hears_of
                 "arguments": {
                     **recipe.arguments,
                     "output_dataset_id": _DATASET,
-                    "temporal_extent": ["1991-01", "2026-01"],
+                    "temporal_extent": ["2026-01", "2026-01"],
                 },
                 "result": True,
             }
         }
     )
+    # The stubbed result's periods, written into the store the operator created.
+    assert [event.data["action"] for event in first.events] == ["merge"]
 
     first_process.shutdown()
     synced(2)  # while no process runs

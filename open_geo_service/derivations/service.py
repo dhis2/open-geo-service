@@ -1,36 +1,42 @@
 """Run a derived dataset's recipe again when the dataset it refreshes on updates.
 
 Dataset maintenance owns derivation; pipelines own delivery. A recipe with ``refresh_on``
-(`data_registry.recipes`) is computed again, over the full coverage of its driving dataset,
-after that dataset's ``dataset.updated`` event. The run is an openEO batch job of the recipe's
-workflow, and the workflow publishes the derived dataset, which emits its own update through
-the publication path, so a pipeline on the derived dataset runs next.
+(`data_registry.recipes`) is computed again after each ``dataset.updated`` event of its driving
+dataset, once for each range of periods the event lists in ``changes``. Each run is an openEO
+batch job of the recipe's workflow over that range, which writes the periods it computed into
+the derived dataset's store and keeps the others (``merge_publication``). That publication emits
+the derived dataset's own update, listing those periods, so a pipeline or recipe on the derived
+dataset reruns only them. A range computed on its own is right for a workflow whose output
+periods depend only on input inside them, as every shipped recipe's do; CLIM-2052 is for
+workflows that need more.
+
+The whole history is computed again instead, replacing the store, when the recipe or the
+workflow it runs changed since the last refresh, or for the update after a refresh that failed
+or was cancelled, whose periods were then never written. An update that rewrote its input from
+the start already lists the whole coverage.
 
 Only a derived dataset that exists is kept current: one an operator created once. A built-in
 recipe therefore costs nothing on an instance that never asked for its dataset. The run that
-created it counts as current for the driving dataset's updates it published after, so creating
-it does not start a second full run at once; a dataset that predates the latest update is
-refreshed.
+created it covers the updates before it.
 
-Each refresh is one job whose id is derived from the output, the driving update, the recipe's
-digest and the digest of the workflow definition it runs, frozen with its nested workflows. The
-job carries that frozen graph, so it runs what was current when it was submitted, submitting it
-again finds the same job, and a changed recipe or workflow is a new job.
+Each refresh is one job whose id is derived from the driving update, its range (or ``full``),
+the recipe's digest and the digest of the workflow definition it runs, frozen with its nested
+workflows. The job carries that frozen graph, so it runs what was current when it was
+submitted, and submitting it again finds the same job. An update is handled once a job names it.
+Refreshes of one derived dataset run one at a time, since each writes the same store: the others
+wait as created jobs and start in the order they were created, the next when one finishes.
 
-Whether the latest update has its job is the whole test of being current. A time comparison,
-or the input snapshot the output recorded, would take a refresh that started before a newer
-update as covering it, though it computed only the older range. Only the latest update
-matters, since every run recomputes the full range: while a refresh runs, later updates wait,
-and a finished refresh reconciles against the newest one; after a failed one, the next
-reconciliation does. Reconciliation runs at startup
-and on the maintenance interval too, so an update missed by a stopped process is caught up. A
-refresh whose job failed or was cancelled is not submitted again by itself; the next update of
-its input starts a new one.
+`consume` handles the updates just persisted. `reconcile`, at startup, reads the event log once
+for updates a stopped process missed: those after the newest refresh job, or after the dataset's
+creation when it has none. `start_waiting`, on the maintenance interval, starts a refresh left
+waiting, such as one queued behind a refresh that failed, without reading the log.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -104,7 +110,7 @@ def recipe_problems(recipe: Recipe) -> list[str]:
     if len(intervals) != 1:
         problems.append(f"workflow '{recipe.workflow}' must declare exactly one temporal-interval parameter")
     elif recipe.refresh_on is not None and not open_intervals:
-        problems.append(f"leave '{intervals[0]}' out: each refresh fills it with the input's full coverage")
+        problems.append(f"leave '{intervals[0]}' out: each refresh fills it with the periods the input changed")
     elif recipe.refresh_on is None and open_intervals:
         problems.append(f"set '{intervals[0]}': a recipe without refresh_on runs over a fixed range")
     supplied = {*recipe.arguments, OUTPUT_PARAMETER, *open_intervals}
@@ -152,16 +158,56 @@ def validate_recipes() -> None:
 
 # --- refreshing -------------------------------------------------------------------------------
 
+_FULL = "full"
+_FAILED = frozenset({OpenEOJobStatus.ERROR, OpenEOJobStatus.CANCELED})
 
-def _latest_updates() -> dict[str, tuple[int, JobEvent]]:
-    """Each dataset's latest persisted update, with its position in the log."""
-    from open_geo_service.jobs.events import persisted_events
 
-    latest: dict[str, tuple[int, JobEvent]] = {}
-    for position, event in enumerate(persisted_events()):
-        if event.type == DATASET_UPDATED_EVENT_TYPE and isinstance(dataset_id := event.data.get("dataset_id"), str):
-            latest[dataset_id] = (position, event)
-    return latest
+@dataclass(frozen=True)
+class _Source:
+    """What a refresh job answers: an update, the range it computes or ``full``, and the definition it runs."""
+
+    event_id: str
+    span: str
+    recipe_digest: str
+    workflow_digest: str
+
+    def __str__(self) -> str:
+        return f"{self.event_id}:{self.span}:{self.recipe_digest}:{self.workflow_digest}"
+
+    @classmethod
+    def of(cls, job: OpenEOJobRecord) -> _Source | None:
+        # From the right: an event id may hold colons, a period never does.
+        parts = (job.source_event_id or "").rsplit(":", 3)
+        return cls(*parts) if len(parts) == 4 else None
+
+
+@dataclass(frozen=True)
+class _Definition:
+    """A recipe's workflow as a refresh submitted now runs it."""
+
+    snapshot: WorkflowRecord
+    digest: str
+    interval: str
+
+
+def _definition(recipe: Recipe) -> _Definition:
+    from open_geo_service.openeo import workflows as workflow_registry
+    from open_geo_service.pipelines import workflow as binding
+
+    record = workflow_registry.get_workflow(recipe.workflow)
+    if record is None:
+        raise LookupError(f"workflow '{recipe.workflow}' is not registered")
+    # One snapshot of the definition, nested workflows inlined, for the identity, the interval
+    # and the submitted graph alike: the job runs what its id names, whatever is edited later.
+    snapshot = binding.frozen(record)
+    open_intervals = [name for name in binding.interval_parameters(snapshot) if name not in recipe.arguments]
+    if len(open_intervals) != 1:
+        # Checked at startup, but a workflow can be edited while OGS runs.
+        raise ValueError(
+            f"workflow '{recipe.workflow}' must leave exactly one temporal-interval parameter open, "
+            f"not {open_intervals}"
+        )
+    return _Definition(snapshot, binding.definition_digest(snapshot), open_intervals[0])
 
 
 def _exists(dataset_id: str) -> bool:
@@ -176,136 +222,242 @@ def _exists(dataset_id: str) -> bool:
     return True
 
 
-def _refresh(recipe: Recipe) -> OpenEOJobRecord | None:
-    """Submit the refresh the driving dataset's latest update calls for, if one is due; return it.
+def _is_update(event: JobEvent) -> bool:
+    return event.type == DATASET_UPDATED_EVENT_TYPE and isinstance(event.data.get("dataset_id"), str)
 
-    Reading the latest update, checking the jobs and creating the next one happen under one
-    lock per derived dataset, shared by every process on the data directory. Two updates
-    handled at once would otherwise each find no refresh running and start two, and an update
-    read before the lock could be older than one another caller already refreshed.
+
+def _jobs(output: str) -> list[OpenEOJobRecord]:
+    """The refresh jobs of a derived dataset, oldest first."""
+    from open_geo_service.openeo.jobs import store_list_jobs
+
+    jobs = [job for job in store_list_jobs() if job.trigger_id == trigger_id(output)]
+    return sorted(jobs, key=lambda job: (job.created, job.id))
+
+
+def _full_due(jobs: list[OpenEOJobRecord], recipe: Recipe, definition: _Definition, *, after_failure: bool) -> bool:
+    """Whether the next refresh must compute the whole history.
+
+    Reads the jobs since the newest full refresh of the current definition that did not fail.
+    One of another definition computed the stored periods differently; with ``after_failure``,
+    one that failed or was cancelled left its range unwritten.
     """
-    from open_geo_service.shared.persistence import index_lock
+    current = (recipe.digest, definition.digest)
+    since = jobs
+    for index in range(len(jobs) - 1, -1, -1):
+        source = _Source.of(jobs[index])
+        if (
+            source is not None
+            and source.span == _FULL
+            and (source.recipe_digest, source.workflow_digest) == current
+            and jobs[index].status not in _FAILED
+        ):
+            since = jobs[index + 1 :]
+            break
+    for job in since:
+        source = _Source.of(job)
+        if source is None or (source.recipe_digest, source.workflow_digest) != current:
+            return True
+        if after_failure and job.status in _FAILED:
+            return True
+    return False
 
-    with index_lock(api_config.get_data_root() / "derivations" / recipe.output):
-        return _refresh_locked(recipe)
 
-
-def _refresh_locked(recipe: Recipe) -> OpenEOJobRecord | None:
+def _create(
+    recipe: Recipe, definition: _Definition, source: _Source, interval: list[str], *, merge: bool
+) -> OpenEOJobRecord:
+    """Create the refresh job ``source`` names, over ``interval``, without starting it."""
     from open_geo_service.openeo import workflows as workflow_registry
-    from open_geo_service.openeo.jobs import get_openeo_job_service, store_list_jobs, triggered_job_id
-    from open_geo_service.pipelines import workflow as binding
+    from open_geo_service.openeo.jobs import get_openeo_job_service
 
-    if recipe.input is None or not _exists(recipe.output):
-        return None
-    updates = _latest_updates()
-    if recipe.input not in updates:
-        return None
-    position, update = updates[recipe.input]
-    coverage = [update.data.get("coverage_start"), update.data.get("coverage_end")]
-    if not all(isinstance(value, str) for value in coverage):
-        # An event recorded before CLIM-2029 renamed the coverage fields.
-        logger.warning(
-            "Not refreshing derived dataset %s: update %s does not name its coverage", recipe.output, update.event_id
-        )
-        return None
-    record = workflow_registry.get_workflow(recipe.workflow)
-    if record is None:
-        raise LookupError(f"workflow '{recipe.workflow}' is not registered")
-    # One snapshot of the definition, nested workflows inlined, for the identity, the interval
-    # and the submitted graph alike: the job runs what its id names, whatever is edited later,
-    # and a changed workflow is another refresh of the same update.
-    snapshot = binding.frozen(record)
-    workflow_digest = binding.definition_digest(snapshot)
-    source = f"{update.event_id}:{recipe.digest}:{workflow_digest}"
-    service = get_openeo_job_service()
-    job_id = triggered_job_id(source, trigger_id(recipe.output))
-    jobs = [job for job in store_list_jobs() if job.trigger_id == trigger_id(recipe.output)]
-    created = updates.get(recipe.output)
-    if not jobs and created is not None and created[0] > position:
-        return None  # the run that created it published after this update
-    if any(job.status in _ACTIVE for job in jobs):
-        return None  # its completion reconciles against the newest update
-    existing = next((job for job in jobs if job.id == job_id), None)
-    if existing is not None:
-        if existing.status == OpenEOJobStatus.CREATED:
-            service.start_triggered_job(existing.id)  # created by a process that stopped before starting it
-        return None  # done, or failed and left for an operator
-    open_intervals = [name for name in binding.interval_parameters(snapshot) if name not in recipe.arguments]
-    if len(open_intervals) != 1:
-        # Checked at startup, but a workflow can be edited while OGS runs.
-        raise ValueError(
-            f"workflow '{recipe.workflow}' must leave exactly one temporal-interval parameter open, "
-            f"not {open_intervals}"
-        )
-    [interval] = open_intervals
     # A feature collection bound by id is loaded at the version current now, as a pipeline run does.
     feature_nodes: dict[str, Any] = {}
     arguments: dict[str, Any] = {
         **resolve_feature_references(recipe.arguments, feature_nodes, feature_versions(recipe.arguments)),
         OUTPUT_PARAMETER: recipe.output,
-        interval: coverage,
+        definition.interval: interval,
     }
     call = {**feature_nodes, "derive": {"process_id": recipe.workflow, "arguments": arguments, "result": True}}
-    job, _ = service.create_triggered_job(
+    scope = f"{interval[0]} to {interval[1]}" if merge else "its whole history"
+    job, _ = get_openeo_job_service().create_triggered_job(
         OpenEOJobCreate(
-            title=f"Refresh {recipe.output}",
+            title=f"Refresh {recipe.output}: {scope}",
             description=(
-                f"Refreshes derived dataset '{recipe.output}' with workflow '{recipe.workflow}' after update "
-                f"{update.event_id} of '{recipe.input}' (recipe {recipe.digest[:12]}, "
-                f"workflow {workflow_digest[:12]})"
+                f"Refreshes derived dataset '{recipe.output}' ({scope}) with workflow '{recipe.workflow}' after "
+                f"update {source.event_id} of '{recipe.input}' (recipe {recipe.digest[:12]}, "
+                f"workflow {definition.digest[:12]})"
             ),
             process={
                 "process_graph": workflow_registry.freeze_process_graph(
-                    call, resolve=lambda name: snapshot if name == recipe.workflow else None
+                    call, resolve=lambda name: definition.snapshot if name == recipe.workflow else None
                 )
             },
         ),
-        source_event_id=source,
+        source_event_id=str(source),
         trigger_id=trigger_id(recipe.output),
         max_attempts=MAX_ATTEMPTS,
+        merge_publication=merge,
     )
-    service.start_triggered_job(job.id)
-    logger.info("Refreshing derived dataset %s as job %s after update %s", recipe.output, job.id, update.event_id)
     return job
 
 
-def _reconcile(only: set[str] | None = None) -> None:
-    if api_config.is_read_only():
-        return
-    found = [recipe for recipe in list_recipes() if recipe.input is not None]
-    if only is not None:
-        found = [recipe for recipe in found if recipe.input in only or recipe.output in only]
-    if not found:
-        return
-    for recipe in found:
-        try:
-            _refresh(recipe)
-        except Exception:
-            logger.exception("Derived dataset %s could not be refreshed", recipe.output)
+def _create_full(recipe: Recipe, definition: _Definition, update: JobEvent) -> list[OpenEOJobRecord]:
+    coverage = [update.data.get("coverage_start"), update.data.get("coverage_end")]
+    if not all(isinstance(value, str) for value in coverage):
+        # An event recorded before CLIM-2029 renamed the coverage fields.
+        logger.warning("Not refreshing %s: update %s does not name its coverage", recipe.output, update.event_id)
+        return []
+    source = _Source(update.event_id, _FULL, recipe.digest, definition.digest)
+    return [_create(recipe, definition, source, [str(value) for value in coverage], merge=False)]
+
+
+def _plan(
+    recipe: Recipe, definition: _Definition, update: JobEvent, jobs: list[OpenEOJobRecord]
+) -> list[OpenEOJobRecord]:
+    """Create the refresh jobs one update of the input calls for: none once a job names it."""
+    from open_geo_service.ingestions.processes import update_intervals
+
+    if any((source := _Source.of(job)) is not None and source.event_id == update.event_id for job in jobs):
+        return []
+    if _full_due(jobs, recipe, definition, after_failure=True):
+        return _create_full(recipe, definition, update)
+    ranges = update_intervals(update.data)
+    if not ranges:
+        logger.warning("Not refreshing %s: update %s lists no changed periods", recipe.output, update.event_id)
+    return [
+        _create(
+            recipe,
+            definition,
+            _Source(update.event_id, f"{start}/{end}", recipe.digest, definition.digest),
+            [start, end],
+            merge=True,
+        )
+        for start, end in ranges
+    ]
+
+
+def _start_next(jobs: list[OpenEOJobRecord]) -> None:
+    """Start the oldest waiting refresh, unless one is queued or running."""
+    from open_geo_service.openeo.jobs import get_openeo_job_service
+
+    if any(job.status in _ACTIVE for job in jobs):
+        return  # its completion starts the next
+    waiting = next((job for job in jobs if job.status == OpenEOJobStatus.CREATED), None)
+    if waiting is not None and get_openeo_job_service().start_triggered_job(waiting.id):
+        logger.info("Refreshing derived dataset as job %s (%s)", waiting.id, waiting.title)
+
+
+def _refresh(recipe: Recipe, updates: list[JobEvent], *, since: datetime | None = None) -> list[OpenEOJobRecord]:
+    """Create the refreshes these updates of the input call for, start the next one, and return those created.
+
+    ``since`` is for `reconcile`: updates before it count as handled, and a recipe or workflow
+    changed with no update to answer still gets its full refresh.
+
+    Reading the jobs, creating the next ones and starting one happen under one lock per derived
+    dataset, shared by every process on the data directory, so two callers handling the same
+    update create its jobs once and start one refresh between them.
+    """
+    from open_geo_service.shared.persistence import index_lock
+
+    with index_lock(api_config.get_data_root() / "derivations" / recipe.output):
+        if recipe.input is None or not _exists(recipe.output):
+            return []
+        definition = _definition(recipe)
+        jobs = _jobs(recipe.output)
+        created: list[OpenEOJobRecord] = []
+        for update in updates:
+            if since is not None and _utc(update.time) < since:
+                continue
+            new = _plan(recipe, definition, update, jobs)
+            jobs.extend(new)
+            created.extend(new)
+        if since is not None and not created and updates and _full_due(jobs, recipe, definition, after_failure=False):
+            # The recipe or the workflow changed while no update arrived.
+            new = _create_full(recipe, definition, updates[-1])
+            jobs.extend(new)
+            created.extend(new)
+        _start_next(jobs)
+        return created
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 def consume(events: list[JobEvent]) -> None:
     """Refresh the derived datasets whose driving dataset these events updated."""
-    updated = {
-        dataset_id
-        for event in events
-        if event.type == DATASET_UPDATED_EVENT_TYPE and isinstance(dataset_id := event.data.get("dataset_id"), str)
-    }
-    if updated:
-        _reconcile(updated)
+    updates = [event for event in events if _is_update(event)]
+    if not updates or api_config.is_read_only():
+        return
+    for recipe in list_recipes():
+        mine = [event for event in updates if event.data["dataset_id"] == recipe.input]
+        if not mine:
+            continue
+        try:
+            _refresh(recipe, mine)
+        except Exception:
+            logger.exception("Derived dataset %s could not be refreshed", recipe.output)
 
 
 def reconcile() -> None:
-    """Refresh every derived dataset whose driving dataset updated since it was last computed."""
-    _reconcile()
+    """At startup, refresh each derived dataset for the updates of its input a stopped process missed.
+
+    Reads the event log once. Updates before the newest refresh job were handled when they
+    arrived, and those before the dataset was created are covered by the run that created it.
+    An update stamped before the read but persisted after it can only come from a native job
+    still unfinished, so the bound moves back to the oldest of those.
+    """
+    from open_geo_service.jobs.events import read_event_log
+
+    if api_config.is_read_only():
+        return
+    found = [recipe for recipe in list_recipes() if recipe.input is not None]
+    if not found:
+        return
+    log = read_event_log()
+    for recipe in found:
+        updates = [event for event in log.events if _is_update(event) and event.data["dataset_id"] == recipe.input]
+        try:
+            jobs = _jobs(recipe.output)
+            created = [
+                _utc(event.time)
+                for event in log.events
+                if _is_update(event) and event.data["dataset_id"] == recipe.output
+            ]
+            since = jobs[-1].created if jobs else (created[0] if created else None)
+            if since is None:
+                continue  # never published, so nothing to keep current
+            since = _utc(since) if log.open_since is None else min(_utc(since), _utc(log.open_since))
+            _refresh(recipe, updates, since=since)
+        except Exception:
+            logger.exception("Derived dataset %s could not be reconciled", recipe.output)
+
+
+def start_waiting() -> None:
+    """Start the next waiting refresh of each derived dataset that has none running. Reads no event log."""
+    from open_geo_service.shared.persistence import index_lock
+
+    if api_config.is_read_only():
+        return
+    for recipe in list_recipes():
+        if recipe.input is None:
+            continue
+        try:
+            with index_lock(api_config.get_data_root() / "derivations" / recipe.output):
+                _start_next(_jobs(recipe.output))
+        except Exception:
+            logger.exception("Derived dataset %s could not start its next refresh", recipe.output)
 
 
 def on_job_finished(job: OpenEOJobRecord) -> None:
-    """Reconcile a derived dataset once its refresh ends, so an update that waited is taken up. Never raises."""
+    """Start the refresh waiting behind one that just finished. Never raises."""
+    from open_geo_service.shared.persistence import index_lock
+
     trigger = job.trigger_id
     if not isinstance(trigger, str) or not trigger.startswith(TRIGGER_PREFIX):
         return
+    output = trigger.removeprefix(TRIGGER_PREFIX)
     try:
-        _reconcile({trigger.removeprefix(TRIGGER_PREFIX)})
+        with index_lock(api_config.get_data_root() / "derivations" / output):
+            _start_next(_jobs(output))
     except Exception:
-        logger.exception("Derived dataset %s could not be reconciled", trigger.removeprefix(TRIGGER_PREFIX))
+        logger.exception("Derived dataset %s could not start its next refresh", output)
