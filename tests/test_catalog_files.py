@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -280,6 +281,43 @@ def test_a_failed_rewrite_is_retried_and_the_files_it_links_are_kept_until_then(
     assert not (collection.parent / linked).exists()
 
 
+def test_an_older_rewrite_finishing_last_does_not_clear_a_newer_failure(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    older_inside, older_may_finish = threading.Event(), threading.Event()
+    newer = threading.Thread(target=catalog_files.write_catalog_after_change)
+    real_lock, real_documents = catalog_files._writing, catalog_files.catalog_documents
+
+    class OlderFinishesLast:
+        """The lock, holding the older rewrite after it releases it until the newer one is done."""
+
+        def __enter__(self) -> None:
+            real_lock.acquire()
+
+        def __exit__(self, *_: object) -> None:
+            real_lock.release()
+            if threading.current_thread() is not newer:
+                newer.join(timeout=10)
+
+    def documents() -> dict[str, Any]:
+        if threading.current_thread() is newer:
+            raise OSError("the disk is full")
+        older_inside.set()
+        older_may_finish.wait(timeout=10)
+        return real_documents()
+
+    monkeypatch.setattr(catalog_files, "_writing", OlderFinishesLast())
+    monkeypatch.setattr(catalog_files, "catalog_documents", documents)
+    older = threading.Thread(target=catalog_files.write_catalog_after_change)
+    older.start()
+    assert older_inside.wait(timeout=10)
+    newer.start()  # waits for the lock the older rewrite holds
+    older_may_finish.set()
+    older.join(timeout=20)
+
+    assert catalog_files.catalog_behind(), "the newer rewrite failed, so the catalog is behind"
+
+
 def test_the_zarr_asset_and_the_style_follow_the_configured_address(
     data: Path, monkeypatch: pytest.MonkeyPatch, restart_writer: Callable[[], None]
 ) -> None:
@@ -380,10 +418,9 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
 
 
 def test_the_client_lists_every_kind_through_the_relative_links(data: Path) -> None:
-    from open_geo_service.client import GeoService
+    from .test_client import _service_on_app  # pyright: ignore[reportPrivateUsage]
 
-    service = GeoService("http://testserver")
-    service._http = TestClient(app)
+    service = _service_on_app(TestClient(app))
 
     assert [link["id"] for link in service.datasets()] == [
         "rasters/rain",
@@ -422,3 +459,42 @@ def test_a_collection_that_cannot_be_described_leaves_no_link_to_it(
         assert "vectors/districts/" not in path.read_text(), path
         assert "vectors/catalog.json" not in path.read_text(), path
     assert [finding for finding in _rashid(catalog) if finding["severity"] == "error"] == []
+
+
+def test_a_raster_without_a_step_lists_its_timestamps(data: Path) -> None:
+    """An openEO result saved without a period type, on uneven dates: xstac infers no step, so
+    the collection lists the dates, which a client needs to step through them or count them."""
+    days = pd.DatetimeIndex(["2026-01-01", "2026-01-03", "2026-02-11"])
+    cube = xr.Dataset(
+        {"precip": (("t", "y", "x"), np.ones((3, 2, 2), dtype="float32"))},
+        coords={"t": days, "y": [1.5, 0.5], "x": [10.5, 11.5]},
+    )
+    store = layout.raster_store("events")
+    downloader.write_to_icechunk_store(cube, store, commit_message="test")
+    ingestion_services.register_artifact_record(
+        ArtifactRecord(
+            artifact_id="e1",
+            dataset_id="events",
+            dataset_name="Events",
+            variable="precip",
+            format=ArtifactFormat.ICECHUNK,
+            path=str(store),
+            asset_paths=[str(store)],
+            variables=["precip"],
+            request_scope=ArtifactRequestScope(),
+            coverage=ArtifactCoverage(
+                temporal=CoverageTemporal(start="2026-01-01", end="2026-02-11"),
+                spatial=CoverageSpatial(xmin=10.0, ymin=0.0, xmax=12.0, ymax=2.0),
+            ),
+            created_at=datetime(2026, 2, 11, tzinfo=UTC),
+            publication=ArtifactPublication(status=PublicationStatus.PUBLISHED, collection_id="events"),
+        ),
+        publish=True,
+    )
+
+    time = json.loads((data / "catalog" / "rasters" / "events" / "collection.json").read_text())["cube:dimensions"]["t"]
+    assert not time.get("step")
+    assert [value[:10] for value in time["values"]] == ["2026-01-01", "2026-01-03", "2026-02-11"]
+    # A regular cadence is described by its step, without listing every date.
+    rain = json.loads((data / "catalog" / "rasters" / "rain" / "collection.json").read_text())["cube:dimensions"]
+    assert "values" not in next(dim for dim in rain.values() if dim.get("type") == "temporal")

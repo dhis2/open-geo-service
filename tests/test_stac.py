@@ -559,6 +559,7 @@ def test_an_ingested_collection_publishes_measured_band_statistics(
 
     bands = collection["assets"]["zarr"]["bands"]
     assert bands[0]["statistics"] == {"minimum": 0.0, "maximum": 6.0, "mean": pytest.approx(12.0 / 7)}
+    assert collection["assets"]["icechunk"]["bands"] == bands
     assert collection["renders"]["default"]["nodata"] == 0.0
 
 
@@ -750,6 +751,9 @@ def test_build_collection_with_xstac_normalizes_pystac_collection(
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
 
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
+
         def close(self) -> None:
             pass
 
@@ -784,6 +788,9 @@ def test_collection_reuses_cached_xstac_payload(
     class DummyDataset:
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
+
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
 
         def close(self) -> None:
             pass
@@ -833,6 +840,9 @@ def test_collection_preserves_template_links_when_xstac_mutates_template(
     class DummyDataset:
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
+
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
 
         def close(self) -> None:
             pass

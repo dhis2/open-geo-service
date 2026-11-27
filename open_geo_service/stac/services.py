@@ -22,7 +22,8 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
-from open_geo_service.auth.tokens import reads_gated
+from open_geo_service.auth.oidc import discovery_url
+from open_geo_service.auth.tokens import access_settings, auth_required_for_read
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -371,16 +372,34 @@ def _derived_from(artifact: ArtifactRecord, request: Request) -> list[dict[str, 
     return links
 
 
-# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
-# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
-_AUTH_SCHEMES: dict[str, dict[str, str]] = {
-    "basic": {
-        "type": "http",
-        "scheme": "basic",
-        "description": "An API token's id as the username and its secret as the password.",
-    },
-    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
-}
+def _auth_schemes() -> dict[str, dict[str, str]]:
+    """How a client signs in to this instance, as STAC Authentication scheme objects by name.
+
+    Basic carries a named token's id and secret, which STAC Browser, QGIS and GDAL can send.
+    Bearer carries a token's secret or a provider's access token, as API clients send it. Each
+    OIDC provider is a scheme of its own, discovered from its issuer (see docs/authentication.md).
+    """
+    settings = access_settings()
+    carried = [
+        *(["an API token's secret"] if settings.tokens else []),
+        *(["an access token from one of the OpenID Connect providers listed"] if settings.providers else []),
+    ]
+    bearer = ", or ".join(carried)
+    bearer = f"{bearer[0].upper()}{bearer[1:]}."
+    schemes: dict[str, dict[str, str]] = {"bearer": {"type": "http", "scheme": "bearer", "description": bearer}}
+    if settings.tokens:
+        schemes["basic"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "An API token's id as the username and its secret as the password.",
+        }
+    for provider in settings.providers:
+        schemes[f"oidc-{provider.id}"] = {
+            "type": "openIdConnect",
+            "openIdConnectUrl": discovery_url(provider),
+            "description": f"Sign in with {provider.title}.",
+        }
+    return dict(sorted(schemes.items()))
 
 
 def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -389,10 +408,11 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
     Only links and assets on this instance are marked; a source page or licence elsewhere is
     not. With reads public the document is returned unchanged.
     """
-    if not reads_gated():
+    if not auth_required_for_read():
         return document
     base = absolute_base(request)
-    refs = sorted(_AUTH_SCHEMES)
+    schemes = _auth_schemes()
+    refs = list(schemes)
 
     def mark(target: dict[str, Any]) -> dict[str, Any]:
         href = str(target.get("href", ""))
@@ -400,7 +420,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
         here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
         return {**target, "auth:refs": refs} if here else target
 
-    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared = {**document, "auth:schemes": schemes}
     declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
     declared["links"] = [mark(link) for link in document.get("links", [])]
     if "assets" in document:
@@ -537,6 +557,11 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     )
     _remove_helper_variables(collection_payload)
     _add_band_statistics(collection_payload, artifact)
+    # The Icechunk repository holds the same arrays, and Portolan reads `nodata` from each data
+    # asset's own bands (PORTO-ZARR-018).
+    bands = collection_payload["assets"]["zarr"].get("bands")
+    if "icechunk" in collection_payload["assets"] and bands is not None:
+        collection_payload["assets"]["icechunk"]["bands"] = deepcopy(bands)
     _round_spatial_steps(collection_payload)
     # Prefer an explicit extents.temporal.resolution; fall back to the dataset's
     # period_type so openEO save_result outputs (which omit the extents block) still
@@ -1249,6 +1274,8 @@ def _build_collection_with_xstac(
                 temporal_dimension=time_dimension,
                 x_dimension=x_dimension,
                 y_dimension=y_dimension,
+                x_step=_regular_step(ds[x_dimension].values),
+                y_step=_regular_step(ds[y_dimension].values),
                 # The store's own CRS, not a constant: these axes are in whatever the store
                 # uses, and seNorge's are UTM33 metres. See reference_system_for.
                 reference_system=reference_system_for(store_crs),
@@ -1282,7 +1309,7 @@ def _build_collection_with_xstac(
         extent_bbox = _wgs84_extent_from_store(ds, store_crs or "EPSG:4326", x_dimension, y_dimension)
         if extent_bbox is not None:
             payload.setdefault("extent", {}).setdefault("spatial", {})["bbox"] = [extent_bbox]
-        if time_dimension is not None and period_cadence(period_type) is Cadence.IRREGULAR:
+        if time_dimension is not None and _lists_temporal_values(payload, time_dimension, period_type):
             _add_temporal_values(payload, ds, time_dimension)
         payload.setdefault("assets", {}).setdefault("zarr", {})["bands"] = _store_bands(ds)
         _cache_xstac_collection_payload(cache_key, payload)
@@ -1427,6 +1454,19 @@ def _override_time_step(collection: dict[str, Any], step: str | None, *, cadence
             return
 
 
+def _lists_temporal_values(collection: dict[str, Any], time_dimension: str, period_type: Any) -> bool:
+    """Whether the temporal dimension will be written without a step, so it must list its values.
+
+    An irregular cadence never has one. An unknown one, such as an openEO result saved without a
+    period type, keeps the step xstac inferred, which it leaves out for unevenly spaced timestamps.
+    """
+    cadence = period_cadence(period_type)
+    dim = (collection.get("cube:dimensions") or {}).get(time_dimension)
+    return cadence is Cadence.IRREGULAR or (
+        cadence is Cadence.UNKNOWN and isinstance(dim, dict) and not dim.get("step")
+    )
+
+
 def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimension: str) -> None:
     """List the temporal dimension's actual timestamps as ``values``.
 
@@ -1436,7 +1476,7 @@ def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimens
     with a single position and no slider. This mirrors ``_build_ordinal_dimensions``,
     which lists values for the same reason on a day-of-year axis.
 
-    Only emitted for irregular cadences. A regular one is fully described by extent plus
+    Only emitted when there is no step (`_lists_temporal_values`). A regular one is fully described by extent plus
     duration, and listing every timestamp would add one ISO string per period to a cached
     response for no gain — thousands of entries for a multi-year daily store.
     """
@@ -1494,13 +1534,28 @@ def reference_system_for(store_crs: str | int | None) -> int | str:
     return parsed.to_wkt()
 
 
+def _regular_step(values: Any) -> float | None:
+    """The step between a grid axis's coordinates, or None when they are not evenly spaced.
+
+    Within a thousandth of a cell: float coordinates such as WorldPop's are not exactly even,
+    and xstac publishes a step only when they are, which leaves a client unable to place a cell.
+    """
+    coords = np.asarray(values, dtype="float64")
+    if coords.size < 2:
+        return None
+    step = float((coords[-1] - coords[0]) / (coords.size - 1))
+    if step == 0 or not np.allclose(np.diff(coords), step, rtol=0, atol=abs(step) / 1000):
+        return None
+    return step
+
+
 def _build_static_cube_dimensions(ds: xr.Dataset, x_dim: str, y_dim: str) -> dict[str, Any]:
     """Build minimal cube:dimensions for a dataset with no time axis."""
     crs = reference_system_for(ds.attrs.get("proj:code"))
     x_vals = ds[x_dim].values
     y_vals = ds[y_dim].values
-    x_step = float(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else None
-    y_step = float(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else None
+    x_step = _regular_step(x_vals)
+    y_step = _regular_step(y_vals)
     return {
         x_dim: {
             "type": "spatial",

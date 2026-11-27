@@ -50,12 +50,16 @@ def write_catalog() -> None:
     refresh is in the files before it returns. A collection that cannot be described is left out,
     with the links to it, and logged.
     """
-    writer_lease.ensure_held()
     # Built and written under one lock, so of two writes the later one reads the later records.
     with _writing:
-        sink = _CatalogSink(storage.objects())
-        operations = portolan.plan(catalog_documents(), portolan.managed_keys(sink.documents()))
-        portolan.apply(operations, sink)
+        _write()
+
+
+def _write() -> None:
+    writer_lease.ensure_held()
+    sink = _CatalogSink(storage.objects())
+    operations = portolan.plan(catalog_documents(), portolan.managed_keys(sink.documents()))
+    portolan.apply(operations, sink)
 
 
 class _CatalogSink:
@@ -107,13 +111,15 @@ def write_catalog_after_change() -> None:
     write, or the writer's retry (`retry_catalog_if_behind`). Until then no replaced version of a
     vector or table dataset is removed, as the catalog may still advertise it.
     """
-    try:
-        write_catalog()
-    except Exception:
-        _behind.set()
-        logger.exception("Could not rewrite the STAC catalog in the data folder; retrying")
-    else:
-        _behind.clear()
+    # The flag is set under the write's lock, so it follows the last write, not the last to finish.
+    with _writing:
+        try:
+            _write()
+        except Exception:
+            _behind.set()
+            logger.exception("Could not rewrite the STAC catalog in the data folder; retrying")
+        else:
+            _behind.clear()
 
 
 def catalog_behind() -> bool:

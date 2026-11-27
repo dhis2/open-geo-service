@@ -10,13 +10,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
+from starlette.routing import Route
 
 import open_geo_service.startup  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.auth import routes as auth_routes
 from open_geo_service.auth.middleware import AccessMiddleware
-from open_geo_service.auth.tokens import configured_tokens
+from open_geo_service.auth.tokens import access_settings
 from open_geo_service.automation import routes as automation_routes
 from open_geo_service.data_registry import routes as data_source_routes
 from open_geo_service.exports import routes as exports_routes
@@ -24,6 +25,7 @@ from open_geo_service.extents import routes as extent_routes
 from open_geo_service.features import routes as feature_routes
 from open_geo_service.ingestions import routes as ingestion_routes
 from open_geo_service.jobs.service import get_job_service
+from open_geo_service.mcp_server.endpoint import McpEndpoint
 from open_geo_service.openeo import routes as openeo_routes
 from open_geo_service.openeo.jobs import get_openeo_job_service
 from open_geo_service.pipelines import routes as pipeline_routes
@@ -197,9 +199,10 @@ async def _services() -> AsyncGenerator[None]:
     from open_geo_service.shared.compute import install_shared_dask_pool
 
     # Before anything starts, so a refused configuration leaves no pool or thread behind.
-    tokens = configured_tokens()
-    if tokens:
-        logger.info("Authentication is on with %d named token(s)", len(tokens))
+    access = access_settings()
+    if access.on:
+        tokens, providers = len(access.tokens), len(access.providers)
+        logger.info("Authentication is on with %d named token(s) and %d OIDC provider(s)", tokens, providers)
     log_plugin_loading()
     # Before any job is recovered, so no computation starts a dask pool of its own.
     install_shared_dask_pool()
@@ -469,6 +472,11 @@ def create_app() -> FastAPI:
     _app.include_router(exports_routes.router, prefix="/exports", tags=["Exports"])
     _app.include_router(pipeline_routes.router, prefix="/pipelines", tags=["Pipelines"])
     _app.include_router(automation_routes.router, prefix="/automation", tags=["Automation"])
+    # MCP streamable HTTP (CLIM-851): POST carries requests, GET and DELETE are part of the
+    # transport. Answers 404 unless `mcp: true` in the instance config.
+    _app.router.routes.append(
+        Route("/mcp", endpoint=McpEndpoint(), methods=["GET", "POST", "DELETE"], include_in_schema=False)
+    )
 
     return _app
 

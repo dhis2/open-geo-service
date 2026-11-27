@@ -99,7 +99,8 @@ server = [
     # Directly imported (shared/time.py, streaming, openeo). Capped to 2.x; pandas
     # 3.0 is a breaking major and not yet validated against this stack.
     "pandas>=2.3,<3",
-    "portalocker>=3.2.0",
+    # Exclusive locks only: on Windows a shared lock needs the `win32` extra (pywin32).
+    "portalocker>=4",
     "openeo-pg-parser-networkx>=2026.3.3",
     # We depend on the base package and hand-pick the implementation deps rather than
     # using the [implementations] extra. The extra pulls the `gdal` Python bindings,
@@ -155,10 +156,16 @@ server = [
     # Overture's own country column. The register, and nothing else, at about 40 KB — pycountry
     # answers the same question but carries ~21 MB of translations this has no use for.
     "iso3166>=2.1",
+    # The /mcp endpoint. Pinned to 2.x: 2.0 renamed FastMCP to MCPServer, and the endpoint
+    # builds on 2.x names.
+    "mcp>=2.3,<3",
     # Builds the PMTiles archive the map viewer draws a feature collection from,
     # straight from the stored GeoParquet. Pinned: it is pre-1.0 and its overview format is
     # expected to change, and the archive is derived output a refresh rebuilds anyway.
     "tylertoo==0.8.0",
+    # Checks OIDC providers' JWTs (auth/oidc.py): signatures against a provider's published keys,
+    # and the registered claims. By the Authlib author, and what Authlib itself uses for JOSE.
+    "joserfc>=1.4",
 ]
 
 [project.urls]
