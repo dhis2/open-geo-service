@@ -59,7 +59,9 @@ class _Crash(BaseException):
     """A process dying at this point: not handled, so the job stays RUNNING."""
 
 
-def _cube(value: float, *, start: str = "2026-01-01", periods: int = 3, temporal: bool = True) -> xr.Dataset:
+def _cube(
+    value: float, *, start: str = "2026-01-01", periods: int = 3, temporal: bool = True, freq: str = "D"
+) -> xr.Dataset:
     if not temporal:
         flat = xr.DataArray(
             np.full((2, 2), value, dtype="float32"),
@@ -69,7 +71,7 @@ def _cube(value: float, *, start: str = "2026-01-01", periods: int = 3, temporal
             attrs={"units": "mm/d"},
         )
         return flat.to_dataset(name="precip").rio.write_crs("EPSG:4326")
-    times = pd.date_range(start, periods=periods, freq="D")
+    times = pd.date_range(start, periods=periods, freq=freq)
     data = xr.DataArray(
         np.full((len(times), 2, 2), value, dtype="float32"),
         dims=("t", "y", "x"),
@@ -115,6 +117,7 @@ def _job(
     periods: int = 3,
     temporal: bool = True,
     merge: bool = False,
+    freq: str = "D",
 ) -> None:
     """A queued, user-submitted job whose graph publishes `value` as a managed dataset."""
 
@@ -122,7 +125,7 @@ def _job(
         if graph_runs is not None:
             graph_runs.append(job_id)
         envelope = SaveResultEnvelope(
-            _cube(value, start=start, periods=periods, temporal=temporal),
+            _cube(value, start=start, periods=periods, temporal=temporal, freq=freq),
             "ZARR",
             {"dataset_id": _DATASET, "variable": "precip", "publish": publish},
         )
@@ -273,25 +276,28 @@ def test_a_published_managed_dataset_emits_one_full_rewrite_update(
 def test_a_merge_writes_its_periods_into_the_dataset_and_its_update_lists_only_them(
     service: Any, received: list[JobEvent], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _job("job-1", 5.0, monkeypatch)
+    # Monthly, so the periods an update names differ from the dates of its time steps.
+    _job("job-1", 5.0, monkeypatch, freq="MS")
     service._execute("job-1")
-    _job("job-2", 7.0, monkeypatch, start="2026-01-03", periods=2, merge=True)
+    _job("job-2", 7.0, monkeypatch, start="2026-03-01", periods=2, merge=True, freq="MS")
     service._execute("job-2")
 
     [artifact] = _artifacts()
-    assert (artifact.coverage.temporal.start, artifact.coverage.temporal.end) == ("2026-01-01", "2026-01-04")
+    assert (artifact.coverage.temporal.start, artifact.coverage.temporal.end) == ("2026-01", "2026-04")
     with xr.open_zarr(_store_session(), zarr_format=3) as stored:
         assert stored["precip"].mean(dim=("x", "y")).values.tolist() == [5.0, 5.0, 7.0, 7.0]
+    [created] = _record("job-1").events
+    assert created.data["changes"] == [{"start": "2026-01", "end": "2026-03"}]
     [event] = _record("job-2").events
     assert event.data["action"] == "merge"
-    assert event.data["changes"] == [{"start": "2026-01-03", "end": "2026-01-04"}]
-    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-04")
+    assert event.data["changes"] == [{"start": "2026-03", "end": "2026-04"}]
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01", "2026-04")
 
     head = _head()
-    _job("job-3", 9.0, monkeypatch, start="2026-01-06", periods=1, merge=True)
+    _job("job-3", 9.0, monkeypatch, start="2026-06-01", periods=1, merge=True, freq="MS")
     service._execute("job-3")
     assert _record("job-3").status == OpenEOJobStatus.ERROR
-    assert "the store would have no 2026-01-05" in (_record("job-3").error_message or "")
+    assert "the store would have no 2026-05" in (_record("job-3").error_message or "")
     assert _head() == head and received == [_record("job-1").events[0], event]
 
 

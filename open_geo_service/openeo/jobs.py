@@ -1617,6 +1617,21 @@ def _coverage_point(label: str | None) -> Any:
         return None
 
 
+def _period_coverage(coverage: Any, ds: Any, t_dim: str | None, period_type: str | None) -> Any:
+    """*coverage* with its time bounds as *period_type* periods (``2026-07``), as ingestion records them.
+
+    Its update's ``changes`` and a later merge then name periods the same way as the
+    dataset's other records. Kept as dates when the result has no periods to name.
+    """
+    from open_geo_service.shared.time import numpy_datetime_to_period_string
+
+    if t_dim is None or t_dim not in ds.coords or ds.sizes.get(t_dim, 0) == 0 or period_type in (None, "climatology"):
+        return coverage
+    periods = numpy_datetime_to_period_string(ds[t_dim].values, period_type).tolist()
+    temporal = coverage.temporal.model_copy(update={"start": min(periods), "end": max(periods)})
+    return coverage.model_copy(update={"temporal": temporal})
+
+
 def _plan_merge(
     ds: Any, dataset_id: str, store_path: Path, t_dim: str | None, period_type: str | None, coverage: Any
 ) -> tuple[list[tuple[str, str]], Any]:
@@ -1817,16 +1832,16 @@ def _write_managed_zarr(
     _reject_incompatible_template_units(ds, variable, cf_attrs)
     apply_cf_metadata(ds, cf_attrs, variable=variable, overwrite=True)
 
-    coverage = _derive_coverage(ds, x_dim, y_dim, t_dim, crs)
     period_type: str | None = _derive_period_type(ds, options, source_template, t_dim)
+    # The dataset's own period type: a result of one period has no spacing to tell it from.
+    stored_type = template.get("period_type") or period_type
+    coverage = _period_coverage(_derive_coverage(ds, x_dim, y_dim, t_dim, crs), ds, t_dim, stored_type)
     store_path = layout.raster_store(dataset_id)
     store_path.parent.mkdir(parents=True, exist_ok=True)
     # The ranges a merge writes into the existing store; None replaces the store as a whole.
     changes: list[tuple[str, str]] | None = None
     merging = job_id is not None and (job := store_get_job(job_id)) is not None and job.merge_publication
     if merging and store_path.exists():
-        # The dataset's own period type: a result of one period has no spacing to tell it from.
-        stored_type = template.get("period_type") or period_type
         changes, coverage = _plan_merge(ds, dataset_id, store_path, t_dim, stored_type, coverage)
 
     # Validate the complete record before crossing the store commit's point of no return.
