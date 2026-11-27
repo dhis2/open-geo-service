@@ -54,21 +54,19 @@ The public surface is intentionally small:
 
 ## What Was Achieved
 
-### 1. Public ingestion contract now uses `extent_id`
+### 1. The public ingestion contract takes no spatial input
 
 `POST /ingestions` now takes:
 
 - `dataset_id`
 - `start`
 - `end`
-- `extent_id`
 - `overwrite`
-- `prefer_zarr`
 - `publish`
 
 Raw `bbox` and `country_code` are no longer part of the public ingestion payload.
 
-The route resolves `extent_id` inside Open Geo Service and then calls the downloader with concrete spatial inputs.
+Every ingestion covers the instance's one configured extent (`GET /extent`), which Open Geo Service passes to the downloader as concrete spatial inputs.
 
 ### 2. Public ingestion responses now return datasets, not artifacts
 
@@ -94,7 +92,6 @@ The branch exposes:
 
 Extents are configured in YAML and currently include:
 
-- `extent_id`
 - `name`
 - `description`
 - `bbox`
@@ -143,7 +140,7 @@ The branch exposes a dedicated STAC surface under:
 - `/stac/catalog.json`
 - `/stac/{kind}/{dataset_id}/collection.json`
 
-Published Zarr-backed managed datasets appear there as one STAC Collection per dataset. The `zarr` asset points to the canonical native `/zarr/{dataset_id}` route.
+Published raster datasets appear there as one STAC Collection per dataset. The `zarr` asset points to the canonical native `/zarr/{dataset_id}` route.
 
 `xstac` derives Datacube metadata from the opened Zarr-backed dataset, while the Open Geo Service service layer remains responsible for publication filtering, link construction, and Zarr asset metadata.
 
@@ -207,12 +204,12 @@ Implemented sync behavior:
 
 ### Ingestion
 
-1. client submits `dataset_id`, `start`, optional `end`, and optional `extent_id`
+1. client submits `dataset_id`, `start`, and optional `end`
 2. Open Geo Service resolves the data source from the registry
-3. Open Geo Service resolves `extent_id` to a concrete bbox or other configured spatial input
+3. Open Geo Service takes the bbox of the instance's configured extent
 4. Open Geo Service checks for an existing matching internal artifact
 5. if needed, Open Geo Service downloads the source data
-6. Open Geo Service prefers Zarr materialization and falls back to NetCDF when needed
+6. Open Geo Service writes the data to the dataset's Icechunk repository
 7. Open Geo Service computes realized coverage metadata
 8. Open Geo Service stores an internal artifact record
 9. if `publish=true`, Open Geo Service publishes the dataset as a STAC collection
@@ -228,7 +225,7 @@ Implemented sync behavior:
 
 1. `/datasets/{dataset_id}` exposes native metadata and version summary
 2. `/stac/{kind}/{dataset_id}/collection.json` exposes standards-friendly discovery metadata for direct Zarr-opening clients
-3. `/zarr/{dataset_id}` exposes the raw Zarr store layout when the latest version is Zarr-backed
+3. `/zarr/{dataset_id}` exposes the raw Zarr store layout of a raster dataset's Icechunk repository
 
 ### Sync
 
@@ -263,10 +260,9 @@ Implemented sync behavior:
 ## What Is Still Deferred
 
 1. a final decision on how much version history to expose publicly
-2. richer extent configuration shapes beyond `id + bbox + optional metadata`
+2. richer extent configuration shapes beyond `bbox + optional metadata`
 3. any runtime write API for extents
 4. multi-version publication resolution behind one dataset id
-5. true in-place Zarr append, if storage semantics require it later
 
 ## Short Summary
 
@@ -275,7 +271,7 @@ The branch now presents a much cleaner product story:
 1. run ingestions through `/ingestions` as an execution and admin surface
 2. return datasets, not artifacts
 3. discover managed data under `/datasets`
-4. discover published Zarr-backed datasets under `/stac/catalog.json`
+4. discover published datasets under `/stac/catalog.json`
 5. access raw Zarr under `/zarr/{dataset_id}`
 6. sync managed datasets through `/sync/{dataset_id}`
 
