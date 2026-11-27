@@ -282,12 +282,15 @@ _BROKEN_TABLE = """\
 
 
 def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Listed as not ingestable with the reason, refused before a job starts, and the page
-    says why instead of offering a form that fails."""
+    says why instead of offering a form that fails. Each plugin is checked, and logged, once."""
     from open_geo_service import config as api_config
     from open_geo_service.extents import services as extent_services
+    from open_geo_service.shared import plugin_loader
+
+    plugin_loader._plugin_error.cache_clear()  # pyright: ignore[reportPrivateUsage]
 
     (tmp_path / "rasters").mkdir()
     (tmp_path / "rasters" / "typo.yaml").write_text(_BROKEN_RASTER, encoding="utf-8")
@@ -322,3 +325,6 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
     assert "AttributeError" not in listed["typo_rainfall"]["ingestion_error"]
     assert listed["chirps3_precipitation_daily"]["ingestable"] is True
     assert "ingestion_error" not in listed["chirps3_precipitation_daily"]
+    logged = [r.getMessage() for r in caplog.records if "cannot be ingested" in r.getMessage()]
+    for plugin in ("CHIRPS3MonthlyPlugn", "copdem.CopDEMPlugin", "chirps3.CHIRPS3MonthlyPlugin"):
+        assert sum(f"{plugin}'" in message for message in logged) == 1, logged

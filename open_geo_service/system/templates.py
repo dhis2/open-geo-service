@@ -878,10 +878,7 @@ def _data_source_page_context(
         for provider in template.get("providers") or []
         if isinstance(provider, dict) and provider.get("name")
     )
-    ingestable = registry_datasets.is_ingestable(template)
-    from open_geo_service.shared.plugin_loader import plugin_load_error
-
-    plugin_error = plugin_load_error(template) if ingestable else None
+    ingestable, plugin_error = registry_datasets.ingestability(template)
     # A managed dataset records the template it came from in `source_dataset_id`; match on that
     # first and fall back to `dataset_id`, as the dataset page and the STAC path both do.
     #
@@ -967,7 +964,7 @@ def _data_source_page_context(
             else None
         ),
         "plugin_error": plugin_error,
-        "can_ingest": ingestable and plugin_error is None and not read_only and has_extent,
+        "can_ingest": ingestable and not read_only and has_extent,
         "read_only": read_only,
         "has_extent": has_extent,
         "defaults": _ingest_defaults(template, today),

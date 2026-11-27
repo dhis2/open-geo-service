@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import inspect
 import logging
@@ -40,24 +41,35 @@ def plugin_load_error(template: dict[str, Any]) -> str | None:
     and ``periods`` and ``fetch_period`` for one with. The reason names the kind of failure,
     not the exception, which can carry file paths; the exception is logged, so an operator finds
     a typo or a missing package from the listing rather than a failed ingest.
+
+    Each plugin path is checked once per process for each kind of template. A module is not
+    imported again after a failure, so a fixed plugin needs a restart, as a newly installed
+    package does; a template pointed at another plugin is checked afresh.
     """
     from open_geo_service.data_registry.services.datasets import is_timeless
-    from open_geo_service.tables.plugin import BaseTablePlugin
     from open_geo_service.tables.templates import is_table_template
 
     ingestion = template.get("ingestion")
     plugin_path = str(ingestion.get("plugin") or "").strip() if isinstance(ingestion, dict) else ""
     if not plugin_path:
         return None
+    kind = "table" if is_table_template(template) else "static" if is_timeless(template) else "periodic"
+    return _plugin_error(plugin_path, kind)
+
+
+@functools.cache
+def _plugin_error(plugin_path: str, kind: str) -> str | None:
+    from open_geo_service.tables.plugin import BaseTablePlugin
+
     try:
         plugin_class = _load_class(plugin_path)
-        if is_table_template(template):
+        if kind == "table":
             if not (isinstance(plugin_class, type) and issubclass(plugin_class, BaseTablePlugin)):
                 raise PluginLoadError(f"its plugin '{plugin_path}' is not a BaseTablePlugin")
         else:
-            _check_raster_class(plugin_class, plugin_path, static=is_timeless(template))
+            _check_raster_class(plugin_class, plugin_path, static=kind == "static")
     except PluginLoadError as exc:
-        logger.warning("Data source '%s' cannot be ingested: %s", template.get("id"), exc)
+        logger.warning("Data sources naming '%s' cannot be ingested: %s", plugin_path, exc)
         return str(exc)
     return None
 

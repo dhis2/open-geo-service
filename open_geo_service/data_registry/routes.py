@@ -25,10 +25,7 @@ def _with_ingestability(dataset: dict[str, Any]) -> dict[str, Any]:
 
 def _ingestability(template: dict[str, Any]) -> dict[str, Any]:
     """`ingestable`, and `ingestion_error` when the plugin a template declares cannot be loaded (CLIM-2043)."""
-    from open_geo_service.shared.plugin_loader import plugin_load_error
-
-    reason = plugin_load_error(template)
-    ingestable = datasets.is_ingestable(template) and reason is None
+    ingestable, reason = datasets.ingestability(template)
     return {"ingestable": ingestable, **({"ingestion_error": reason} if reason else {})}
 
 

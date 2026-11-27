@@ -215,8 +215,11 @@ the reason. Read the flag rather than inferring it from `sync.kind`: the two are
 question, e.g. `era5land_temperature_daily_normal_1991_2020` is `static` *and* ingestable.
 
 A raster or table template whose plugin cannot be loaded (a typo in the path, a package that is not installed,
-or a class that is not a plugin) is reported as not ingestable, with the reason in `ingestion_error`. The
-reason is also logged, shown on the data source page, and returned in the `400` when it is ingested anyway.
+or a class that is not a plugin) is reported as not ingestable, with the reason in `ingestion_error`. So is a
+raster plugin that lacks a method its template uses: `fetch()` for a template without a time axis, `periods()`
+and `fetch_period()` for one with. The reason is also logged, shown on the data source page, and returned in
+the `400` when it is ingested anyway. Each plugin is checked once per process, so restart Open Geo Service after
+fixing a plugin's code; a template pointed at another plugin is picked up without a restart.
 
 | Field                  | Required | Description                                                                                                                                     |
 | ---------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
