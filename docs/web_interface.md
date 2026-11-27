@@ -280,7 +280,8 @@ one over the dataset's whole coverage:
   [Preliminary periods](architecture.md#preliminary-periods)) lists them as a range of their own,
   so their final values reach the destination without rerunning the periods in between;
 - a *rewrite* (a new store or a rematerialisation) may have changed any period, and lists the
-  whole coverage after it.
+  whole coverage after it;
+- a derived dataset's refresh lists the periods it recomputed, the ranges its input changed.
 
 The runs of one update are recorded together, with the decision on it. Any other revision of
 past data at the source is followed only if the dataset is rematerialised; run that interval by

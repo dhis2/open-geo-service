@@ -38,13 +38,20 @@ fetching anything. If Open Geo Service stops after the data is committed but bef
 the recovered job finds the data current and still emits the event it owed, exactly once.
 
 The event says what changed: `dataset_id`, `artifact_id`, `action` (`ingest`, the sync
-planner's `append` or `rematerialize`, or `full_rewrite` for a dataset an openEO job
-published), `changes` (the ranges of periods the update wrote, each `{"start", "end"}` with
-both ends inclusive), and `coverage_start` and `coverage_end` (the coverage after it). An append
-lists the periods it added; a sync that also replaced preliminary periods with final values
-lists those as a range of their own, so the periods between are not included; a new or
-rewritten store lists its whole coverage. Ranges never overlap, and two that touch are not
-joined. A pipeline runs each range; a recipe always recomputes the whole coverage.
+planner's `append` or `rematerialize`, `full_rewrite` for a dataset an openEO job published, or
+`merge` for a derived dataset's refresh of some periods), `changes` (the ranges of periods the
+update wrote, each `{"start", "end"}` with both ends inclusive), and `coverage_start` and
+`coverage_end` (the coverage after it). An append lists the periods it added; a sync that also
+replaced preliminary periods with final values lists those as a range of their own, so the
+periods between are not included; a new or rewritten store lists its whole coverage. Ranges
+never overlap, and two that touch are not joined. A pipeline runs each range, and so does a
+recipe (see [Keep a derived dataset current with a recipe](adding_custom_datasets.md#keep-a-derived-dataset-current-with-a-recipe)).
+
+Each range is passed to the workflow on its own. That is right for a workflow whose output
+periods depend only on input inside them, such as an anomaly against a fixed normal or an
+aggregation over areas, which is every shipped pipeline and recipe. A workflow that aggregates
+over time, uses a window, or reads the whole history (SPI, normals) would compute wrong values
+from a range alone; CLIM-2052 is for those.
 
 ## Updates from derived datasets
 
@@ -57,12 +64,15 @@ derived dataset needs nothing special.
   landed, the artifact is registered and its publication is settled, and it follows the stored
   record: an artifact that was already published stays published, and is announced, even when
   the job did not ask to publish. An unpublished output is stored and registered without one.
-- **It describes a full rewrite.** The managed writer replaces the whole store, so the event's
-  `action` is `full_rewrite`, and its one change and `coverage_start`/`coverage_end` are the
-  committed dataset's coverage. It does not claim which periods changed, so a pipeline on the
-  dataset re-runs its whole coverage on every publication.
-- **A rewrite never shortens a published dataset.** One that would start later or end earlier
-  than the published coverage is refused before anything is committed. It may cover more.
+- **It describes what was written.** A job's result normally replaces the whole store, so the
+  event's `action` is `full_rewrite`, and its one change and `coverage_start`/`coverage_end` are
+  the committed dataset's coverage. A recipe's refresh of a changed range instead writes its
+  periods into the existing store, in place or after its end, and keeps the others; its event's
+  `action` is `merge` and its one change is the periods it wrote, so a pipeline on the dataset
+  reruns only those.
+- **A publication never shortens a published dataset.** A rewrite that would start later or end
+  earlier than the published coverage is refused before anything is committed; it may cover
+  more. A merge that would leave a gap after the store's last period is refused too.
 - **The producing job owns it, one event per commit.** The event carries `producer_type: openeo`,
   `producer_job_id` and `output_snapshot_id`, and its id is derived from the job, the artifact
   and the committed snapshot. Completing the same commit again, in a retry or at a restart, is
