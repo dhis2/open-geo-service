@@ -37,6 +37,13 @@ def _with_infinities() -> xr.Dataset:
     return ds
 
 
+def _day_counts() -> xr.Dataset:
+    """`_daily` in xclim's units for a count of days, which xarray decodes to a timedelta by default."""
+    ds = _daily().rename({"precip": "tx_days_above"})
+    ds["tx_days_above"].attrs["units"] = "days"
+    return ds
+
+
 def _pyramid() -> xr.Dataset:
     """Over the 1024-pixel threshold, so a pyramid; a one-pixel spike the averaged levels lose."""
     data = np.zeros((1100, 1100), dtype="float32")
@@ -54,6 +61,7 @@ def _pyramid() -> xr.Dataset:
         pytest.param(_with_infinities(), "precip", "t", (-4.0, 6.5, 15.0 / 9), id="infinite"),
         pytest.param(_daily().isel(t=0, drop=True), "precip", None, (1.0, 3.0, 2.0), id="static"),
         pytest.param(_pyramid(), "elevation", None, (0.0, 100.0, 100.0 / 1100**2), id="pyramid"),
+        pytest.param(_day_counts(), "tx_days_above", "t", (-4.0, 6.5, 15.0 / 9), id="day-counts"),
         pytest.param(_daily() * np.nan, "precip", "t", None, id="all-missing"),
         pytest.param(_daily(), "temperature", "t", None, id="absent-variable"),
     ],

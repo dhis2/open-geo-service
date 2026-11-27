@@ -16,7 +16,7 @@ from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.auth import routes as auth_routes
 from open_geo_service.auth.middleware import AccessMiddleware
-from open_geo_service.auth.tokens import configured_tokens
+from open_geo_service.auth.tokens import access_settings
 from open_geo_service.automation import routes as automation_routes
 from open_geo_service.data_registry import routes as data_source_routes
 from open_geo_service.exports import routes as exports_routes
@@ -197,9 +197,10 @@ async def _services() -> AsyncGenerator[None]:
     from open_geo_service.shared.compute import install_shared_dask_pool
 
     # Before anything starts, so a refused configuration leaves no pool or thread behind.
-    tokens = configured_tokens()
-    if tokens:
-        logger.info("Authentication is on with %d named token(s)", len(tokens))
+    access = access_settings()
+    if access.on:
+        tokens, providers = len(access.tokens), len(access.providers)
+        logger.info("Authentication is on with %d named token(s) and %d OIDC provider(s)", tokens, providers)
     log_plugin_loading()
     # Before any job is recovered, so no computation starts a dask pool of its own.
     install_shared_dask_pool()

@@ -17,7 +17,7 @@ from markupsafe import Markup, escape
 
 from open_geo_service import config as api_config
 from open_geo_service.auth.middleware import current_viewer
-from open_geo_service.auth.tokens import Principal, Tier, configured_tokens
+from open_geo_service.auth.tokens import Principal, Tier, access_settings, authentication_on
 from open_geo_service.data_registry.recipes import producing_workflow
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.extents.services import get_extent
@@ -162,28 +162,28 @@ def page_nav(mount: str, current: str) -> Markup:
 
 def account(mount: str) -> Markup:
     """The header's sign-in link, or who is signed in and a sign-out button; empty with authentication off."""
-    if not configured_tokens():
+    if not authentication_on():
         return Markup("")
     viewer = current_viewer()
-    if viewer.token is None:
+    if viewer.tier is Tier.PUBLIC:
         return Markup('<div class="account"><a href="{}/sign-in">Sign in</a></div>').format(mount)
     return Markup(
         '<form class="account" method="post" action="{}/sign-out">'
         '<span>{}</span><button type="submit">Sign out</button></form>'
-    ).format(mount, viewer.token.id)
+    ).format(mount, viewer.label)
 
 
 def sign_in_note(mount: str, action: str) -> Markup:
-    """Why a page's forms are hidden: a prompt to sign in, or that the signed-in token is not an operator's.
+    """Why a page's forms are hidden: a prompt to sign in, or that whoever signed in is not an operator.
 
     `action` completes "to ...", for example "ingest data here".
     """
     link = Markup('<a href="{}/sign-in">Sign in</a>').format(mount)
     viewer = current_viewer()
-    if viewer.token is None:
-        return Markup("{} with an operator token to {}.").format(link, action)
-    return Markup("You are signed in as {}, which is not an operator token. {} with one to {}.").format(
-        viewer.token.id, link, action
+    if viewer.tier is Tier.PUBLIC:
+        return Markup("{} as an operator to {}.").format(link, action)
+    return Markup("You are signed in as {}, who is not an operator. {} as one to {}.").format(
+        viewer.label, link, action
     )
 
 
@@ -200,7 +200,7 @@ def actions_closed() -> str | None:
     """
     if api_config.is_read_only():
         return "read-only"
-    if configured_tokens() and current_viewer().tier < Tier.OPERATOR:
+    if authentication_on() and current_viewer().tier < Tier.OPERATOR:
         return "sign-in"
     return None
 
@@ -219,8 +219,11 @@ SIGN_IN_NEEDS_HTTPS = "Sign-in needs HTTPS, so the token is not sent in clear. O
 
 
 def render_sign_in_page(mount: str, *, next_path: str, error: str | None = None, form: bool = True) -> str:
-    """Render the form that exchanges a token for a session; without *form*, only *error*."""
+    """Render the sign-in page: a button per OIDC provider and the token form; without *form*, only *error*."""
+    settings = access_settings()
     return get_template("sign_in_page.html").render(
+        providers=settings.providers,
+        tokens=bool(settings.tokens),
         mount=mount,
         name=api_config.get_name(),
         logo=LOGO,

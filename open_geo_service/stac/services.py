@@ -23,7 +23,8 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
-from open_geo_service.auth.tokens import reads_gated
+from open_geo_service.auth.oidc import discovery_url
+from open_geo_service.auth.tokens import access_settings, auth_required_for_read
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -372,16 +373,34 @@ def _derived_from(artifact: ArtifactRecord, request: Request) -> list[dict[str, 
     return links
 
 
-# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
-# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
-_AUTH_SCHEMES: dict[str, dict[str, str]] = {
-    "basic": {
-        "type": "http",
-        "scheme": "basic",
-        "description": "An API token's id as the username and its secret as the password.",
-    },
-    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
-}
+def _auth_schemes() -> dict[str, dict[str, str]]:
+    """How a client signs in to this instance, as STAC Authentication scheme objects by name.
+
+    Basic carries a named token's id and secret, which STAC Browser, QGIS and GDAL can send.
+    Bearer carries a token's secret or a provider's access token, as API clients send it. Each
+    OIDC provider is a scheme of its own, discovered from its issuer (see docs/authentication.md).
+    """
+    settings = access_settings()
+    carried = [
+        *(["an API token's secret"] if settings.tokens else []),
+        *(["an access token from one of the OpenID Connect providers listed"] if settings.providers else []),
+    ]
+    bearer = ", or ".join(carried)
+    bearer = f"{bearer[0].upper()}{bearer[1:]}."
+    schemes: dict[str, dict[str, str]] = {"bearer": {"type": "http", "scheme": "bearer", "description": bearer}}
+    if settings.tokens:
+        schemes["basic"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "An API token's id as the username and its secret as the password.",
+        }
+    for provider in settings.providers:
+        schemes[f"oidc-{provider.id}"] = {
+            "type": "openIdConnect",
+            "openIdConnectUrl": discovery_url(provider),
+            "description": f"Sign in with {provider.title}.",
+        }
+    return dict(sorted(schemes.items()))
 
 
 def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -390,10 +409,11 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
     Only links and assets on this instance are marked; a source page or licence elsewhere is
     not. With reads public the document is returned unchanged.
     """
-    if not reads_gated():
+    if not auth_required_for_read():
         return document
     base = absolute_base(request)
-    refs = sorted(_AUTH_SCHEMES)
+    schemes = _auth_schemes()
+    refs = list(schemes)
 
     def mark(target: dict[str, Any]) -> dict[str, Any]:
         href = str(target.get("href", ""))
@@ -401,7 +421,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
         here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
         return {**target, "auth:refs": refs} if here else target
 
-    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared = {**document, "auth:schemes": schemes}
     declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
     declared["links"] = [mark(link) for link in document.get("links", [])]
     if "assets" in document:
@@ -538,6 +558,11 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     )
     _remove_helper_variables(collection_payload)
     _add_band_statistics(collection_payload, artifact)
+    # The Icechunk repository holds the same arrays, and Portolan reads `nodata` from each data
+    # asset's own bands (PORTO-ZARR-018).
+    bands = collection_payload["assets"]["zarr"].get("bands")
+    if "icechunk" in collection_payload["assets"] and bands is not None:
+        collection_payload["assets"]["icechunk"]["bands"] = deepcopy(bands)
     _round_spatial_steps(collection_payload)
     # Prefer an explicit extents.temporal.resolution; fall back to the dataset's
     # period_type so openEO save_result outputs (which omit the extents block) still

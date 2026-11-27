@@ -99,7 +99,8 @@ server = [
     # Directly imported (shared/time.py, streaming, openeo). Capped to 2.x; pandas
     # 3.0 is a breaking major and not yet validated against this stack.
     "pandas>=2.3,<3",
-    "portalocker>=3.2.0",
+    # Exclusive locks only: on Windows a shared lock needs the `win32` extra (pywin32).
+    "portalocker>=4",
     "openeo-pg-parser-networkx>=2026.3.3",
     # We depend on the base package and hand-pick the implementation deps rather than
     # using the [implementations] extra. The extra pulls the `gdal` Python bindings,
@@ -159,6 +160,9 @@ server = [
     # straight from the stored GeoParquet. Pinned: it is pre-1.0 and its overview format is
     # expected to change, and the archive is derived output a refresh rebuilds anyway.
     "tylertoo==0.8.0",
+    # Checks OIDC providers' JWTs (auth/oidc.py): signatures against a provider's published keys,
+    # and the registered claims. By the Authlib author, and what Authlib itself uses for JOSE.
+    "joserfc>=1.4",
 ]
 
 [project.urls]
