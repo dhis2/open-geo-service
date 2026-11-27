@@ -22,6 +22,9 @@ FULL_REWRITE_EVENT_ACTION = "full_rewrite"
 """`action` of an update that replaced the whole stored dataset, such as an openEO publication.
 
 Its one change is the whole coverage: every period may have changed."""
+MERGE_EVENT_ACTION = "merge"
+"""`action` of an update that wrote some periods into the stored dataset and kept the others,
+such as a derived dataset's refresh of the ranges its input changed. Its changes are those periods."""
 
 _UPDATE_MARKER = "dataset_update_planned"
 """Cursor key recording that an attempt of this job planned a change to stored data.

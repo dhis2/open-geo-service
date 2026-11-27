@@ -114,6 +114,7 @@ def _job(
     start: str = "2026-01-01",
     periods: int = 3,
     temporal: bool = True,
+    merge: bool = False,
 ) -> None:
     """A queued, user-submitted job whose graph publishes `value` as a managed dataset."""
 
@@ -136,6 +137,7 @@ def _job(
             created=utc_now(),
             process={"process_graph": {}},
             max_attempts=max_attempts,
+            merge_publication=merge,
         )
     )
 
@@ -266,6 +268,38 @@ def test_a_published_managed_dataset_emits_one_full_rewrite_update(
     # The live consumer got exactly that event, and the shared log holds it.
     assert received == [event]
     assert persisted_events() == [event]
+
+
+def test_a_merge_writes_its_periods_into_the_dataset_and_its_update_lists_only_them(
+    service: Any, received: list[JobEvent], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _job("job-1", 5.0, monkeypatch)
+    service._execute("job-1")
+    _job("job-2", 7.0, monkeypatch, start="2026-01-03", periods=2, merge=True)
+    service._execute("job-2")
+
+    [artifact] = _artifacts()
+    assert (artifact.coverage.temporal.start, artifact.coverage.temporal.end) == ("2026-01-01", "2026-01-04")
+    with xr.open_zarr(_store_session(), zarr_format=3) as stored:
+        assert stored["precip"].mean(dim=("x", "y")).values.tolist() == [5.0, 5.0, 7.0, 7.0]
+    [event] = _record("job-2").events
+    assert event.data["action"] == "merge"
+    assert event.data["changes"] == [{"start": "2026-01-03", "end": "2026-01-04"}]
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-04")
+
+    head = _head()
+    _job("job-3", 9.0, monkeypatch, start="2026-01-06", periods=1, merge=True)
+    service._execute("job-3")
+    assert _record("job-3").status == OpenEOJobStatus.ERROR
+    assert "the store would have no 2026-01-05" in (_record("job-3").error_message or "")
+    assert _head() == head and received == [_record("job-1").events[0], event]
+
+
+def _store_session() -> Any:
+    import icechunk
+
+    repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
+    return repo.readonly_session("ingest").store
 
 
 def test_the_public_job_api_does_not_expose_publication_internals(
