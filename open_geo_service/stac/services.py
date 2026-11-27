@@ -457,6 +457,11 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     )
     _remove_helper_variables(collection_payload)
     _add_band_statistics(collection_payload, artifact)
+    # The Icechunk repository holds the same arrays, and Portolan reads `nodata` from each data
+    # asset's own bands (PORTO-ZARR-018).
+    bands = collection_payload["assets"]["zarr"].get("bands")
+    if "icechunk" in collection_payload["assets"] and bands is not None:
+        collection_payload["assets"]["icechunk"]["bands"] = deepcopy(bands)
     _round_spatial_steps(collection_payload)
     # Prefer an explicit extents.temporal.resolution; fall back to the dataset's
     # period_type so openEO save_result outputs (which omit the extents block) still
