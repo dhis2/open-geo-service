@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 
 from open_geo_service.process import _GEOSERVICE_PROCESS_ATTR
@@ -212,8 +214,27 @@ def _make_callable(indicator: Any, meta: dict[str, Any], accepted: set[str] | No
 
         # xclim 1.0 indicators return a Dataset by default; a process returns the cube itself.
         # The option is per thread since xclim 1.0.1, so concurrent jobs do not see it (CLIM-1767).
-        with set_options(as_dataset=False):
+        with _xclim_defaults(), set_options(as_dataset=False):
             return call_with_ogs_time_dim(indicator, **kwargs)
 
     setattr(_call, _GEOSERVICE_PROCESS_ATTR, meta)
     return _call
+
+
+@contextmanager
+def _xclim_defaults() -> Generator[None]:
+    """Give xclim's mutable options their defaults where the calling thread has none.
+
+    xclim 1.0.1 sets them only in the context that imports it, so a job or request thread
+    sees None and every indicator fails (CLIM-2042). Remove once the minimum xclim includes
+    the fix for https://github.com/Ouranosinc/xclim/issues/2484 (PR #2485).
+    """
+    from xclim.core.options import DEFAULT_MISSING_OPTIONS, METADATA_LOCALES, MISSING_OPTIONS, OPTIONS
+
+    defaults: dict[str, Any] = {METADATA_LOCALES: [], MISSING_OPTIONS: DEFAULT_MISSING_OPTIONS}
+    tokens = [(OPTIONS[k], OPTIONS[k].set(v)) for k, v in defaults.items() if OPTIONS[k].get() is None]
+    try:
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
