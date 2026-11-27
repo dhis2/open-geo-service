@@ -1814,11 +1814,11 @@ class _FakeOpenEO:
         self._record, self._status = OpenEOJobRecord, OpenEOJobStatus
 
     def create_triggered_job(
-        self, body: Any, *, source_event_id: str, trigger_id: str, max_attempts: int = 1
+        self, body: Any, *, source_event_id: str, trigger_id: str, max_attempts: int = 1, job_id: str | None = None
     ) -> tuple[Any, bool]:
         from open_geo_service.openeo.jobs import triggered_job_id
 
-        job_id = triggered_job_id(source_event_id, trigger_id)
+        job_id = job_id or triggered_job_id(source_event_id, trigger_id)
         pipeline_id = trigger_id.removeprefix(runner.TRIGGER_PREFIX)
         # The run must already be stored, pending, under this very job id.
         self.intents.append(next(r for r in store.get_record(pipeline_id).runs if r.job_id == job_id))  # type: ignore[union-attr]
@@ -2716,6 +2716,8 @@ def test_reconcile_finishes_what_a_restart_interrupted(
     openeo.fail_create = OSError("killed")
     pending = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     openeo.fail_create = None
+    # Its job id was derived before an upgrade changed how: the job is created under the stored one.
+    store.update_record("rain-to-dhis2", lambda current: setattr(current.runs[0], "job_id", "derived-before-upgrade"))
     # A finished job whose hand-off never happened, and an update nobody dispatched.
     done = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     openeo.finish(done.job_id)
@@ -2726,7 +2728,7 @@ def test_reconcile_finishes_what_a_restart_interrupted(
     record = store.get_record("rain-to-dhis2")
     assert record is not None
     by_id = {run.run_id: run for run in record.runs}
-    assert by_id[pending.run_id].submission == "submitted" and pending.job_id in openeo.started
+    assert by_id[pending.run_id].submission == "submitted" and "derived-before-upgrade" in openeo.started
     assert by_id[done.run_id].delivery == "submitted" and [call[1] for call in deliveries] == [done.job_id]
     assert [run.event_id for run in record.runs if run.trigger == "dataset_update"] == ["evt-9"]
 

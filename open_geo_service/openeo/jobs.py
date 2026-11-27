@@ -616,12 +616,17 @@ class OpenEOJobService:
         source_event_id: str,
         trigger_id: str,
         max_attempts: int = 1,
+        job_id: str | None = None,
     ) -> tuple[OpenEOJobRecord, bool]:
         """Create at most one job for a durable event and automation trigger.
 
         ``max_attempts`` bounds how often the job runs under its one deterministic ID: a
         transient failure or an interrupting restart is retried, a permanent error is not.
         It must lie within the same bounds as a trigger's configuration.
+
+        ``job_id`` is that ID when the caller already decided and stored it, so the job is
+        created under the stored ID even if how the ID is derived has changed since;
+        otherwise it is derived from the event and the trigger.
         """
         # `type(...) is int`, not isinstance: a bool is an int, and a caller outside the
         # configuration path is not held to the annotation at runtime.
@@ -631,7 +636,8 @@ class OpenEOJobService:
             )
         if not isinstance(body.process.get("process_graph"), dict):
             raise ValueError("process.process_graph must be an object")
-        job_id = triggered_job_id(source_event_id, trigger_id)
+        if job_id is None:
+            job_id = triggered_job_id(source_event_id, trigger_id)
         now = utc_now()
         candidate = OpenEOJobRecord(
             id=job_id,

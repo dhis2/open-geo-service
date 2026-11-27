@@ -395,6 +395,7 @@ def _submit(pipeline_id: str, run_id: str) -> PipelineRun:
             source_event_id=_source_event(run),
             trigger_id=trigger_id(pipeline_id),
             max_attempts=MAX_ATTEMPTS,
+            job_id=run.job_id,
         )
         job_service.start_triggered_job(job.id)
     except Exception as exc:
