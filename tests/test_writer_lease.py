@@ -47,14 +47,15 @@ _FORK_AFTER_TAKING_THE_LEASE = """
 import os, sys
 from open_geo_service import writer_lease
 writer_lease.ensure_held()
+writer_lease.dataset_lock("districts").acquire()
 child = os.fork()
-if child == 0:  # inherits the locked file, but is not the writer
+if child == 0:  # inherits the locked file and the held dataset lock, but is not the writer
     try:
         writer_lease.ensure_held()
     except writer_lease.WriterLeaseHeld:
-        os._exit(0)
+        os._exit(0 if not writer_lease._dataset_locks else 2)
     os._exit(1)
-sys.exit(0 if os.waitpid(child, 0)[1] == 0 else 1)
+sys.exit(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]))
 """
 
 
@@ -87,7 +88,8 @@ def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subproce
         # In a fresh process that forks before starting any thread: forking this one, which runs
         # Icechunk's and obstore's threads, can crash the child before it checks anything.
         forked = subprocess.run([sys.executable, "-c", _FORK_AFTER_TAKING_THE_LEASE], capture_output=True, text=True)
-        assert forked.returncode == 0, f"a forked child was let write beside its parent: {forked.stderr}"
+        # 1: the child was let write beside its parent; 2: it kept the parent's dataset locks.
+        assert forked.returncode == 0, f"exit {forked.returncode}: {forked.stderr}"
     with TestClient(app) as client:
         assert client.get("/info").status_code == 200
 
