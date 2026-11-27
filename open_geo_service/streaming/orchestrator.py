@@ -30,7 +30,7 @@ import xarray as xr
 import zarr
 
 from open_geo_service.shared.branches import WRITE_BRANCH
-from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
+from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template, drop_unserializable_attrs
 from open_geo_service.shared.provisional import FETCHED_AT, FETCHED_AT_ENCODING
 from open_geo_service.shared.raster_contract import (
     TIME_ALIASES,
@@ -375,6 +375,9 @@ async def run_streaming_ingest(
 
                 _strip_cf_encoding(ds, period_type, time_dim=spec.time_dim)
                 apply_cf_metadata(ds, cf_attrs, variable=template_variable, overwrite=True)
+                # Every plugin, not just the ones that noticed: a source's own attributes may be
+                # shapes Zarr accepts and NetCDF cannot, and the store is what later exports read.
+                drop_unserializable_attrs(ds, context=f"{(dataset or {}).get('id', '<unknown>')} {period_id}")
                 try:
                     spatial_shape = (int(ds.sizes[spec.y_dim]), int(ds.sizes[spec.x_dim]))
                 except KeyError as exc:

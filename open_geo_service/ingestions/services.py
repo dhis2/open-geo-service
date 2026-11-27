@@ -1524,18 +1524,29 @@ def _create_streaming_artifact(
         # update was already planned from the source's exact available period sequence.
         # A run that held back empty periods at its end (see "Empty periods at the end of a run are
         # not stored" in docs/architecture.md) ends before the plan, like a first ingest may.
-        if coverage.temporal.start is not None:
+        # A non-temporal (ordinal) dataset, a day-of-year climatology say, has no temporal
+        # coverage to match.
+        #
+        # A forecast is checked on its issue times, not its coverage. The request selects runs;
+        # coverage describes the dates those runs speak to, which reach past the requested
+        # window by design: a run issued today covering ten days is not an overshoot.
+        scope_temporal = coverage.temporal
+        forecast_reference = coverage_data.get("forecast_reference")
+        if forecast_reference:
+            scope_temporal = CoverageTemporal(**forecast_reference)
+        if scope_temporal.start is not None:
             coverage_matches_plan = (
-                _temporal_coverage_matches_request_scope(coverage.temporal, materialization_scope)
+                _temporal_coverage_matches_request_scope(scope_temporal, materialization_scope)
                 if plan.has_committed_periods and not held_back
-                else _temporal_coverage_matches_streaming_request_scope(coverage.temporal, materialization_scope)
+                else _temporal_coverage_matches_streaming_request_scope(scope_temporal, materialization_scope)
             )
             if not coverage_matches_plan:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         "Materialized artifact coverage does not match the planned contiguous scope: "
-                        f"coverage={coverage.temporal.start}..{coverage.temporal.end}, "
+                        f"{'issue times' if forecast_reference else 'coverage'}="
+                        f"{scope_temporal.start}..{scope_temporal.end}, "
                         f"plan={materialization_scope.start}..{materialization_scope.end}"
                     ),
                 )
