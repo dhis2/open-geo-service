@@ -66,7 +66,7 @@ The public surface is intentionally small:
 
 Raw `bbox` and `country_code` are no longer part of the public ingestion payload.
 
-Every ingestion covers the instance's one configured extent (`GET /extent`), which Open Geo Service passes to the downloader as concrete spatial inputs.
+A raster ingestion covers the instance's one configured extent (`GET /extent`), which Open Geo Service passes to the downloader as concrete spatial inputs. A table ingestion fetches each period's rows as its plugin returns them, without clipping.
 
 ### 2. Public ingestion responses now return datasets, not artifacts
 
@@ -225,7 +225,7 @@ Implemented sync behavior:
 
 1. `/datasets/{dataset_id}` exposes native metadata and version summary
 2. `/stac/{kind}/{dataset_id}/collection.json` exposes standards-friendly discovery metadata for direct Zarr-opening clients
-3. `/zarr/{dataset_id}` exposes the raw Zarr store layout of a raster dataset's Icechunk repository
+3. `/zarr/{dataset_id}` exposes the raw Zarr store layout of a published raster dataset's Icechunk repository
 
 ### Sync
 
