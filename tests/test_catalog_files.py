@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -278,6 +279,43 @@ def test_a_failed_rewrite_is_retried_and_the_files_it_links_are_kept_until_then(
     assert linked_file() != linked
     write(4.0)  # removes the files replaced while the catalog lagged
     assert not (collection.parent / linked).exists()
+
+
+def test_an_older_rewrite_finishing_last_does_not_clear_a_newer_failure(
+    data: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    older_inside, older_may_finish = threading.Event(), threading.Event()
+    newer = threading.Thread(target=catalog_files.write_catalog_after_change)
+    real_lock, real_documents = catalog_files._writing, catalog_files.catalog_documents
+
+    class OlderFinishesLast:
+        """The lock, holding the older rewrite after it releases it until the newer one is done."""
+
+        def __enter__(self) -> None:
+            real_lock.acquire()
+
+        def __exit__(self, *_: object) -> None:
+            real_lock.release()
+            if threading.current_thread() is not newer:
+                newer.join(timeout=10)
+
+    def documents() -> dict[str, Any]:
+        if threading.current_thread() is newer:
+            raise OSError("the disk is full")
+        older_inside.set()
+        older_may_finish.wait(timeout=10)
+        return real_documents()
+
+    monkeypatch.setattr(catalog_files, "_writing", OlderFinishesLast())
+    monkeypatch.setattr(catalog_files, "catalog_documents", documents)
+    older = threading.Thread(target=catalog_files.write_catalog_after_change)
+    older.start()
+    assert older_inside.wait(timeout=10)
+    newer.start()  # waits for the lock the older rewrite holds
+    older_may_finish.set()
+    older.join(timeout=20)
+
+    assert catalog_files.catalog_behind(), "the newer rewrite failed, so the catalog is behind"
 
 
 def test_the_zarr_asset_and_the_style_follow_the_configured_address(
