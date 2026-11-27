@@ -43,20 +43,17 @@ def daily_tasmax() -> xr.DataArray:
 # ---------------------------------------------------------------------------
 
 
-def test_spi_is_xclims_indicator(client: TestClient) -> None:
-    procs = {p["id"]: p for p in client.get("/processes").json()["processes"]}
-    assert "SPI" in procs["spi"]["summary"]
-    params = {p["name"]: p for p in procs["spi"]["parameters"]}
-    # The fit is the caller's choice, as xclim offers it.
-    assert {"pr", "window", "freq", "cal_start", "cal_end", "dist", "method", "fitkwargs"} <= set(params)
-    assert params["window"]["default"] == 1
-
-
 def test_spi_appears_in_get_processes_endpoint(client: TestClient) -> None:
     response = client.get("/processes")
     assert response.status_code == 200
-    ids = {p["id"] for p in response.json()["processes"]}
+    procs = {p["id"]: p for p in response.json()["processes"]}
+    ids = set(procs)
     assert {"spi", "amount2rate", "rate2amount"} <= ids
+    assert "SPI" in procs["spi"]["summary"]
+    spi_params = {p["name"]: p for p in procs["spi"]["parameters"]}
+    # The fit is the caller's choice, as xclim offers it.
+    assert {"pr", "window", "freq", "cal_start", "cal_end", "dist", "method", "fitkwargs"} <= set(spi_params)
+    assert spi_params["window"]["default"] == 1
     # Of xclim's `convert` realm, only the water-budget chain SPEI needs; its humidity converters
     # would repeat the earthkit-meteo processes under other names.
     assert {"potential_evapotranspiration", "water_budget", "water_budget_from_tas"} <= ids

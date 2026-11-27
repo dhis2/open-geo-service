@@ -116,6 +116,8 @@ spi3 = rate.process(
         "freq": "MS",
         "cal_start": "2000-01-01",
         "cal_end": "2020-12-31",
+        "dist": "gamma",
+        "fitkwargs": {"floc": 0},
     },
 )
 
@@ -146,7 +148,9 @@ job.start_and_wait()
         "window": 3,
         "freq": "MS",
         "cal_start": "2000-01-01",
-        "cal_end": "2020-12-31"
+        "cal_end": "2020-12-31",
+        "dist": "gamma",
+        "fitkwargs": { "floc": 0 }
       },
       "result": true
     }
@@ -167,7 +171,7 @@ job.start_and_wait()
 
 SPI values are standardised: `0` = climatological median, `±1` = moderate anomaly, `±2` = extreme anomaly.
 
-By default xclim fits a two-parameter gamma distribution (`loc` fixed at 0) by maximum likelihood, and gives windows without rain their own probability rather than fitting them. Pass `dist`, `method` and `fitkwargs` to fit otherwise, for example `method: "APP"` with `fitkwargs: {"floc": 0}` for L-moments; `GET /processes` lists the options. When both `dist` and `fitkwargs` are left out, xclim logs a warning that this default changed in xclim 1.0.1; `dist: "gamma"` with `fitkwargs: {"floc": 0}` gives the same fit without it.
+By default xclim fits a two-parameter gamma distribution (`loc` fixed at 0) by maximum likelihood, and gives windows without rain their own probability rather than fitting them. Pass `dist`, `method` and `fitkwargs` to fit otherwise, for example `method: "APP"` with `fitkwargs: {"floc": 0}` for L-moments; `GET /processes` lists the options. The examples above pass that default explicitly, `dist: "gamma"` with `fitkwargs: {"floc": 0}`: left out, the fit is the same, but xclim logs a warning that its default changed in xclim 1.0.1.
 
 The result carries the fit's counts of dry and valid values per month, `number_of_zeros` and `number_of_notnull`, as extra coordinates. They are stored with a published result, which makes its store larger, and stop a result too large for a flat store (over 1024×1024 cells) from being published ([CLIM-2041](https://dhis2.atlassian.net/browse/CLIM-2041)).
 
