@@ -210,7 +210,7 @@ def _write_icechunk(tmp_path: Path, ds: Any, name: str, crs: str) -> Any:
     path = tmp_path / f"{name}.icechunk"
     write_to_icechunk_store(ds, path, t_dim="t", crs=crs)
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(path)))
-    return zarr.open_group(repo.readonly_session("main").store, mode="r")
+    return zarr.open_group(repo.readonly_session("ingest").store, mode="r")
 
 
 def test_downloader_flat_store_grid_metadata(tmp_path: Path) -> None:

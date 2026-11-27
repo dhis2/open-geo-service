@@ -46,6 +46,7 @@ from open_geo_service.main import app  # noqa: E402
 from open_geo_service.openeo.jobs import _result_assets  # noqa: E402
 from open_geo_service.openeo.schemas import OpenEOJobRecord, OpenEOJobStatus  # noqa: E402
 from open_geo_service.shared.time import utc_now  # noqa: E402
+from open_geo_service.stac import catalog_files  # noqa: E402
 from open_geo_service.stac import services as stac_services  # noqa: E402
 
 DATASET_ID = "chirps3_precipitation_daily"
@@ -149,14 +150,19 @@ def test_a_coarser_level_lists_only_its_own_arrays(live_server: str) -> None:
 
 
 @pytest.mark.usefixtures("published")
-def test_the_stac_asset_opens_at_the_data(live_server: str) -> None:
+def test_the_stac_asset_opens_at_the_data(live_server: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """A client following the catalogue — href plus `xarray:open_kwargs` — gets the variable."""
-    collection = httpx.get(f"{live_server}/stac/{DATASET_ID}/collection.json", timeout=60).json()
+    # The written catalog names the Zarr URL of an instance that knows its public address.
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", live_server)
+    catalog_files.write_catalog()
+    collection = httpx.get(f"{live_server}/stac/rasters/{DATASET_ID}/collection.json", timeout=60).json()
     asset = collection["assets"]["zarr"]
 
     assert asset["type"] == "application/vnd.zarr; version=3; profile=multiscales"
     assert asset["xarray:open_kwargs"]["group"] == "0"
-    assert collection["assets"]["icechunk"]["xarray:open_kwargs"]["group"] == "0"
+    # This store is outside the data folder, so only openEO's collection, built on request, names it.
+    openeo = httpx.get(f"{live_server}/collections/{DATASET_ID}", timeout=60).json()
+    assert openeo["assets"]["icechunk"]["xarray:open_kwargs"]["group"] == "0"
     with xr.open_zarr(asset["href"], **asset["xarray:open_kwargs"]) as ds:
         _assert_full_resolution(ds)
 

@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from open_geo_service import storage
+
 logger = logging.getLogger(__name__)
 
 # --- Media type: telling a STAC client whether the store is pyramided ---------------------#
@@ -107,10 +109,10 @@ def _read_icechunk_root_attributes(store_path: str) -> Mapping[str, Any]:
 
     if not Path(store_path).exists():
         return {}
-    storage = icechunk.local_filesystem_storage(store_path)
+    repo_storage = storage.icechunk_storage(store_path)
     from open_geo_service.streaming.store import read_snapshot
 
-    repo = icechunk.Repository.open(storage)
+    repo = icechunk.Repository.open(repo_storage)
     session = repo.readonly_session(snapshot_id=read_snapshot(repo))
     group = zarr.open_group(session.store, mode="r")
     return dict(group.attrs)

@@ -164,7 +164,7 @@ SEGMENT_SAFE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 It also names the dataset's folder and files in the data folder, and is the form Portolan asks
 of a collection id (PORTO-CORE-016): lowercase, starting with a letter, no dots.
 
-Every catalogued dataset id becomes a path segment — `/stac/{id}/collection.json`, `/zarr/{id}`,
+Every catalogued dataset id becomes a path segment — `/stac/{kind}/{id}/collection.json`, `/zarr/{id}`,
 `/features/{id}` — and an id outside this shape produces a link that does not work, or worse,
 one that silently means something else: `districts?west` makes the rest of the path a query
 string, so the URL resolves elsewhere and nothing reports an error.

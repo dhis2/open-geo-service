@@ -44,7 +44,7 @@
               >
                 {% if dataset.has_thumbnail %}
                 <img
-                  src="{{ mount }}/datasets/{{ dataset.id }}/thumbnail.png"
+                  src="{{ mount }}{{ dataset.thumbnail }}"
                   alt="Preview of {{ dataset.name }}"
                 />
                 {% else %}

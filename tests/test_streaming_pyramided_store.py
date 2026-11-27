@@ -49,10 +49,11 @@ def _pyramided_store(tmp_path: Path) -> tuple[Path, Any]:
     """A store with two committed periods, promoted to a pyramid as a sync would leave it."""
     store_path = tmp_path / "gpp.icechunk"
     repo = icechunk.Repository.open_or_create(icechunk.local_filesystem_storage(str(store_path)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     _period(1).to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("p1")
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(2).to_zarr(session.store, append_dim="t", zarr_format=3)
     session.commit("p2")
     downloader.write_to_icechunk_store(
@@ -64,7 +65,8 @@ def _pyramided_store(tmp_path: Path) -> tuple[Path, Any]:
 def test_committed_data_group_distinguishes_flat_from_pyramided(tmp_path: Path) -> None:
     flat = tmp_path / "flat.icechunk"
     repo = icechunk.Repository.open_or_create(icechunk.local_filesystem_storage(str(flat)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     _period(1, ny=64, nx=64).to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("p1")
     assert committed_data_group(flat) is None
@@ -77,7 +79,7 @@ def test_appending_into_the_committed_group_keeps_the_store_readable(tmp_path: P
     """The regression: appending at the root instead left the store unopenable."""
     store_path, repo = _pyramided_store(tmp_path)
 
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(3).to_zarr(session.store, group=committed_data_group(store_path), append_dim="t", zarr_format=3)
     session.commit("p3")
 
@@ -93,7 +95,7 @@ def test_appending_at_the_root_of_a_pyramided_store_would_break_it(tmp_path: Pat
     """Pins why `committed_data_group` exists, so the guard is not removed as redundant."""
     store_path, repo = _pyramided_store(tmp_path)
 
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(3).to_zarr(session.store, append_dim="t", zarr_format=3)  # no group= -> the root
     session.commit("bad append")
 
@@ -107,11 +109,11 @@ def test_committed_periods_come_from_level_zero(tmp_path: Path) -> None:
     Reading it would make resume re-append periods that are already committed.
     """
     store_path, repo = _pyramided_store(tmp_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(3).to_zarr(session.store, group=committed_data_group(store_path), append_dim="t", zarr_format=3)
     session.commit("p3")
 
-    root_t = zarr.open_group(repo.readonly_session("main").store, mode="r")["t"].shape[0]
+    root_t = zarr.open_group(repo.readonly_session("ingest").store, mode="r")["t"].shape[0]
     assert root_t == 2, "precondition: the root coordinate is stale until the rebuild"
     assert read_committed_period_ids(store_path, "daily") == {
         "2024-01-01",
@@ -123,18 +125,18 @@ def test_committed_periods_come_from_level_zero(tmp_path: Path) -> None:
 def test_resetting_a_failed_append_restores_every_pyramid_level(tmp_path: Path) -> None:
     """The CLIM-899 rollback snapshot restores level 0, root, and overviews together."""
     store_path, repo = _pyramided_store(tmp_path)
-    before = repo.lookup_branch("main")
+    before = repo.lookup_branch("ingest")
     repo.create_branch("rollback-test", before)
 
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(3).to_zarr(session.store, group=committed_data_group(store_path), append_dim="t", zarr_format=3)
     session.commit("partial append")
     assert len(read_committed_period_ids(store_path, "daily")) == 3
 
-    repo.reset_branch("main", before)
+    repo.reset_branch("ingest", before)
     repo.delete_branch("rollback-test")
 
-    store = repo.readonly_session("main").store
+    store = repo.readonly_session("ingest").store
     root = zarr.open_group(store, mode="r")
     counts = {"root": root["t"].shape[0]}
     for group in root.group_keys():
@@ -170,7 +172,7 @@ def test_appending_does_not_un_declare_the_pyramid(tmp_path: Path) -> None:
     store_path, repo = _pyramided_store(tmp_path)
 
     def declared() -> bool:
-        attrs = dict(zarr.open_group(repo.readonly_session("main").store, mode="r").attrs)
+        attrs = dict(zarr.open_group(repo.readonly_session("ingest").store, mode="r").attrs)
         return attributes_declare_multiscales(attrs)
 
     assert declared(), "precondition: the built pyramid declares the convention"
@@ -184,13 +186,13 @@ def test_appending_does_not_un_declare_the_pyramid(tmp_path: Path) -> None:
         x_dim="x",
         y_dim="y",
     )
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _period(3).to_zarr(session.store, group=committed_data_group(store_path), append_dim="t", zarr_format=3)
     write_geozarr_attrs(session.store, spec=spec, bbox=[29.0, -1.0, 35.0, 4.0])
     session.commit("append + attrs")
 
     assert declared(), "the pyramid must still be declared after an append"
-    attrs = dict(zarr.open_group(repo.readonly_session("main").store, mode="r").attrs)
+    attrs = dict(zarr.open_group(repo.readonly_session("ingest").store, mode="r").attrs)
     names = [c.get("name") for c in attrs["zarr_conventions"] if isinstance(c, dict)]
     assert names.count("multiscales") == 1, f"declared once, not duplicated per commit: {names}"
 
@@ -203,7 +205,8 @@ def test_a_flat_store_does_not_gain_a_multiscales_declaration(tmp_path: Path) ->
 
     flat = tmp_path / "flat.icechunk"
     repo = icechunk.Repository.open_or_create(icechunk.local_filesystem_storage(str(flat)))
-    session = repo.writable_session("main")
+    repo.create_branch("ingest", repo.lookup_branch("main"))
+    session = repo.writable_session("ingest")
     _period(1, ny=64, nx=64).to_zarr(session.store, mode="w", zarr_format=3)
     write_geozarr_attrs(
         session.store,
@@ -220,5 +223,5 @@ def test_a_flat_store_does_not_gain_a_multiscales_declaration(tmp_path: Path) ->
     )
     session.commit("flat")
 
-    attrs = dict(zarr.open_group(repo.readonly_session("main").store, mode="r").attrs)
+    attrs = dict(zarr.open_group(repo.readonly_session("ingest").store, mode="r").attrs)
     assert not attributes_declare_multiscales(attrs)

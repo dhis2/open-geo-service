@@ -177,7 +177,7 @@ def test_a_failed_tile_build_does_not_fail_the_refresh(
     assert not list(layout.staging_dir().glob("*.writing"))
     # Nothing advertises or serves an archive that is not there.
     assert client.get("/features/districts/data.pmtiles").status_code == 404
-    collection = client.get("/stac/districts/collection.json").json()
+    collection = client.get("/stac/vectors/districts/collection.json").json()
     assert "tiles" not in collection["assets"] and "style" not in collection["assets"]
     assert "data" in collection["assets"]
     assert not [link for link in collection["links"] if link["rel"] == "pmtiles"]
@@ -188,8 +188,8 @@ def test_the_archive_is_served_by_range_and_advertised_in_stac(client: TestClien
     record = _refresh()
     archive = tiles.archive_path(Path(str(record.path)))
 
-    asset = client.get("/stac/districts/collection.json").json()["assets"]["tiles"]
-    assert asset["href"] == "http://testserver/features/districts/data.pmtiles"
+    asset = client.get("/stac/vectors/districts/collection.json").json()["assets"]["tiles"]
+    assert asset["href"] == f"./{archive.name}"
     assert asset["type"] == tiles.PMTILES_MEDIA_TYPE
 
     # A PMTiles reader starts with the 127-byte header, never the whole archive.
@@ -205,12 +205,15 @@ def test_the_archive_is_served_by_range_and_advertised_in_stac(client: TestClien
 
 def test_the_archive_is_linked_for_web_map_clients(client: TestClient) -> None:
     """The web-map-links `pmtiles` link names the archive and the layer to show."""
-    _refresh()
+    record = _refresh()
 
-    collection = client.get("/stac/districts/collection.json").json()
+    collection = client.get("/stac/vectors/districts/collection.json").json()
 
     (link,) = [link for link in collection["links"] if link["rel"] == "pmtiles"]
-    assert link["href"] == "http://testserver/features/districts/data.pmtiles"
+    assert link["href"] == f"./{tiles.archive_path(Path(str(record.path))).name}"
+    # Served beside the collection, by range, as a static host of the folder would.
+    served = client.get(f"/stac/vectors/districts/{link['href'].removeprefix('./')}", headers={"Range": "bytes=0-126"})
+    assert served.status_code == 206 and served.headers["content-type"] == tiles.PMTILES_MEDIA_TYPE
     assert link["type"] == tiles.PMTILES_MEDIA_TYPE
     assert link["pmtiles:layers"] == [tiles.TILE_LAYER]
     assert "https://stac-extensions.github.io/web-map-links/v1.3.0/schema.json" in collection["stac_extensions"]
@@ -226,9 +229,8 @@ def test_the_style_draws_the_tiles_with_the_collections_attribution(
         features={"type": "FeatureCollection", "features": [_box("W", "Western", -13.3, 8.0, -12.5, 8.8)]},
     )
 
-    asset = client.get("/stac/districts/collection.json").json()["assets"]["style"]
-    assert asset["href"] == "http://testserver/features/districts/styles/default.json"
-    assert asset["type"] == tiles.STYLE_MEDIA_TYPE and asset["roles"] == ["style"]
+    # Generated on request with the archive's absolute URL, so the written catalog leaves it out.
+    assert "style" not in client.get("/stac/vectors/districts/collection.json").json()["assets"]
 
     response = client.get("/features/districts/styles/default.json")
     assert response.headers["content-type"] == tiles.STYLE_MEDIA_TYPE

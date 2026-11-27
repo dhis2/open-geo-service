@@ -1,26 +1,27 @@
 """Where each file in the data folder lives.
 
-Dataset files sit under the catalog root, by kind; GeoService's own state (records, the writer
-lease, jobs, staging files, markers) sits beside it at the data folder root. Every path to a
-dataset file is built here, as a key relative to the catalog root, and :func:`local` joins a key
-to the data folder. A storage backend for object storage replaces that one function (CLIM-555).
+Every dataset has a folder of its own, `catalog/<kind>/<id>/`, holding its data and thumbnail;
+GeoService's own state (records, the writer lease, jobs, staging files, markers) sits beside
+`catalog/` at the data folder root. Every path to a dataset file is built here, as a key relative
+to the catalog root, and :func:`local` joins a key to the data folder. Files are written and
+read through `open_geo_service.storage`, whose keys are relative to the data folder. The layout
+is described in `docs/data_folder_layout.md`.
 """
 
 from __future__ import annotations
 
-import errno
-import os
-import shutil
 from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
-from uuid import uuid4
 
 from open_geo_service import config as api_config
 
+CATALOG = "catalog"
+"""The catalog root, a folder of the data folder."""
+
 
 class Kind(StrEnum):
-    """The kinds of dataset, each a folder of its own under the catalog root."""
+    """The kinds of dataset, each a sub-catalog of its own under the catalog root."""
 
     RASTER = "rasters"
     VECTOR = "vectors"
@@ -38,7 +39,12 @@ def kind_of(stored_as: str) -> Kind:
 
 def local(key: str) -> Path:
     """The file or folder at *key*, a path relative to the catalog root, in the data folder."""
-    return api_config.get_data_root() / key
+    return catalog_root() / key
+
+
+def catalog_root() -> Path:
+    """The folder holding every dataset, which is published as a catalog."""
+    return api_config.get_data_root() / CATALOG
 
 
 def kind_root(kind: Kind) -> Path:
@@ -48,8 +54,7 @@ def kind_root(kind: Kind) -> Path:
 
 def dataset_key(kind: Kind, dataset_id: str) -> str:
     """The key of the folder holding *dataset_id*'s files."""
-    # Rasters and vectors share one folder per kind; a table has a folder of its own.
-    return f"{kind.value}/{dataset_id}" if kind is Kind.TABLE else kind.value
+    return f"{kind.value}/{dataset_id}"
 
 
 def dataset_dir(kind: Kind, dataset_id: str) -> Path:
@@ -71,12 +76,12 @@ def raster_stores() -> Iterator[Path]:
     """Every raster dataset's Icechunk store in the data folder."""
     root = kind_root(Kind.RASTER)
     if root.is_dir():
-        yield from sorted(root.glob("*.icechunk"))
+        yield from sorted(store for folder in root.iterdir() if (store := raster_store(folder.name)).is_dir())
 
 
 def thumbnail(kind: Kind, dataset_id: str) -> Path:
     """The thumbnail of *dataset_id*, whether or not it exists yet."""
-    return local(f"thumbnails/{dataset_id}.png")
+    return dataset_dir(kind, dataset_id) / "thumbnail.png"
 
 
 def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
@@ -89,35 +94,13 @@ def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
 
 
 def staging_dir() -> Path:
-    """A folder for files being written, which are then moved into place with :func:`move_into_place`.
+    """A folder for files being written, which are then moved into place with `storage.write_file`.
 
-    Outside the dataset folders, so a reader of them never meets a partial file.
+    Outside the catalog, so a reader of the catalog never meets a partial file.
     """
     folder = api_config.get_data_root() / "tmp"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
-
-
-def move_into_place(source: Path, target: Path) -> None:
-    """Move *source*, written in :func:`staging_dir`, over *target*, so a reader sees the old file or the new one.
-
-    When *target* is on another filesystem, as when a folder of the data folder is a mount of
-    its own, *source* is copied beside *target* under a hidden name first, so the last step is
-    still a rename within one filesystem.
-    """
-    try:
-        os.replace(source, target)
-        return
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            raise
-    beside = target.with_name(f".{target.name}.{uuid4().hex}.moving")
-    try:
-        shutil.copyfile(source, beside)
-        os.replace(beside, target)
-    finally:
-        beside.unlink(missing_ok=True)
-    source.unlink(missing_ok=True)
 
 
 def collection_marker(dataset_id: str) -> Path:

@@ -72,7 +72,7 @@ def _write_store(root: Path) -> tuple[Path, list[str]]:
     import zarr
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-    array = zarr.open_array(repo.readonly_session("main").store, path="precip", mode="r")
+    array = zarr.open_array(repo.readonly_session("ingest").store, path="precip", mode="r")
     grid = [-(-size // chunk) for size, chunk in zip(array.shape, array.chunks, strict=True)]
     keys = [f"precip/c/{t}/{y}/{x}" for t in range(grid[0]) for y in range(grid[1]) for x in range(grid[2])]
     return store_path, keys

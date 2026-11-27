@@ -148,7 +148,7 @@ def _head() -> str:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    return str(repo.lookup_branch("main"))
+    return str(repo.lookup_branch("ingest"))
 
 
 def _commits(job_id: str) -> list[str]:
@@ -156,7 +156,9 @@ def _commits(job_id: str) -> list[str]:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(_store())))
-    mine = [s.id for s in repo.ancestry(branch="main") if s.message.startswith(f"Published from openEO job {job_id} ")]
+    mine = [
+        s.id for s in repo.ancestry(branch="ingest") if s.message.startswith(f"Published from openEO job {job_id} ")
+    ]
     return list(reversed(mine))
 
 
@@ -919,7 +921,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     def shown() -> tuple[dict[str, Any], str, dict[str, Any]]:
         detail = client.get(f"/datasets/{_DATASET}").json()["provenance"]
         page = client.get(f"/datasets/{_DATASET}", headers={"Accept": "text/html"}).text
-        return detail, page, client.get(f"/stac/{_DATASET}/collection.json").json()
+        return detail, page, client.get(f"/stac/rasters/{_DATASET}/collection.json").json()
 
     detail, page, collection = shown()
     # One input, though the graph read it twice; only ids leave the execution evidence.
@@ -953,8 +955,8 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     assert 'href="/jobs/job-1"' in page and f'href="/datasets/{source}"' in page
     assert "updated since" not in page
     assert [link["href"] for link in collection["links"] if link["rel"] == "derived_from"] == [
-        f"http://testserver/stac/{source}/collection.json",
-        "http://testserver/stac/districts/collection.json",
+        f"../{source}/collection.json",
+        "../../vectors/districts/collection.json",
     ]
     # The openEO copy links the same inputs at their openEO collections, so following
     # provenance from openEO stays in openEO.
@@ -971,7 +973,7 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # the relative README and AGENTS among them, answers HEAD; `proj:code` is declared at v2.0.0;
     # and the Portolan profile is declared.
     assert [provider["roles"] for provider in collection["providers"]][-2:] == [["processor"], ["host"]]
-    collection_url = f"http://testserver/stac/{_DATASET}/collection.json"
+    collection_url = f"http://testserver/stac/rasters/{_DATASET}/collection.json"
     for link in collection["links"]:
         href = urljoin(collection_url, link["href"])
         if href.startswith("http://testserver/"):
@@ -982,10 +984,12 @@ def test_the_dataset_shows_its_provenance_and_names_an_input_synced_since(
     # The input's producer made the data and this instance hosts it, so the collection is a
     # Portolan mirror, which records when it was last updated.
     assert collection["updated"].endswith("Z")
-    readme = client.get(f"/stac/{_DATASET}/README.md").text
+    readme = client.get(f"/stac/rasters/{_DATASET}/README.md").text
     assert "(processor)" in readme and "(host)" in readme
-    agents = client.get(f"/stac/{_DATASET}/AGENTS.md").text
-    assert f'xr.open_zarr("http://testserver/zarr/{_DATASET}"' in agents
+    agents = client.get(f"/stac/rasters/{_DATASET}/AGENTS.md").text
+    # Without a configured public address, the store beside the file, and no Zarr route.
+    assert f'local_filesystem_storage("./{_DATASET}.icechunk/")' in agents
+    assert "/zarr/" not in agents
     assert client.get(f"/datasets/{source}").json()["provenance"] is None
 
     plugin.available.append("2026-01-03")
@@ -1003,7 +1007,7 @@ def test_the_writer_returns_the_committed_snapshot(tmp_path: Path) -> None:
     import icechunk
 
     repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store)))
-    assert snapshot == repo.lookup_branch("main")
+    assert snapshot == repo.lookup_branch("ingest")
 
 
 # --- finding the commit after a restart ------------------------------------------------------

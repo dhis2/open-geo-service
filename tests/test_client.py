@@ -25,6 +25,19 @@ def _make_catalog(hrefs: list[str]) -> dict:
     }
 
 
+ROOT = "http://localhost/stac/catalog.json"
+RASTERS = "http://localhost/stac/rasters/catalog.json"
+
+
+def _catalog_at(documents: dict[str, dict]) -> Any:
+    """A `get` that answers each catalog URL with its document, as the root and a sub-catalog."""
+    return lambda url, **_: _make_response(documents[url])
+
+
+def _one_raster(href: str = "http://localhost/stac/rasters/chirps3_precipitation_daily_rwa/collection.json") -> Any:
+    return _catalog_at({ROOT: _make_catalog([RASTERS]), RASTERS: _make_catalog([href])})
+
+
 def _make_collection(zarr_href: str) -> dict:
     return {
         "assets": {
@@ -55,30 +68,24 @@ def _make_response(
 # ── _id_from_href ──────────────────────────────────────────────────────────────
 
 
-def test_id_from_href_extracts_last_path_segment() -> None:
-    assert _id_from_href("http://localhost/stac/chirps3_daily_rwa/collection.json") == "chirps3_daily_rwa"
-
-
-def test_id_from_href_ignores_query_and_fragment() -> None:
-    assert _id_from_href("http://localhost/stac/ds/collection.json?foo=bar#section") == "ds"
-
-
-def test_id_from_href_strips_trailing_slash() -> None:
-    assert _id_from_href("http://localhost/stac/ds/collection.json/") == "ds"
+def test_id_from_href_is_the_collections_path_in_the_catalog() -> None:
+    assert (
+        _id_from_href("http://localhost/stac/rasters/chirps3_daily_rwa/collection.json") == "rasters/chirps3_daily_rwa"
+    )
+    assert _id_from_href("http://localhost/stac/vectors/ds/collection.json?foo=bar#section") == "vectors/ds"
+    assert _id_from_href("http://localhost/stac/tables/ds/collection.json/") == "tables/ds"
+    assert _id_from_href(RASTERS) == "rasters"
 
 
 # ── module-level list_datasets ─────────────────────────────────────────────────
 
 
-def test_list_datasets_returns_child_links() -> None:
-    catalog = _make_catalog(["http://localhost/stac/chirps3_precipitation_daily_rwa/collection.json"])
-    with patch("open_geo_service.client.httpx.get", return_value=_make_response(catalog)) as mock_get:
+def test_list_datasets_returns_the_collections_of_every_sub_catalog() -> None:
+    with patch("open_geo_service.client.httpx.get", side_effect=_one_raster()) as mock_get:
         result = list_datasets("http://localhost")
 
-    mock_get.assert_called_once_with("http://localhost/stac/catalog.json", timeout=30)
-    assert len(result) == 1
-    assert result[0]["rel"] == "child"
-    assert "chirps3" in result[0]["href"]
+    assert [call.args[0] for call in mock_get.call_args_list] == [ROOT, RASTERS]
+    assert [(link["rel"], link["id"]) for link in result] == [("child", "rasters/chirps3_precipitation_daily_rwa")]
 
 
 def test_list_datasets_returns_empty_for_no_children() -> None:
@@ -141,7 +148,8 @@ def test_open_dataset_uses_default_base_url() -> None:
         with patch("xarray.open_zarr", return_value=MagicMock()):
             open_dataset("any_dataset")
 
-    mock_get.assert_called_once_with(f"{_FALLBACK_BASE_URL}/stac/any_dataset/collection.json", timeout=30)
+    # A bare id is a raster's, the only kind that opens as xarray.
+    mock_get.assert_called_once_with(f"{_FALLBACK_BASE_URL}/stac/rasters/any_dataset/collection.json", timeout=30)
 
 
 def test_open_dataset_uses_env_var_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,7 +161,7 @@ def test_open_dataset_uses_env_var_base_url(monkeypatch: pytest.MonkeyPatch) -> 
         with patch("xarray.open_zarr", return_value=MagicMock()):
             open_dataset("any_dataset")
 
-    mock_get.assert_called_once_with("http://env-host:4321/stac/any_dataset/collection.json", timeout=30)
+    mock_get.assert_called_once_with("http://env-host:4321/stac/rasters/any_dataset/collection.json", timeout=30)
 
 
 # ── lazy xarray import ─────────────────────────────────────────────────────────
@@ -180,16 +188,13 @@ def _make_service(base_url: str = "http://localhost") -> tuple[GeoService, Magic
 
 
 def test_datasets_uses_persistent_http_session() -> None:
-    catalog = _make_catalog(["http://localhost/stac/chirps3_precipitation_daily_rwa/collection.json"])
     service, mock_http = _make_service()
-    mock_http.get.return_value = _make_response(catalog)
+    mock_http.get.side_effect = _one_raster()
 
     result = service.datasets()
 
-    mock_http.get.assert_called_once_with("http://localhost/stac/catalog.json")
-    assert len(result) == 1
-    assert result[0]["rel"] == "child"
-    assert result[0]["id"] == "chirps3_precipitation_daily_rwa"
+    assert [call.args[0] for call in mock_http.get.call_args_list] == [ROOT, RASTERS]
+    assert [link["id"] for link in result] == ["rasters/chirps3_precipitation_daily_rwa"]
 
 
 def test_open_dataset_uses_persistent_http_session(tmp_path: Path) -> None:
@@ -214,7 +219,9 @@ def test_open_dataset_uses_persistent_http_session(tmp_path: Path) -> None:
     finally:
         result.close()
 
-    mock_http.get.assert_called_once_with("http://localhost/stac/chirps3_precipitation_daily_rwa/collection.json")
+    mock_http.get.assert_called_once_with(
+        "http://localhost/stac/rasters/chirps3_precipitation_daily_rwa/collection.json"
+    )
 
 
 def test_processes_returns_process_list() -> None:
@@ -299,7 +306,7 @@ def test_accepts_custom_timeout() -> None:
 
 def test_strips_trailing_slash() -> None:
     service, mock_http = _make_service("http://localhost/")
-    mock_http.get.return_value = _make_response(_make_catalog(["http://localhost/stac/ds/collection.json"]))
+    mock_http.get.return_value = _make_response(_make_catalog([]))
     service.datasets()
     mock_http.get.assert_called_once_with("http://localhost/stac/catalog.json")
 
@@ -338,8 +345,24 @@ def test_an_unknown_collection_names_what_was_missing(client: TestClient) -> Non
 
 
 def test_open_dataset_names_the_missing_collection(client: TestClient) -> None:
-    with pytest.raises(httpx.HTTPStatusError, match="STAC collection 'missing' not found"):
+    # Not in the written catalog, so openEO's collection is asked, which names it too.
+    with pytest.raises(httpx.HTTPStatusError, match="Collection 'missing' not found"):
         _service_on(client).open_dataset("missing")
+
+
+def test_a_raster_the_catalog_has_not_written_opens_from_openeo(tmp_path: Path) -> None:
+    """As on a read-only server before the writer has written `catalog/`."""
+    store = tmp_path / "rain.zarr"
+    xr.Dataset({"precip": (["x"], np.ones(2, dtype="float32"))}).to_zarr(str(store), mode="w", consolidated=True)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/collections/rain":
+            return httpx.Response(200, json=_make_collection(str(store)))
+        return httpx.Response(404, json={"detail": "No file in the catalog"})
+
+    service = _service_on(httpx.Client(transport=httpx.MockTransport(reply)), "http://ogs.example")
+    with service.open_dataset("rain") as opened:
+        assert "precip" in opened.data_vars
 
 
 def test_an_openeo_error_message_reaches_the_caller() -> None:

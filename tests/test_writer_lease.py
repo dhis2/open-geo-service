@@ -43,6 +43,21 @@ def start_other_writer() -> subprocess.Popen[str]:
     return process
 
 
+_FORK_AFTER_TAKING_THE_LEASE = """
+import os, sys
+from open_geo_service import writer_lease
+writer_lease.ensure_held()
+child = os.fork()
+if child == 0:  # inherits the locked file, but is not the writer
+    try:
+        writer_lease.ensure_held()
+    except writer_lease.WriterLeaseHeld:
+        os._exit(0)
+    os._exit(1)
+sys.exit(0 if os.waitpid(child, 0)[1] == 0 else 1)
+"""
+
+
 @pytest.fixture
 def other_writer() -> Generator[subprocess.Popen[str]]:
     process = start_other_writer()
@@ -68,17 +83,13 @@ def test_a_second_writer_is_refused_until_the_first_exits(other_writer: subproce
 
     other_writer.kill()  # a crash: the operating system releases the lock
     other_writer.wait()
+    if hasattr(os, "fork"):
+        # In a fresh process that forks before starting any thread: forking this one, which runs
+        # Icechunk's and obstore's threads, can crash the child before it checks anything.
+        forked = subprocess.run([sys.executable, "-c", _FORK_AFTER_TAKING_THE_LEASE], capture_output=True, text=True)
+        assert forked.returncode == 0, f"a forked child was let write beside its parent: {forked.stderr}"
     with TestClient(app) as client:
         assert client.get("/info").status_code == 200
-        if hasattr(os, "fork"):
-            child = os.fork()
-            if child == 0:  # inherits the locked file, but is not the writer
-                try:
-                    writer_lease.ensure_held()
-                except WriterLeaseHeld:
-                    os._exit(0)
-                os._exit(1)
-            assert os.waitpid(child, 0)[1] == 0, "a forked child was let write beside its parent"
 
     # Kept after shutdown, while job workers stopped without waiting may still write.
     takeover = subprocess.run(
@@ -125,8 +136,10 @@ def test_only_the_writer_writes_and_a_read_only_server_runs_beside_it(
         # Started before the writer has created any index: reads serve none and create none.
         monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "records.json")
         monkeypatch.setattr(job_store, "JOBS_INDEX_PATH", tmp_path / "jobs" / "jobs.json")
-        for path in ("/datasets", "/stac/catalog.json"):
-            assert client.get(path).status_code == 200, path
+        monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "data")
+        assert client.get("/datasets").status_code == 200
+        # The catalog is the writer's to write; until then there is none, as on a static host.
+        assert client.get("/stac/catalog.json").status_code == 404
         assert job_store.list_job_records() == []
         assert list(tmp_path.iterdir()) == []
 

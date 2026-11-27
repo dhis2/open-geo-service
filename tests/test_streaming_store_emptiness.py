@@ -56,7 +56,7 @@ def test_repo_created_but_never_written_is_empty(tmp_path: Path) -> None:
     with pytest.raises(zarr_errors.GroupNotFoundError):
         # The condition being classified: the branch tip has no hierarchy to open.
         repo = open_or_create_repo(store_path)
-        zarr.open_group(repo.readonly_session("main").store, mode="r")
+        zarr.open_group(repo.readonly_session("ingest").store, mode="r")
 
     assert is_store_empty(store_path) is True
 
@@ -65,7 +65,7 @@ def test_repo_with_committed_data_is_not_empty(tmp_path: Path) -> None:
     """The guard still protects real data — otherwise the fix above enables a destructive write."""
     store_path = tmp_path / "has-data.icechunk"
     repo = open_or_create_repo(store_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     xr.Dataset(
         {"precip": (("t", "y", "x"), np.zeros((1, 2, 2), dtype="float32"))},
         coords={
@@ -107,7 +107,7 @@ def test_repo_with_only_root_attrs_is_not_empty(tmp_path: Path) -> None:
     """Attrs without arrays still count as content, as they did before."""
     store_path = tmp_path / "attrs-only.icechunk"
     repo = open_or_create_repo(store_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     root = zarr.open_group(session.store, mode="w")
     root.attrs["title"] = "written by something"
     session.commit("root attrs only")

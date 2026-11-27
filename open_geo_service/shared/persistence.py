@@ -121,7 +121,7 @@ def atomic_text(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, _file_mode(path))
-        _replace(temporary, path)
+        replace_file(temporary, path)
         temporary = None
         if os.name != "nt":
             descriptor = os.open(path.parent, os.O_RDONLY)
@@ -142,7 +142,7 @@ def _file_mode(path: Path) -> int:
         return 0o666 & ~_UMASK
 
 
-def _replace(source: str, target: Path, attempts: int = 20) -> None:
+def replace_file(source: str | Path, target: Path, attempts: int = 20) -> None:
     """`os.replace`, retried briefly while Windows refuses to replace a file a reader has open.
 
     Readers of some indexes, such as the artifact records, do not take the lock, so they never wait

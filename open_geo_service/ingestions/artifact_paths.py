@@ -62,9 +62,9 @@ def to_absolute(raw: str) -> str:
 def _rebase_legacy(candidate: Path, root: Path) -> Path:
     """Re-root a legacy absolute path onto root, preferring the longest matching suffix.
 
-    Managed stores always live under ``{data_root}/rasters/`` (``shared.layout``, the sole
-    trusted root in ``sync_engine._artifact_storage_roots``), so only a suffix
-    starting at a ``rasters`` component is considered - a longer suffix would otherwise
+    Managed stores always live under ``{data_root}/catalog/rasters/`` (``shared.layout``, the
+    sole trusted root in ``sync_engine._artifact_storage_roots``), so only a suffix starting at
+    ``catalog/rasters`` is considered - a longer suffix would otherwise
     bind the record to a lookalike elsewhere under the root, and the rebased path would be
     persisted in a form sync rejects as untrusted.
 
@@ -82,8 +82,8 @@ def _rebase_legacy(candidate: Path, root: Path) -> Path:
     else:
         return candidate
     parts = candidate.parts
-    for index in range(1, len(parts) - 1):
-        if parts[index] != layout.Kind.RASTER.value:
+    for index in range(1, len(parts) - 2):
+        if parts[index : index + 2] != (layout.CATALOG, layout.Kind.RASTER.value):
             continue
         rebased = resolved_root.joinpath(*parts[index:])
         if rebased.exists():

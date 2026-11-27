@@ -284,7 +284,7 @@ def test_a_rebuilt_store_renames_any_time_axis_alias(tmp_path: Path) -> None:
 
     store_path = tmp_path / "aliased.icechunk"
     ds = ElevationPlugin().fetch(_BBOX).expand_dims({"date": [np.datetime64("2024-01-01")]})
-    session = open_or_create_repo(store_path).writable_session("main")
+    session = open_or_create_repo(store_path).writable_session("ingest")
     ds.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("aliased")
 

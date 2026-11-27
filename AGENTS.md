@@ -11,8 +11,9 @@ Key concepts:
 - **Data sources** — upstream datasets this instance can fetch, each described by a **dataset template**: a YAML entry in `plugins/rasters/` (variable, period type, download plugin), `plugins/vectors/` (feature provider and its params) or `plugins/tables/` (table schema and row plugin). These are blueprints; the data sources are listed at `GET /data-sources` and on the Data sources page.
 - **Artifacts / managed datasets** — ingested instances of a template for a specific spatial extent and time range. Exposed under `/datasets` and `/zarr/{dataset_id}`.
 - **Extent** — a single named spatial bounding box configured at instance setup time (`id`, `bbox`, optional `country_code`). Exposed at `GET /extent`.
+- **Data folder** — datasets in `<data_dir>/catalog/<kind>/<id>/`, GeoService's own state beside `catalog/`; every path is built in `shared/layout.py` (`docs/data_folder_layout.md`).
 - **GeoZarr stores** — datasets are stored as chunked Zarr v3 archives with GeoZarr spatial attributes. Flat stores for small extents; multiscale pyramids for large ones. Served chunk-by-chunk over HTTP with no specialised server middleware.
-- **Feature collections** — vector datasets (org unit polygons, facility points) stored as GeoParquet under `<data_dir>/vectors`, tracked by the same `ArtifactRecord` as rasters and discriminated by `itemType: "feature"`. A record is what makes a collection exist: the listing reads records, never the filesystem, so the store directory is not an inbox.
+- **Feature collections** — vector datasets (org unit polygons, facility points) stored as GeoParquet under `<data_dir>/catalog/vectors/<id>/`, tracked by the same `ArtifactRecord` as rasters and discriminated by `itemType: "feature"`. A record is what makes a collection exist: the listing reads records, never the filesystem, so the store directory is not an inbox.
 
 ## Repository layout
 
