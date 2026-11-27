@@ -60,7 +60,7 @@ def test_replay_starts_delivery_without_posting_in_the_startup_thread(
     assert kicked == [True]
 
 
-def test_replay_reconstructs_transitions_when_an_older_failure_appears_late(
+def test_a_late_callback_reconstructs_transitions_from_the_log_and_one_in_order_does_not_read_it(
     clock: _Clock, webhook: WebhookReceiver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from open_geo_service.jobs import events as job_events
@@ -72,14 +72,14 @@ def test_replay_reconstructs_transitions_when_an_older_failure_appears_late(
     clock.now += timedelta(minutes=1)
     success = _outcome("rain", 2, clock, failed=False)
 
-    # The success callback arrives while the older failure is not visible in the log yet.
-    monkeypatch.setattr(job_events, "persisted_events", lambda: [success])
+    # The success callback arrives first, in order with what was decided: the log is not read.
+    monkeypatch.setattr(job_events, "persisted_events", lambda: pytest.fail("read the log"))
     notifications.consume([success])
     assert webhook.posts == []
 
-    # A later replay sees the durable chronology and reports both transitions in order.
+    # The older failure's callback comes late: the log's chronology reports both transitions in order.
     monkeypatch.setattr(job_events, "persisted_events", lambda: [failure, success])
-    notifications.replay()
+    notifications.consume([failure])
 
     assert [(body["status"], key) for _, key, body in webhook.posts] == [
         ("failed", failure.event_id),

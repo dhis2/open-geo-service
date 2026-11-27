@@ -124,20 +124,41 @@ def _enabled() -> str | None:
 
 
 def consume(events: list[JobEvent]) -> None:
-    """Reconcile durable outcomes after a live callback, then post in the background."""
+    """Decide the outcomes a live callback brings, then post in the background.
+
+    Outcomes later than every one decided for their automation continue its stored health,
+    without reading the log. Callbacks from concurrent jobs can arrive out of order, though:
+    one older than an outcome already decided, or for an automation whose failure was given
+    up on, has the durable log read so its health is rebuilt in order.
+    """
     outcomes = [event for event in events if event.type in _OUTCOME_TYPES]
     if not outcomes or _enabled() is None:
         return
-    from open_geo_service.jobs.events import persisted_events
-
-    # Callbacks from concurrent jobs can arrive out of order. Read the durable log so a later
-    # callback also decides an earlier event whose own callback was delayed or missed. Keep the
-    # supplied events too: a test double or a newly added event owner may not be in the log yet.
-    durable = {(event.source, event.event_id): event for event in persisted_events() if event.type in _OUTCOME_TYPES}
-    durable.update({(event.source, event.event_id): event for event in outcomes})
     # A first event can be stamped just before the state is created, at its job's completion.
-    _decide(list(durable.values()), since=min([utc_now(), *(_utc(event.time) for event in outcomes)]))
+    since = min([utc_now(), *(_utc(event.time) for event in outcomes)])
+    if not _decide_in_order(outcomes, since=since):
+        from open_geo_service.jobs.events import persisted_events
+
+        # Keep the supplied events too: a test double or a newly added event owner may not be in the log yet.
+        durable = {(e.source, e.event_id): e for e in persisted_events() if e.type in _OUTCOME_TYPES}
+        durable.update({(event.source, event.event_id): event for event in outcomes})
+        _decide(list(durable.values()), since=since)
     _kick()
+
+
+def _decide_in_order(events: list[JobEvent], *, since: datetime) -> bool:
+    """Decide ``events`` from the stored health if each is later than its automation's last; else change nothing."""
+    with index_lock(_path()):
+        state = _read(since)
+        for event in events:
+            latest = state.health.get(event.source)
+            if event.source in state.abandoned or (
+                latest is not None and (_utc(event.time), event.event_id) <= (latest.time, latest.event_id)
+            ):
+                return False
+        _reconcile(state, events, health={source: item.failed for source, item in state.health.items()})
+        atomic_json(_path(), state.model_dump(mode="json"))
+    return True
 
 
 def replay() -> None:
@@ -163,14 +184,16 @@ def _event_key(event: JobEvent) -> str:
     return f"{event.source}\n{event.event_id}"
 
 
-def _reconcile(state: _State, events: list[JobEvent]) -> None:
+def _reconcile(state: _State, events: list[JobEvent], *, health: dict[str, bool] | None = None) -> None:
     """Rebuild health chronologically, queueing each transition not decided before.
 
     Rebuilding matters when a failure is persisted before a success but its live callback
     arrives later: advancing health from callback order would discard that failure forever.
     ``decided`` keeps transitions idempotent after their notification leaves the queue.
+    ``health`` continues from each automation's stored health instead, for events known to
+    follow every one already decided.
     """
-    health: dict[str, bool] = {}
+    health = dict(health or {})
     opened: dict[str, str] = {}  # per automation, the failure that started its current episode
     latest: dict[str, _Health] = {}
     for event in sorted(events, key=lambda item: (_utc(item.time), item.event_id)):
@@ -186,7 +209,7 @@ def _reconcile(state: _State, events: list[JobEvent]) -> None:
         key = _event_key(event)
         if failed:
             opened[event.source] = event.event_id
-        elif state.abandoned.get(event.source) == opened.get(event.source):
+        elif event.source in state.abandoned and state.abandoned[event.source] == opened.get(event.source):
             # The receiver never got this episode's failure, so it must not get its ending. The
             # ending of an earlier, posted episode is replayed too, and must not clear it.
             del state.abandoned[event.source]
