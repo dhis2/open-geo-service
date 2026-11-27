@@ -156,6 +156,9 @@ server = [
     # straight from the stored GeoParquet. Pinned: it is pre-1.0 and its overview format is
     # expected to change, and the archive is derived output a refresh rebuilds anyway.
     "tylertoo==0.8.0",
+    # Checks OIDC providers' JWTs (auth/oidc.py): signatures against a provider's published keys,
+    # and the registered claims. By the Authlib author, and what Authlib itself uses for JOSE.
+    "joserfc>=1.4",
 ]
 
 [project.urls]

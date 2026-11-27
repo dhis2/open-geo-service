@@ -43,6 +43,8 @@ ROUTE_TABLE: dict[Tier, frozenset[str]] = {
             "GET /service_types",
             # Web interface sign-in; the middleware checks the posts come from this instance's pages
             "GET /sign-in",
+            "GET /sign-in/oidc/{provider_id}",
+            "GET /sign-in/oidc/{provider_id}/callback",
             "POST /sign-in",
             "POST /sign-out",
             # Catalogue and data reads
@@ -167,6 +169,8 @@ UNGATED: frozenset[str] = frozenset(
         "GET /redoc",
         "GET /service_types",
         "GET /sign-in",
+        "GET /sign-in/oidc/{provider_id}",
+        "GET /sign-in/oidc/{provider_id}/callback",
         "POST /sign-in",
         "POST /sign-out",
     }
@@ -183,6 +187,7 @@ def _compile() -> list[tuple[str, re.Pattern[str], Tier]]:
 
 
 _ENTRIES = _compile()
+_UNGATED = [(route.split(" ", 1)[0], compile_path(route.split(" ", 1)[1])[0]) for route in UNGATED]
 
 
 def listed_tier(method: str, path: str) -> Tier | None:
@@ -217,4 +222,4 @@ def gated(method: str, path: str, *, page: bool) -> bool:
     path = path.rstrip("/") or "/"
     if (method, path) == ("GET", "/"):
         return page
-    return f"{method} {path}" not in UNGATED
+    return not any(verb == method and pattern.match(path) for verb, pattern in _UNGATED)
