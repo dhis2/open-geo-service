@@ -38,6 +38,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from open_geo_service import config as api_config
+from open_geo_service.auth.middleware import current_viewer
+from open_geo_service.auth.tokens import Tier
 from open_geo_service.jobs.models import (
     AUTOMATION_FAILED_EVENT_TYPE,
     AUTOMATION_RESOLVED_EVENT_TYPE,
@@ -203,11 +205,16 @@ class RunContext:
     start: str
     end: str
     trigger: RunTrigger = "manual"
+    started_by: str | None = None
     mode: Literal["dry_run", "live"] | None = None
     event_id: str | None = None
     event_time: str | None = None
     retry_of: str | None = None
     source: dict[str, Any] = field(default_factory=dict)
+
+
+PIPELINE_RUNNER = "service:pipeline-runner"
+"""The principal a run started by a dataset update is recorded as (docs/authentication.md)."""
 
 
 def trigger_id(pipeline_id: str) -> str:
@@ -293,6 +300,7 @@ def run_pipeline(pipeline_id: str, context: RunContext) -> PipelineRun:
     run = PipelineRun(
         run_id=run_id,
         trigger=context.trigger,
+        started_by=context.started_by,
         event_id=context.event_id,
         retry_of=context.retry_of,
         revision=record.revision,
@@ -777,6 +785,7 @@ def _event_context(event: Any) -> RunContext | None:
         start=start,
         end=end,
         trigger="dataset_update",
+        started_by=PIPELINE_RUNNER,
         event_id=event.event_id,
         event_time=_utc(event.time).isoformat(),
         source={**source, "update": scope},
@@ -1037,6 +1046,7 @@ def run_view(pipeline_id: str, run: PipelineRun, mount: str) -> PipelineRunView:
     """One run with its workflow and delivery jobs' current states: the one reading of its status.
 
     ``mount`` is the deployment's path prefix, so links lead into OGS behind a proxy too.
+    ``started_by`` is given only to an operator, the caller of the request being handled.
     """
     from open_geo_service.openeo.jobs import store_get_job
 
@@ -1082,6 +1092,8 @@ def run_view(pipeline_id: str, run: PipelineRun, mount: str) -> PipelineRunView:
             ),
             "job_status": job_status,
             "job_error": job_error,
+            # Audit data, for operators; whoever may read the run still sees its status.
+            "started_by": run.started_by if current_viewer().tier is Tier.OPERATOR else None,
         }
     )
 

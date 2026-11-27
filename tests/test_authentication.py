@@ -70,8 +70,10 @@ def _concrete(path: str) -> str:
     return re.sub(r"\{[^}]+\}", "abc", path)
 
 
-def _configure(monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], *, gate_reads: bool = False) -> None:
-    authentication = {"tokens": tokens, "gate_reads": gate_reads}
+def _configure(
+    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], *, require_for_read: bool = False
+) -> None:
+    authentication = {"tokens": tokens, "require_for_read": require_for_read}
     monkeypatch.setattr(api_config, "_cache", {**api_config.get_config(), "authentication": authentication})
 
 
@@ -81,11 +83,11 @@ def auth_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def reads_gated(monkeypatch: pytest.MonkeyPatch) -> None:
-    _turn_on(monkeypatch, gate_reads=True)
+def auth_required_for_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    _turn_on(monkeypatch, require_for_read=True)
 
 
-def _turn_on(monkeypatch: pytest.MonkeyPatch, *, gate_reads: bool = False) -> None:
+def _turn_on(monkeypatch: pytest.MonkeyPatch, *, require_for_read: bool = False) -> None:
     monkeypatch.setenv("GEOSERVICE_TEST_OPERATOR_TOKEN", OPERATOR_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_OTHER_TOKEN", OTHER_SECRET)
@@ -96,7 +98,7 @@ def _turn_on(monkeypatch: pytest.MonkeyPatch, *, gate_reads: bool = False) -> No
             {"id": "notebook", "token_env": "GEOSERVICE_TEST_CLIENT_TOKEN", "tier": "authenticated"},
             {"id": "other", "token_env": "GEOSERVICE_TEST_OTHER_TOKEN", "tier": "authenticated"},
         ],
-        gate_reads=gate_reads,
+        require_for_read=require_for_read,
     )
 
 
@@ -179,10 +181,10 @@ class FakeProvider:
 
 
 def _configure_oidc(
-    monkeypatch: pytest.MonkeyPatch, *, tokens: list[dict[str, Any]], gate_reads: bool, **settings: Any
+    monkeypatch: pytest.MonkeyPatch, *, tokens: list[dict[str, Any]], require_for_read: bool, **settings: Any
 ) -> None:
     provider = {"id": "idp", "issuer": ISSUER, "client_id": CLIENT_ID, "title": "Example ID", **settings}
-    authentication = {"tokens": tokens, "oidc": [provider], "gate_reads": gate_reads}
+    authentication = {"tokens": tokens, "oidc": [provider], "require_for_read": require_for_read}
     monkeypatch.setattr(api_config, "_cache", {**api_config.get_config(), "authentication": authentication})
 
 
@@ -205,7 +207,7 @@ def people(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> P
     if request.param == "tokens":
         _turn_on(monkeypatch)
         return People(_bearer(CLIENT_SECRET), _bearer(OTHER_SECRET), _bearer(OPERATOR_SECRET))
-    _configure_oidc(monkeypatch, tokens=[], gate_reads=True)
+    _configure_oidc(monkeypatch, tokens=[], require_for_read=True)
     provider = FakeProvider(monkeypatch)
     return People(provider.bearer("alice"), provider.bearer("bob"), None)
 
@@ -575,7 +577,7 @@ def test_a_person_is_one_principal_by_web_sign_in_and_by_bearer_token(
     client = browser
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     notebook = {"id": "notebook", "token_env": "GEOSERVICE_TEST_CLIENT_TOKEN", "tier": "authenticated"}
-    _configure_oidc(monkeypatch, tokens=[notebook], gate_reads=True, openeo_client_id="openeo")
+    _configure_oidc(monkeypatch, tokens=[notebook], require_for_read=True, openeo_client_id="openeo")
     provider = FakeProvider(monkeypatch)
     advertised = client.get("/credentials/oidc").json()["providers"]
     assert [(p["id"], p["scopes"]) for p in advertised] == [("idp", ["openid", "profile"])]
@@ -661,7 +663,7 @@ def test_a_person_is_one_principal_by_web_sign_in_and_by_bearer_token(
     monkeypatch.setattr(oidc, "_get_json", provider._get_json)
 
     # An explicit list replaces the default for both clients.
-    _configure_oidc(monkeypatch, tokens=[notebook], gate_reads=True, scopes=["openid", "email"])
+    _configure_oidc(monkeypatch, tokens=[notebook], require_for_read=True, scopes=["openid", "email"])
     assert client.get("/credentials/oidc").json()["providers"][0]["scopes"] == ["openid", "email"]
     assert start()[2]["scope"] == "openid email"
 
@@ -694,7 +696,7 @@ _PROFILES: dict[str, list[tuple[dict[str, Any], bool]]] = {
 def test_each_provider_profile_takes_its_access_tokens_and_refuses_its_id_tokens(
     profile: str, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    _configure_oidc(monkeypatch, tokens=[], gate_reads=False, access_tokens=profile)
+    _configure_oidc(monkeypatch, tokens=[], require_for_read=False, access_tokens=profile)
     provider = FakeProvider(monkeypatch)
     for shape, accepted in _PROFILES[profile]:
         claims = {("typ" if key == "_typ" else key): value for key, value in shape.items() if key != "typ"}
@@ -715,7 +717,7 @@ JSON = {"Accept": "application/json"}
 
 
 @pytest.mark.parametrize("route", sorted(route for route, tier in DECLARED.items() if tier is Tier.PUBLIC))
-def test_gated_reads_need_a_token(reads_gated: None, client: TestClient, route: str) -> None:
+def test_gated_reads_need_a_token(auth_required_for_read: None, client: TestClient, route: str) -> None:
     method, path = route.split(" ", 1)
     anonymous = client.request(method, _concrete(path), headers=JSON, follow_redirects=False)
     if route in UNGATED:
@@ -729,7 +731,7 @@ def test_gated_reads_need_a_token(reads_gated: None, client: TestClient, route: 
 
 
 def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
-    reads_gated: None, browser: TestClient, monkeypatch: pytest.MonkeyPatch
+    auth_required_for_read: None, browser: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = browser
     # A browser is sent to sign in and back; openEO discovery at `/` stays public.
@@ -780,12 +782,25 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
     assert not any("auth:refs" in link for link in collection["links"][:2])
     assert "auth:refs" not in raster["assets"]["zarr"]
 
+    # Each OIDC provider is a scheme of its own; without named tokens there is no Basic.
+    _configure_oidc(monkeypatch, tokens=[], require_for_read=True)
+    alice = FakeProvider(monkeypatch).bearer("alice")
+    catalog = client.get("/stac/catalog.json", headers=alice).json()
+    assert catalog["auth:schemes"]["oidc-idp"] == {
+        "type": "openIdConnect",
+        "openIdConnectUrl": f"{ISSUER}/.well-known/openid-configuration",
+        "description": "Sign in with Example ID.",
+    }
+    assert list(catalog["auth:schemes"]) == ["bearer", "oidc-idp"]
+    collection = client.get("/stac/rain/collection.json", headers=alice).json()
+    assert collection["assets"]["zarr"]["auth:refs"] == ["bearer", "oidc-idp"]
+
 
 # --- configuration -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("tokens", "gate_reads", "error"),
+    ("tokens", "require_for_read", "error"),
     [
         ([{"id": "a", "token_env": "GEOSERVICE_TEST_UNSET", "tier": "operator"}], False, "UNSET is not set"),
         ([{"id": "a", "token_env": "GEOSERVICE_TEST_SHORT", "tier": "operator"}], False, "shorter than 32"),
@@ -807,18 +822,18 @@ def test_gated_reads_send_a_browser_to_sign_in_and_declare_the_schemes(
             "secret in GEOSERVICE_TEST_SAME is used by an earlier token",
         ),
         # Gating with no token would leave reads open while seeming private.
-        ([], True, "gate_reads needs a token"),
+        ([], True, "require_for_read needs a token"),
     ],
 )
 def test_an_unusable_token_refuses_startup(
-    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], gate_reads: bool, error: str
+    monkeypatch: pytest.MonkeyPatch, tokens: list[dict[str, Any]], require_for_read: bool, error: str
 ) -> None:
     monkeypatch.setenv("GEOSERVICE_TEST_OPERATOR_TOKEN", OPERATOR_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_CLIENT_TOKEN", CLIENT_SECRET)
     monkeypatch.setenv("GEOSERVICE_TEST_SHORT", "short")
     monkeypatch.setenv("GEOSERVICE_TEST_SAME", OPERATOR_SECRET)
     monkeypatch.delenv("GEOSERVICE_TEST_UNSET", raising=False)
-    _configure(monkeypatch, tokens, gate_reads=gate_reads)
+    _configure(monkeypatch, tokens, require_for_read=require_for_read)
 
     with pytest.raises(ValueError, match=error) as raised:
         configured_tokens()
@@ -829,6 +844,6 @@ def test_an_unusable_token_refuses_startup(
 
 @pytest.mark.parametrize("scopes", [[], ["profile"], ["openid", "profile email"]])
 def test_invalid_oidc_scopes_refuse_startup(monkeypatch: pytest.MonkeyPatch, scopes: list[str]) -> None:
-    _configure_oidc(monkeypatch, tokens=[], gate_reads=True, scopes=scopes)
+    _configure_oidc(monkeypatch, tokens=[], require_for_read=True, scopes=scopes)
     with pytest.raises(ValueError, match=r"oidc\.0\.scopes"), TestClient(app):
         pass

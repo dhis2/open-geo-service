@@ -66,7 +66,7 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+Reads stay public by default. A private deployment gates them with `authentication.require_for_read`:
 every public route then needs the authenticated tier, except the few a client needs to find out
 how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
 sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
@@ -78,15 +78,17 @@ proxy in front does not serve one caller's answer to another.
 Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
 sign in and brought back, rather than shown the JSON refusal a client gets.
 
-The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
-Authentication extension (v1.2.0), and mark the links and assets on this instance with
-`auth:refs`. Basic carries the token id and secret, which QGIS, GDAL and STAC Browser can send;
-the middleware already accepts it on every route. STAC Browser offers a sign-in from its own
-`authConfig`, not from the catalog's schemes, and supports only basic among HTTP schemes, so it is
-deployed with `authConfig` set to http basic. The web interface and its map viewer read with
-the session cookie, since their requests are same-origin. Advertising a scheme does not make
-every reader send the credential: until signed links exist (see [Private data](#private-data)), a
-reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet assets.
+The STAC catalog and collections then declare their schemes with the STAC Authentication
+extension (v1.2.0), and mark the links and assets on this instance with `auth:refs`: `bearer`
+always, `basic` when named tokens are configured, and an `openIdConnect` scheme for each OIDC
+provider, pointing at its discovery document. Basic carries the token id and secret, which QGIS,
+GDAL and STAC Browser can send; bearer carries a token's secret or a provider's access token.
+STAC Browser offers a sign-in from its own `authConfig`, not from the catalog's schemes, so it is
+deployed with `authConfig` set to http basic or to the provider's `openIdConnect` scheme. The
+web interface and its map viewer read with the session cookie, since their requests are
+same-origin. Advertising a scheme does not make every reader send the credential: until signed
+links exist (see [Private data](#private-data)), a reader that cannot send a header cannot load
+the Zarr, PMTiles and GeoParquet assets.
 
 ## Where it is enforced
 
@@ -225,8 +227,11 @@ process graph. Records from before owners were recorded, or stored while authent
 off, have none, and only operators reach them. `GET /me` reports the caller.
 
 Pipeline runs, delivery records and dataset updates are reached only with the operator tier, so
-ownership does not limit them. They will record the principal, how it authenticated and, where
-there is one, the acting person, for audit.
+ownership does not limit them. A run records who started it, as `started_by`: the caller of a run
+by hand or a retry, or `service:pipeline-runner` for a dataset update. Only operators see it; a
+run's status stays readable wherever reads are. How it authenticated and, where there is one,
+the acting person will follow for audit. Runs get an owner once people can start them, with
+roles mapped to tiers (CLIM-1481).
 
 The scheduler and the pipeline runner act as service principals, so an unattended delivery is as
 attributable as one started by hand. The credentials Open Geo Service uses for upstream sources and DHIS2

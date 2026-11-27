@@ -101,6 +101,11 @@ def _get_json(url: str) -> Any:
     return response.json()
 
 
+def discovery_url(provider: OidcProvider) -> str:
+    """Where the provider publishes its discovery document (OpenID Connect Discovery 1.0, section 4)."""
+    return f"{provider.issuer.rstrip('/')}/.well-known/openid-configuration"
+
+
 def discovery(provider: OidcProvider) -> dict[str, Any]:
     """The provider's discovery document, fetched once an hour; its issuer must be the configured one."""
     now = time.monotonic()
@@ -108,7 +113,7 @@ def discovery(provider: OidcProvider) -> dict[str, Any]:
         cached = _discovery.get(provider.id)
         if cached is not None and now - cached.fetched < _DISCOVERY_TTL:
             return dict(cached.value)
-    document = _get_json(f"{provider.issuer.rstrip('/')}/.well-known/openid-configuration")
+    document = _get_json(discovery_url(provider))
     if not isinstance(document, dict) or document.get("issuer") != provider.issuer:
         raise TokenRejected(f"the discovery document of {provider.id} names another issuer")
     with _cache_lock:

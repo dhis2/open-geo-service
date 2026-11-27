@@ -101,7 +101,7 @@ class AccessMiddleware:
             return
         principal = OPEN
         settings = access_settings()
-        gate_reads = settings.gate_reads
+        require_for_read = settings.require_for_read
         if settings.on:
             headers = Headers(scope=scope)
             authorization = headers.get("authorization")
@@ -140,7 +140,7 @@ class AccessMiddleware:
                 await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
             needed = Tier.OPERATOR if required is None else required
-            if needed is Tier.PUBLIC and gate_reads and gated(method, path, page=_asks_for_page(scope, path)):
+            if needed is Tier.PUBLIC and require_for_read and gated(method, path, page=_asks_for_page(scope, path)):
                 needed = Tier.AUTHENTICATED
             if principal.tier < needed:
                 tier = needed.name.lower()
@@ -154,7 +154,7 @@ class AccessMiddleware:
                     message = f"{method} {path} needs the {tier} tier, which {principal.id} does not have."
                     await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
-            if gate_reads:
+            if require_for_read:
                 # Each answer is for one caller now, so a shared cache in front must not keep it.
                 send = _private(send)
         scope.setdefault("state", {})["principal"] = principal

@@ -2087,12 +2087,27 @@ def test_a_permanent_submission_failure_is_not_retried_and_can_run_again(
     runner.recover_runs()
     assert store.get_record("rain-to-dhis2").runs[0].submission == "failed"  # type: ignore[union-attr]
     assert openeo.started == []
+    # Who ran it again is recorded for audit; a run started in code, as above, names no one.
+    monkeypatch.setenv("GEOSERVICE_TEST_CAPS", "caps-secret-0123456789abcdef0123456789")
+    caps = {"id": "caps", "token_env": "GEOSERVICE_TEST_CAPS", "tier": "operator"}
+    api_config._cache["authentication"] = {"tokens": [caps]}  # type: ignore[index]
     retried = client.post(
-        f"/pipelines/rain-to-dhis2/runs/{failed.run_id}/retry", headers={"Accept": "application/json"}
+        f"/pipelines/rain-to-dhis2/runs/{failed.run_id}/retry",
+        headers={"Accept": "application/json", "Authorization": "Bearer caps-secret-0123456789abcdef0123456789"},
     )
     assert retried.status_code == 202
     body = retried.json()
     assert body["trigger"] == "retry" and body["retry_of"] == failed.run_id and body["submission"] == "submitted"
+    assert body["started_by"] == "token:caps" and failed.started_by is None
+    # Run status stays a public read, without who started it, in JSON and on the page.
+    run_url = f"/pipelines/rain-to-dhis2/runs/{body['run_id']}"
+    assert client.get(run_url, headers={"Accept": "application/json"}).json()["started_by"] is None
+    assert "by token:caps" not in client.get("/pipelines/rain-to-dhis2", headers={"Accept": "text/html"}).text
+    operator = {"Authorization": "Bearer caps-secret-0123456789abcdef0123456789"}
+    assert (
+        client.get("/pipelines/rain-to-dhis2", headers={"Accept": "text/html", **operator}).text.count("by token:caps")
+        == 1
+    )
     assert (body["start"], body["end"]) == ("2025-01-01", "2025-01-31") and body["job_id"] != failed.job_id
 
 
@@ -2645,6 +2660,7 @@ def test_a_dataset_update_runs_the_same_path_once(
     assert record is not None and len(record.runs) == 1
     run = record.runs[0]
     assert run.trigger == "dataset_update" and run.event_id == "evt-1" and run.mode == "dry_run"
+    assert run.started_by == "service:pipeline-runner"
     assert (run.start, run.end) == ("2025-01-31", "2025-02-28")
     assert run.source["artifact_id"] == "artifact-7" and run.source["datasets"] == ["rain_monthly"]
     assert len(openeo.started) == 1

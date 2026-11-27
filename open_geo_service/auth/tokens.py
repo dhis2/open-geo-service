@@ -150,7 +150,7 @@ class _AuthenticationConfig(BaseModel):
 
     tokens: list[_TokenConfig] = []
     oidc: list[_OidcConfig] = []
-    gate_reads: bool = False
+    require_for_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -159,7 +159,7 @@ class AccessSettings:
 
     tokens: tuple[NamedToken, ...] = ()
     providers: tuple[OidcProvider, ...] = ()
-    gate_reads: bool = False
+    require_for_read: bool = False
 
     @property
     def on(self) -> bool:
@@ -177,10 +177,10 @@ def _settings() -> _AuthenticationConfig | None:
         raise ValueError(f"authentication in GEOSERVICE_CONFIG is invalid: {exc}") from exc
 
 
-def reads_gated() -> bool:
-    """Whether `authentication.gate_reads` asks for a credential on reads too (see `route_table.gated`)."""
+def auth_required_for_read() -> bool:
+    """Whether `authentication.require_for_read` asks for a credential on reads too (see `route_table.gated`)."""
     settings = _settings()
-    return settings is not None and settings.gate_reads
+    return settings is not None and settings.require_for_read
 
 
 def configured_tokens() -> tuple[NamedToken, ...]:
@@ -202,14 +202,14 @@ def access_settings() -> AccessSettings:
     Raises ValueError on an invalid block, an unset variable, a secret shorter than
     MIN_SECRET_LENGTH, or a repeated id or secret, so startup refuses a configuration that would
     leave a client unable to authenticate or two clients indistinguishable. Also raises when
-    `gate_reads` is set without a token or provider, which would leave reads open while seeming
+    `require_for_read` is set without a token or provider, which would leave reads open while seeming
     private.
     """
     settings = _settings()
     if settings is None:
         return AccessSettings()
-    if settings.gate_reads and not (settings.tokens or settings.oidc):
-        raise ValueError("authentication.gate_reads needs a token in authentication.tokens or a provider in oidc")
+    if settings.require_for_read and not (settings.tokens or settings.oidc):
+        raise ValueError("authentication.require_for_read needs a token in authentication.tokens or a provider in oidc")
     tokens: list[NamedToken] = []
     for index, item in enumerate(settings.tokens):
         where = f"authentication.tokens[{index}] ({item.id})"
@@ -223,7 +223,7 @@ def access_settings() -> AccessSettings:
         if any(hmac.compare_digest(token.secret, secret) for token in tokens):
             raise ValueError(f"{where}: the secret in {item.token_env} is used by an earlier token")
         tokens.append(NamedToken(id=item.id, tier=Tier[item.tier.upper()], secret=secret))
-    return AccessSettings(tuple(tokens), _providers(settings.oidc), settings.gate_reads)
+    return AccessSettings(tuple(tokens), _providers(settings.oidc), settings.require_for_read)
 
 
 def _providers(items: list[_OidcConfig]) -> tuple[OidcProvider, ...]:
