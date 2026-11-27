@@ -183,7 +183,7 @@ class TestIcechunkDetectionEndToEnd:
 
         store = self._write(tmp_path, 2100, 2400)
         repo = icechunk.Repository.open(icechunk.local_filesystem_storage(store))
-        root = zarr.open_group(repo.readonly_session("main").store, mode="r")
+        root = zarr.open_group(repo.readonly_session("ingest").store, mode="r")
 
         assert attributes_declare_multiscales(dict(root.attrs)) is True
         assert attributes_declare_multiscales(dict(root["0"].attrs)) is False

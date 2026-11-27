@@ -182,7 +182,7 @@ All datasets are stored as GeoZarr. Key properties:
 - Chunk shape tuned per dataset to balance three access patterns: time series queries, polygon aggregation, and browser tile rendering.
 - Blosc/Zstd compression.
 
-Managed datasets are written through Icechunk, which opens every store on the local filesystem — the only backend implemented today. Icechunk uses Apache Arrow's `object_store` rather than fsspec, so an alternative backend is a constructor change (`s3_storage`, `gcs_storage`) rather than a path rewrite. Making the backend a per-deployment configuration choice is planned, targeting:
+The local filesystem, the instance's data folder, is the only backend implemented today. Everything is stored through one module, `storage.py`: every Icechunk repository is opened through its resolver, every record, data file and derived file is written through its object interface, and Parquet files are read through its filesystem. A write to the local disk is flushed before it returns. The object interface is [obstore](https://developmentseed.org/obstore/), the Python binding of the Rust `object_store` that Icechunk also uses, so an object-storage backend is a change in that one module, chosen by configuration. Nothing relies on renaming a file, which object storage does not have. The backends targeted:
 
 | Backend                  | Notes                                                                                                                                                                      |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -249,7 +249,7 @@ The Open Geo Service is distributed as a Docker image and can be deployed in sev
 - **Country-hosted** — deployed within a country's own infrastructure, with local storage or the nearest available regional cloud provider (AWS af-south-1 for Africa, AWS ap-southeast-1 for Southeast Asia).
 - **Sovereign** — deployed on local or research network infrastructure. Data never leaves national borders. Suitable for countries with data residency requirements.
 
-The storage backend is configured entirely via environment variables — no code changes are required to switch between backends. This ensures the same Docker image can be deployed across all contexts.
+The storage backend is meant to be configured, so the same Docker image can be deployed across all contexts. Today every instance stores its data on the local filesystem.
 
 ---
 

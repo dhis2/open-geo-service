@@ -21,22 +21,33 @@
       <main id="content">
         <div class="page-title"><h2>Sign in</h2></div>
         <div class="panel">
-          <p>Sign in with an API token from this instance's configuration. Reading needs no sign-in; ingesting, syncing and pipelines need an operator token.</p>
+          <p>{% if providers %}Sign in with your account{% if tokens %}, or with an API token from this instance's configuration{% endif %}.{% else %}Sign in with an API token from this instance's configuration.{% endif %} Ingesting, syncing and pipelines need an operator's sign-in.</p>
           {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
           {% if form %}
           {# Shown only in a secure context (HTTPS or this machine), the rule browsers apply to the
              Secure cookie. A proxy can make plain HTTP look local to the server, never to the browser. #}
           <div class="notice error" role="alert" id="needs-https" hidden>{{ needs_https }}</div>
-          <form method="post" action="{{ mount }}/sign-in" class="form-grid" id="sign-in" hidden>
-            <input type="hidden" name="next" value="{{ next_path }}" />
-            <div class="field">
-              <label for="token">Token</label>
-              <input id="token" name="token" type="password" autocomplete="current-password" required autofocus />
-            </div>
+          <div id="sign-in" hidden>
+            {% if providers %}
             <div class="form-actions">
-              <button type="submit" class="primary">Sign in</button>
+              {% for provider in providers %}
+              <a class="button-link primary" href="{{ mount }}/sign-in/oidc/{{ provider.id }}?next={{ next_path | urlencode }}">Sign in with {{ provider.title }}</a>
+              {% endfor %}
             </div>
-          </form>
+            {% endif %}
+            {% if tokens %}
+            <form method="post" action="{{ mount }}/sign-in" class="form-grid">
+              <input type="hidden" name="next" value="{{ next_path }}" />
+              <div class="field">
+                <label for="token">Token</label>
+                <input id="token" name="token" type="password" autocomplete="current-password" required{% if not providers %} autofocus{% endif %} />
+              </div>
+              <div class="form-actions">
+                <button type="submit"{% if not providers %} class="primary"{% endif %}>Sign in with a token</button>
+              </div>
+            </form>
+            {% endif %}
+          </div>
           <script>
             document.getElementById(window.isSecureContext ? "sign-in" : "needs-https").hidden = false;
           </script>

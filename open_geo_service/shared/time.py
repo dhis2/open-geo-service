@@ -124,14 +124,14 @@ def resolve_iso_period_step(dataset: dict[str, Any]) -> str | None:
         return None
     resolution_str = str(resolution)
     try:
-        _iso_step_to_approx_hours(resolution_str)
+        iso_step_to_approx_hours(resolution_str)
     except ValueError:
         logger.warning("Invalid ISO 8601 duration in extents.temporal.resolution: %r", resolution_str)
         return None
     return resolution_str
 
 
-def _iso_step_to_approx_hours(step: str) -> float:
+def iso_step_to_approx_hours(step: str) -> float:
     """Return the approximate duration in hours for an ISO 8601 duration string.
 
     Months and years use calendar averages (30.4375 days/month, 365.25 days/year).
@@ -156,7 +156,7 @@ def time_chunk_for_iso_step(step: str) -> int:
     steps, and one year for weekly and coarser steps.  This keeps individual chunk files
     at a manageable size while covering a natural analysis window in one read.
     """
-    hours = _iso_step_to_approx_hours(step)
+    hours = iso_step_to_approx_hours(step)
     if hours < 24:
         return max(1, round(24 * 7 / hours))  # ~1 week
     if hours < 24 * 7:

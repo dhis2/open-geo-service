@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
 from open_geo_service.shared import layout
+from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.classes import class_colors, classification_from_template
 from open_geo_service.shared.display import display_midpoint
 
@@ -366,8 +368,8 @@ def write_dataset_thumbnail(
 
         # Closed as soon as the pixels are in hand, so a sync run does not leave Icechunk and
         # Zarr backend resources open behind every dataset it touches.
-        # `main`: the writer renders what it just committed, before publishing it.
-        with closing(open_icechunk_dataset(store_path, branch="main")) as ds:
+        # The write branch: the writer renders what it just committed, before publishing it.
+        with closing(open_icechunk_dataset(store_path, branch=WRITE_BRANCH)) as ds:
             variable = str(dataset.get("variable") or "")
             if variable not in ds.data_vars:
                 variable = str(next(iter(ds.data_vars), ""))
@@ -423,7 +425,7 @@ def _publish_thumbnail(kind: layout.Kind, dataset_id: str, render: Callable[[Pat
     pending = layout.staging_dir() / f"{dataset_id}.{os.getpid()}.tmp.png"
     try:
         render(pending)
-        layout.move_into_place(pending, published)
+        storage.write_file(published, pending)
     finally:
         pending.unlink(missing_ok=True)
     return published
@@ -524,7 +526,7 @@ def write_feature_thumbnail(collection_path: str | Path, collection_id: str) -> 
     try:
         import geopandas as gpd
 
-        frame = gpd.read_parquet(collection_path)
+        frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
         frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty]
         if frame.empty:
             logger.warning("Feature collection '%s' has no geometry to draw; no thumbnail", collection_id)

@@ -40,8 +40,8 @@ def _box(code: str, xmin: float, ymin: float, xmax: float, ymax: float) -> dict[
 
 @pytest.fixture(autouse=True)
 def isolated_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
+    root = tmp_path / "catalog" / "vectors"
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -130,7 +130,7 @@ def test_the_collection_document_describes_a_vector_cube(client: TestClient, reg
     # The openEO copy names itself, and its relative links are resolved against the STAC document.
     links = {link["rel"]: link["href"] for link in collection["links"]}
     assert links["self"].endswith("/collections/regions")
-    assert links["describedby"].endswith("/stac/regions/README.md")
+    assert links["describedby"].endswith("/stac/vectors/regions/README.md")
     assert all("/collection.json" not in link["href"] for link in collection["links"])
 
 

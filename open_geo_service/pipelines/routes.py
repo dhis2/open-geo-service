@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from open_geo_service import config as api_config
+from open_geo_service.auth.middleware import principal_of
 from open_geo_service.pipelines import forms, runner, service, store, views
 from open_geo_service.pipelines.schemas import (
     DryRunResult,
@@ -519,6 +520,11 @@ async def dry_run_pipeline(request: Request, pipeline_id: str) -> Response:
     return _done(request, f"/pipelines/{pipeline_id}#dry-run", lambda: json.loads(result.model_dump_json()))
 
 
+def _caller(request: Request) -> str | None:
+    """Who starts a run from this request, recorded on it for audit."""
+    return principal_of(request).owner_id
+
+
 def _start(pipeline_id: str, context: runner.RunContext) -> Any:
     try:
         return runner.run_pipeline(pipeline_id, context)
@@ -540,7 +546,8 @@ async def run_pipeline(request: Request, pipeline_id: str) -> Response:
     _require_writable()
     _record_or_404(pipeline_id)
     body = await _interval(request, RunRequest)
-    run = _start(pipeline_id, runner.RunContext(start=body.start, end=body.end, mode=body.mode))
+    context = runner.RunContext(start=body.start, end=body.end, mode=body.mode, started_by=_caller(request))
+    run = _start(pipeline_id, context)
     return _started(request, pipeline_id, run)
 
 
@@ -571,7 +578,12 @@ def retry_pipeline_run(request: Request, pipeline_id: str, run_id: str) -> Respo
     if previous is None:
         raise HTTPException(status_code=404, detail=f"pipeline '{pipeline_id}' has no run '{run_id}'")
     context = runner.RunContext(
-        start=previous.start, end=previous.end, trigger="retry", mode=previous.mode, retry_of=previous.run_id
+        start=previous.start,
+        end=previous.end,
+        trigger="retry",
+        started_by=_caller(request),
+        mode=previous.mode,
+        retry_of=previous.run_id,
     )
     run = _start(pipeline_id, context)
     return _started(request, pipeline_id, run)

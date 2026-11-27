@@ -147,7 +147,7 @@ class ArtifactPublication(BaseModel):
     snapshot_id: str | None = Field(
         default=None,
         description=(
-            "For a published Icechunk raster, the snapshot of its `published` branch the record "
+            "For a published Icechunk raster, the snapshot of its `main` branch the record "
             "describes. A writer started after a crash describes the branch again when they differ."
         ),
     )
@@ -656,8 +656,9 @@ class CreateIngestionRequest(BaseModel):
         description=(
             "Start period to ingest. Required for historical datasets. May be omitted for a "
             "dataset declaring 'temporal_direction: future' (e.g. a forecast), where it means "
-            "'from now' — a fixed date would be stale by the next day — and for a climatology, "
-            "where it means the whole reference period the template declares."
+            "'from now' — a fixed date would be stale by the next day — for a climatology, "
+            "where it means the whole reference period the template declares, and for a table, "
+            "where it means from the first period its source has."
         ),
     )
     end: str | None = Field(

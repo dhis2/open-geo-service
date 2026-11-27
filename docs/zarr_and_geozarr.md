@@ -49,7 +49,7 @@ The Open Geo Service targets the same access pattern at country scale for arbitr
 
 ## Store layout on disk
 
-Each managed dataset has exactly one store on disk, under `{data_dir}/rasters/{dataset_id}.icechunk`. All stores use the [Icechunk](https://icechunk.io) versioned Zarr v3 format.
+Each managed dataset has exactly one store on disk, `{data_dir}/catalog/rasters/{dataset_id}/{dataset_id}.icechunk` (see [Data folder layout](data_folder_layout.md)). All stores use the [Icechunk](https://icechunk.io) versioned Zarr v3 format.
 
 Inside the store, the layout is either:
 
@@ -280,16 +280,16 @@ SDK usage:
 import icechunk, xarray as xr
 
 repo = icechunk.Repository.open(icechunk.http_storage("https://host/icechunk/era5land_precipitation_daily"))
-ds = xr.open_zarr(repo.readonly_session("published").store, zarr_format=3, consolidated=False)
+ds = xr.open_zarr(repo.readonly_session("main").store, zarr_format=3, consolidated=False)
 ```
 
-Open the `published` branch: writers commit to `main`, and a dataset's readers see a version only
+`main` holds the published version: writers commit to the `ingest` branch, and a dataset's readers see a version only
 once it is published (see [the managed data API guide](managed_data_api_guide.md), under versions and rollback).
 
-GDAL's Icechunk driver opens the repository through its `repo` file, since over HTTP it cannot tell that a URL is a directory without a listing. It opens `main` unless given a branch:
+GDAL's Icechunk driver opens the repository through its `repo` file, since over HTTP it cannot tell that a URL is a directory without a listing., and opens `main`:
 
 ```bash
-gdalinfo "ICECHUNK:/vsicurl/https://host/icechunk/era5land_precipitation_daily/repo?branch=published"
+gdalinfo "ICECHUNK:/vsicurl/https://host/icechunk/era5land_precipitation_daily/repo"
 ```
 
 Both endpoints are advertised as assets in the STAC collection so clients can choose the appropriate one. Use `/zarr` for web maps and standard xarray workflows; use `/icechunk` when you need versioning or SDK-level access.

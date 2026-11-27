@@ -691,7 +691,7 @@ curl -s -X POST http://127.0.0.1:9000/ingestions \
 Verify it appears in the STAC catalog:
 
 ```bash
-curl -s http://127.0.0.1:9000/stac/catalog.json | jq '.links[] | select(.rel == "child")'
+curl -s http://127.0.0.1:9000/stac/rasters/catalog.json | jq '.links[] | select(.rel == "child")'
 ```
 
 ## Contributing a data source

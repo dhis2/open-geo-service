@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import AbstractContextManager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -37,6 +37,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pds
 
+from open_geo_service import storage
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
     ArtifactFormat,
@@ -75,14 +76,16 @@ def schema_of(record: ArtifactRecord | None) -> TableSchema:
 def unit_of(record: ArtifactRecord, column: str) -> str | None:
     """A column's unit, as the STAC metadata, README and page show it.
 
-    For a value column in a schema with a unit column, the one its rows were written in; else the
-    one the schema declares.
+    The one the schema declares for the column; else, for a value column in a schema with a unit
+    column, the one its rows were written in.
     """
     declared = schema_of(record)
+    described = declared.column(column)
+    if described is not None and described.unit:
+        return described.unit
     if column in declared.values and declared.represented_by("unit"):
         return record.units
-    described = declared.column(column)
-    return described.unit if described is not None else None
+    return None
 
 
 def _dataset_lock(dataset_id: str) -> AbstractContextManager[None]:
@@ -107,12 +110,15 @@ def write_rows(
     written_at: datetime | None = None,
     provenance: ArtifactProvenance | None = None,
     publish: bool = True,
+    complete_periods: Collection[str] = (),
 ) -> ArtifactRecord:
     """Check *rows* with `check_rows`, merge them into the dataset's file and register the dataset.
 
     Raises ValueError before anything is written when any row is refused. *provenance* is how
     the rows were produced, for computed rows; the record keeps the latest write's. *publish*
     applies to a new dataset only: a later write keeps the dataset's publication, whatever it is.
+    *complete_periods*, period labels such as `2026-01`, are periods *rows* hold in full: a stored
+    row of one of them that *rows* lack is removed.
     """
     stamp = _utc(written_at or datetime.now(UTC), "written_at")
 
@@ -132,7 +138,7 @@ def write_rows(
         existing = latest_record(dataset_id)
         declared = declared_schema(json.loads(table.schema.metadata[SCHEMA_KEY]))
         period_type = period_type or (existing.period_type if existing else None)
-        merged = _merged(_read_file(existing, declared), table, declared, collection_id, period_type)
+        merged = _merged(_read_file(existing, declared), table, declared, collection_id, period_type, complete_periods)
         written = _write_file(_dataset_root(dataset_id), merged, stamp)
         try:
             unit_column = declared.represented_by("unit")
@@ -165,7 +171,7 @@ def write_rows(
                     raise
         except BaseException:
             # No record names the file, so no reader sees it; remove it rather than leave it.
-            written.unlink(missing_ok=True)
+            storage.remove(written)
             raise
         prune_superseded(
             _dataset_root(dataset_id).glob("*.parquet"),
@@ -328,7 +334,9 @@ def read_rows(
     flt = None
     for condition in conditions:
         flt = condition if flt is None else flt & condition
-    dataset = pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet")
+    dataset = pds.dataset(
+        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
+    )
     return dataset.to_table(filter=flt).sort_by(_order(declared))
 
 
@@ -362,7 +370,7 @@ def summarize(record: ArtifactRecord) -> FileSummary:
     collection_ids: set[str] = set()
     periods: list[date] = []
     for path in record.asset_paths:
-        metadata = pq.ParquetFile(path).metadata
+        metadata = pq.ParquetFile(path, filesystem=storage.parquet_filesystem()).metadata
         row_count += metadata.num_rows
         if period_column:
             column = metadata.schema.names.index(period_column)
@@ -371,7 +379,12 @@ def summarize(record: ArtifactRecord) -> FileSummary:
                 if statistics is not None and statistics.has_min_max:
                     periods += [statistics.min, statistics.max]
         if collection_column:
-            ids = pq.read_table(path, columns=[collection_column], read_dictionary=[collection_column])
+            ids = pq.read_table(
+                path,
+                columns=[collection_column],
+                read_dictionary=[collection_column],
+                filesystem=storage.parquet_filesystem(),
+            )
             collection_ids.update(
                 str(value) for chunk in ids.column(collection_column).chunks for value in chunk.dictionary.to_pylist()
             )
@@ -409,7 +422,9 @@ def latest_values(record: ArtifactRecord, limit: int) -> LatestValues | None:
         return LatestValues(declared.arrow.empty_table(), 0, [])
     name = declared.represented_by("feature_name")
     by_name = [*([(name, "ascending")] if name else []), (feature, "ascending")]
-    dataset = pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet")
+    dataset = pds.dataset(
+        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
+    )
     keys = [collection, feature]
     # Aggregated under a name no declared column has, so no two columns below share a name.
     newest_input = "_newest"
@@ -454,20 +469,36 @@ def _read_file(record: ArtifactRecord | None, declared: TableSchema) -> pa.Table
     """The rows the dataset's file holds now, or None for a new dataset."""
     if record is None or not record.asset_paths:
         return None
-    return pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet").to_table()
+    files = storage.parquet_filesystem()
+    return pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet", filesystem=files).to_table()
 
 
 def _merged(
-    existing: pa.Table | None, new: pa.Table, declared: TableSchema, collection_id: str | None, period_type: str | None
+    existing: pa.Table | None,
+    new: pa.Table,
+    declared: TableSchema,
+    collection_id: str | None,
+    period_type: str | None,
+    complete_periods: Collection[str] = (),
 ) -> pa.Table:
     """The dataset's rows with *new* merged in: one row per key, the written one where they meet.
 
     A written row equal to the stored one in everything but `written_at` keeps the stored row, so
     sending the same values again changes nothing. With a column representing `collection_version`, when every
     written row names one version of the collection, the collection's rows of any other version
-    are dropped, so values for two boundary versions never mix.
+    are dropped, so values for two boundary versions never mix. A stored row of one of
+    *complete_periods* that *new* lacks is dropped.
     """
     stored = existing.to_pylist() if existing is not None else []
+    period_column = declared.represented_by("period_start")
+    if complete_periods and period_column:
+        written = {tuple(row[name] for name in declared.key) for row in new.to_pylist()}
+        stored = [
+            row
+            for row in stored
+            if period_label(row[period_column], period_type) not in complete_periods
+            or tuple(row[name] for name in declared.key) in written
+        ]
     version_column, collection_column = (
         declared.represented_by("collection_version"),
         declared.represented_by("collection_id"),
@@ -499,7 +530,7 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
     staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
     try:
         pq.write_table(table, staging, compression=PARQUET_COMPRESSION)
-        layout.move_into_place(staging, path)
+        storage.write_file(path, staging)
     finally:
         staging.unlink(missing_ok=True)
     return path

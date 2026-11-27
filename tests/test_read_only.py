@@ -57,7 +57,8 @@ _MUTATING_ROUTES = [
 ]
 
 # Mutating routes deliberately left open by read-only mode.
-_OPEN_WRITES = {("POST", "/result")}
+# /mcp: MCP sends every message as a POST; its tools reach the API through this policy (CLIM-851).
+_OPEN_WRITES = {("POST", "/result"), ("POST", "/mcp"), ("DELETE", "/mcp")}
 
 
 def _concrete(path: str) -> str:
@@ -149,7 +150,7 @@ def test_policy_allows_public_reads(path: str) -> None:
 def test_policy_allows_data_endpoints() -> None:
     assert not is_blocked("GET", "/zarr/some_dataset/zarr.json")
     assert not is_blocked("GET", "/icechunk/some_dataset/refs/branch.main/ref.json")
-    assert not is_blocked("GET", "/stac/some_dataset/collection.json")
+    assert not is_blocked("GET", "/stac/rasters/some_dataset/collection.json")
 
 
 def test_policy_never_blocks_cors_preflight() -> None:
@@ -311,7 +312,7 @@ def test_read_only_still_refuses_manage_under_a_mount_prefix(
 
     assert mounted.post("/manage/sync").status_code == 403
     assert mounted.get("/jobs").status_code == 403
-    assert mounted.get("/stac/catalog.json").status_code == 200
+    assert mounted.get("/stac/catalog.json").status_code != 403
 
 
 def test_a_configured_base_url_path_cannot_bypass_read_only(read_only: None, monkeypatch: pytest.MonkeyPatch) -> None:

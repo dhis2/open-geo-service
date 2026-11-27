@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import urllib.parse
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -22,7 +23,8 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
-from open_geo_service.auth.tokens import reads_gated
+from open_geo_service.auth.oidc import discovery_url
+from open_geo_service.auth.tokens import access_settings, auth_required_for_read
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset, open_zarr_dataset
 from open_geo_service.data_manager.services.utils import get_time_dim, get_x_y_dims
 from open_geo_service.data_registry.services import datasets as registry_datasets
@@ -59,9 +61,27 @@ MARKDOWN_MEDIA_TYPE = "text/markdown"
 CATALOG_PATH = "/stac/catalog.json"
 
 
-def collection_path(dataset_id: str) -> str:
+def collection_id(kind: layout.Kind, dataset_id: str) -> str:
+    """A collection's STAC id: its path from the catalog root, `{kind}/{id}`, as Portolan nests it."""
+    return layout.dataset_key(kind, dataset_id)
+
+
+def collection_path(kind: layout.Kind, dataset_id: str) -> str:
     """Where a collection's STAC document is served: `collection.json` in its own directory."""
-    return f"/stac/{path_segment(dataset_id)}/collection.json"
+    return f"/stac/{kind.value}/{path_segment(dataset_id)}/collection.json"
+
+
+def subcatalog_path(kind: layout.Kind) -> str:
+    """Where the sub-catalog of one kind of dataset is served."""
+    return f"/stac/{kind.value}/catalog.json"
+
+
+SUBCATALOGS: dict[layout.Kind, tuple[str, str]] = {
+    layout.Kind.RASTER: ("Rasters", "Gridded datasets, each a GeoZarr store."),
+    layout.Kind.VECTOR: ("Vector datasets", "Feature collections, each a GeoParquet file with PMTiles vector tiles."),
+    layout.Kind.TABLE: ("Tables", "Values per feature and period, each a Parquet file."),
+}
+"""The title and description of each kind's sub-catalog."""
 
 
 def file_size(path: Path) -> dict[str, object]:
@@ -205,12 +225,14 @@ def build_catalog(request: Request) -> dict[str, object]:
         {"rel": "agents", "href": "./AGENTS.md", "type": MARKDOWN_MEDIA_TYPE},
     ]
     artifacts = _eligible_artifacts_by_dataset()
-    for dataset_id, artifact in artifacts.items():
+    # One sub-catalog per kind that has a published collection, as Portolan groups a catalog's
+    # children (PORTO-CORE-078); an empty one would be a catalog with nothing in it.
+    for kind in published_kinds(artifacts):
         links.append(
             {
                 "rel": "child",
-                "href": absolute_url(request, collection_path(dataset_id)),
-                "title": artifact.dataset_name,
+                "href": absolute_url(request, subcatalog_path(kind)),
+                "title": SUBCATALOGS[kind][0],
                 "type": "application/json",
             }
         )
@@ -222,15 +244,75 @@ def build_catalog(request: Request) -> dict[str, object]:
         # The instance's own name, as in the web interface; "Open Geo Service" when unset.
         "title": _get_catalog_title(),
         "description": CATALOG_DESCRIPTION,
-        # Changed by every collection's sync, so the latest of theirs. A catalog whose collections
-        # are all mirrors is a mirror too, and Portolan requires it there (PORTO-CORE-057).
-        **({"updated": _stac_datetime(max(a.created_at for a in artifacts.values()))} if artifacts else {}),
+        **_updated(artifacts.values()),
         "links": links,
     }
     return _declare_authentication(catalog, request)
 
 
-def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
+def published_of_kind_or_404(kind: layout.Kind) -> dict[str, ArtifactRecord]:
+    """The published datasets of one kind, by id, or 404 when there are none: it has no sub-catalog."""
+    artifacts = {
+        dataset_id: artifact
+        for dataset_id, artifact in _eligible_artifacts_by_dataset().items()
+        if layout.kind_of(artifact.format) is kind
+    }
+    if not artifacts:
+        raise HTTPException(status_code=404, detail=f"No published collections in '{kind.value}'")
+    return artifacts
+
+
+def build_subcatalog(kind: layout.Kind, request: Request) -> dict[str, object]:
+    """Build the sub-catalog of one kind of dataset, or 404 when no collection of that kind is published."""
+    artifacts = published_of_kind_or_404(kind)
+    catalog_href = absolute_url(request, CATALOG_PATH)
+    links = [
+        {"rel": "self", "href": self_url(request), "type": "application/json"},
+        {"rel": "root", "href": catalog_href, "type": "application/json"},
+        {"rel": "parent", "href": catalog_href, "type": "application/json"},
+        *_document_links(),
+    ]
+    for dataset_id, artifact in artifacts.items():
+        links.append(
+            {
+                "rel": "child",
+                "href": absolute_url(request, collection_path(kind, dataset_id)),
+                "title": artifact.dataset_name,
+                "type": "application/json",
+            }
+        )
+    title, description = SUBCATALOGS[kind]
+    catalog: dict[str, Any] = {
+        "stac_version": STAC_VERSION,
+        "stac_extensions": [PORTOLAN_SCHEMA],
+        "type": "Catalog",
+        # A nested catalog's id is its path from the root, as a nested collection's is.
+        "id": kind.value,
+        "title": title,
+        "description": description,
+        **_updated(artifacts.values()),
+        "links": links,
+    }
+    return _declare_authentication(catalog, request)
+
+
+def published_kinds(artifacts: dict[str, ArtifactRecord]) -> list[layout.Kind]:
+    """The kinds with at least one of *artifacts*, in the order of `layout.Kind`."""
+    present = {layout.kind_of(artifact.format) for artifact in artifacts.values()}
+    return [kind for kind in layout.Kind if kind in present]
+
+
+def _updated(artifacts: Iterable[ArtifactRecord]) -> dict[str, str]:
+    """A catalog's `updated`: the latest of its collections'.
+
+    A catalog whose collections are all mirrors is a mirror too, and Portolan requires it there
+    (PORTO-CORE-057).
+    """
+    times = [artifact.created_at for artifact in artifacts]
+    return {"updated": _stac_datetime(max(times))} if times else {}
+
+
+def build_collection(kind: layout.Kind, dataset_id: str, request: Request) -> dict[str, object]:
     """Build one STAC collection document, in the representation its format calls for.
 
     One catalogue, two representations. A raster is a datacube — `cube:dimensions`,
@@ -240,17 +322,27 @@ def build_collection(dataset_id: str, request: Request) -> dict[str, object]:
     below that, which is why this dispatches to two builders rather than threading conditionals
     through one. A feature collection declares no datacube or Zarr extension at all.
     """
-    artifact = _eligible_artifacts_by_dataset().get(dataset_id)
-    if artifact is None:
-        raise HTTPException(status_code=404, detail=f"STAC collection '{dataset_id}' not found")
+    artifact = published_artifact(kind, dataset_id)
     return build_collection_for_artifact(dataset_id, artifact, request)
 
 
-def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
+def published_artifact(kind: layout.Kind, dataset_id: str) -> ArtifactRecord:
+    """The published record of *dataset_id*, or 404 unless it is one of *kind*."""
+    artifact = _eligible_artifacts_by_dataset().get(dataset_id)
+    if artifact is None or layout.kind_of(artifact.format) is not kind:
+        raise HTTPException(status_code=404, detail=f"STAC collection '{kind.value}/{dataset_id}' not found")
+    return artifact
+
+
+def build_collection_for_artifact(
+    dataset_id: str, artifact: ArtifactRecord, request: Request, *, bare_id: bool = False
+) -> dict[str, object]:
     """Build the collection document from a record the caller already holds.
 
     For a caller that selected the record itself, as openEO does: looking it up again could
     return a newer record after a concurrent refresh, and the document would then mix the two.
+    The id is the collection's path in the catalog, `{kind}/{id}`; *bare_id* gives the dataset id
+    alone, for openEO, whose `/collections/{id}` has no room for the kind.
     """
     if artifact.format == ArtifactFormat.GEOPARQUET:
         collection = _build_feature_collection(dataset_id, artifact, request)
@@ -258,19 +350,57 @@ def build_collection_for_artifact(dataset_id: str, artifact: ArtifactRecord, req
         collection = _build_table_collection(dataset_id, artifact, request)
     else:
         collection = _build_raster_collection(dataset_id, artifact, request)
+    collection["id"] = dataset_id if bare_id else collection_id(layout.kind_of(artifact.format), dataset_id)
     return _declare_authentication(collection, request)
 
 
-# Basic carries a token id and secret, which STAC Browser, QGIS and GDAL can send; bearer
-# carries the secret, as API clients send it. Both name the same tokens (see docs/authentication.md).
-_AUTH_SCHEMES: dict[str, dict[str, str]] = {
-    "basic": {
-        "type": "http",
-        "scheme": "basic",
-        "description": "An API token's id as the username and its secret as the password.",
-    },
-    "bearer": {"type": "http", "scheme": "bearer", "description": "An API token's secret."},
-}
+def _derived_from(artifact: ArtifactRecord, request: Request) -> list[dict[str, str]]:
+    """A `derived_from` link to each published collection *artifact* was computed from.
+
+    An input that is not published has no collection to link to, so it is left out.
+    """
+    inputs = ingestion_services.recorded_inputs(artifact)
+    if not inputs:
+        return []  # most collections, and the records need not be read for them
+    published = _eligible_artifacts_by_dataset()
+    links: list[dict[str, str]] = []
+    for recorded in inputs:
+        input_id = str(recorded["collection_id"])
+        source = published.get(input_id)
+        if source is not None:
+            href = absolute_url(request, collection_path(layout.kind_of(source.format), input_id))
+            links.append({"rel": "derived_from", "href": href, "type": "application/json", "title": input_id})
+    return links
+
+
+def _auth_schemes() -> dict[str, dict[str, str]]:
+    """How a client signs in to this instance, as STAC Authentication scheme objects by name.
+
+    Basic carries a named token's id and secret, which STAC Browser, QGIS and GDAL can send.
+    Bearer carries a token's secret or a provider's access token, as API clients send it. Each
+    OIDC provider is a scheme of its own, discovered from its issuer (see docs/authentication.md).
+    """
+    settings = access_settings()
+    carried = [
+        *(["an API token's secret"] if settings.tokens else []),
+        *(["an access token from one of the OpenID Connect providers listed"] if settings.providers else []),
+    ]
+    bearer = ", or ".join(carried)
+    bearer = f"{bearer[0].upper()}{bearer[1:]}."
+    schemes: dict[str, dict[str, str]] = {"bearer": {"type": "http", "scheme": "bearer", "description": bearer}}
+    if settings.tokens:
+        schemes["basic"] = {
+            "type": "http",
+            "scheme": "basic",
+            "description": "An API token's id as the username and its secret as the password.",
+        }
+    for provider in settings.providers:
+        schemes[f"oidc-{provider.id}"] = {
+            "type": "openIdConnect",
+            "openIdConnectUrl": discovery_url(provider),
+            "description": f"Sign in with {provider.title}.",
+        }
+    return dict(sorted(schemes.items()))
 
 
 def _declare_authentication(document: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -279,10 +409,11 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
     Only links and assets on this instance are marked; a source page or licence elsewhere is
     not. With reads public the document is returned unchanged.
     """
-    if not reads_gated():
+    if not auth_required_for_read():
         return document
     base = absolute_base(request)
-    refs = sorted(_AUTH_SCHEMES)
+    schemes = _auth_schemes()
+    refs = list(schemes)
 
     def mark(target: dict[str, Any]) -> dict[str, Any]:
         href = str(target.get("href", ""))
@@ -290,7 +421,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
         here = href.startswith(f"{base}/") or not (split.scheme or split.netloc)
         return {**target, "auth:refs": refs} if here else target
 
-    declared = {**document, "auth:schemes": _AUTH_SCHEMES}
+    declared = {**document, "auth:schemes": schemes}
     declared["stac_extensions"] = sorted({*document.get("stac_extensions", []), AUTHENTICATION_EXTENSION})
     declared["links"] = [mark(link) for link in document.get("links", [])]
     if "assets" in document:
@@ -301,7 +432,7 @@ def _declare_authentication(document: dict[str, Any], request: Request) -> dict[
 def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request: Request) -> dict[str, object]:
     """Build the STAC collection for a Zarr- or Icechunk-backed datacube."""
     source_dataset = registry_datasets.get_dataset(artifact.dataset_id) or {}
-    collection_href = absolute_url(request, collection_path(dataset_id))
+    collection_href = absolute_url(request, collection_path(layout.Kind.RASTER, dataset_id))
     catalog_href = absolute_url(request, CATALOG_PATH)
     dataset_href = absolute_url(request, f"/datasets/{path_segment(dataset_id)}")
     zarr_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
@@ -316,6 +447,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
         artifact=artifact,
         collection_href=collection_href,
         catalog_href=catalog_href,
+        parent_href=absolute_url(request, subcatalog_path(layout.Kind.RASTER)),
         dataset_href=dataset_href,
         zarr_href=zarr_href,
         source_dataset=source_dataset,
@@ -326,7 +458,6 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     period_type = source_dataset.get("period_type")
 
     collection_payload = _build_collection_with_xstac(artifact=artifact, template=template, period_type=period_type)
-    collection_payload["id"] = dataset_id
     collection_payload["type"] = "Collection"
     collection_payload["stac_version"] = STAC_VERSION
     collection_payload["description"] = template.description
@@ -350,16 +481,7 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
                 "title": licence.name or licence.identifier or "Licence",
             }
         )
-    for recorded in ingestion_services.recorded_inputs(artifact):
-        input_id = str(recorded["collection_id"])
-        template_links.append(
-            {
-                "rel": "derived_from",
-                "href": absolute_url(request, collection_path(input_id)),
-                "type": "application/json",
-                "title": input_id,
-            }
-        )
+    template_links.extend(_derived_from(artifact, request))
     # As for a feature collection: the original source this collection mirrors, and when the copy
     # was last synced from it. A workflow output names the sources of the data it was made from.
     for source_url in _source_pages(artifact.dataset_id, source_dataset):
@@ -410,9 +532,8 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
             "title": "Icechunk store (native SDK access)",
             "description": (
                 "The same data as an Icechunk repository, for the Icechunk libraries in Python and "
-                "JavaScript, with the dataset's version history. Open the published branch; main can hold "
-                "a sync in progress. GDAL opens it through its repo file: "
-                "ICECHUNK:/vsicurl/<href>repo?branch=published."
+                "JavaScript, with the dataset's version history. Its main branch is the published version. "
+                "GDAL opens it through its repo file: ICECHUNK:/vsicurl/<href>repo."
             ),
             "roles": ["data"],
             "xarray:open_kwargs": {"zarr_format": 3, "consolidated": False, **data_group},
@@ -437,6 +558,11 @@ def _build_raster_collection(dataset_id: str, artifact: ArtifactRecord, request:
     )
     _remove_helper_variables(collection_payload)
     _add_band_statistics(collection_payload, artifact)
+    # The Icechunk repository holds the same arrays, and Portolan reads `nodata` from each data
+    # asset's own bands (PORTO-ZARR-018).
+    bands = collection_payload["assets"]["zarr"].get("bands")
+    if "icechunk" in collection_payload["assets"] and bands is not None:
+        collection_payload["assets"]["icechunk"]["bands"] = deepcopy(bands)
     _round_spatial_steps(collection_payload)
     # Prefer an explicit extents.temporal.resolution; fall back to the dataset's
     # period_type so openEO save_result outputs (which omit the extents block) still
@@ -600,9 +726,9 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     table's schema, each with its description and the value columns with their unit, and the file
     itself as the `data` asset. The spatial extent is the bounds of the feature collections the
     values are reported on, and the temporal one the first and last period, as the schema's columns
-    represent them. A computed table has no
-    template, so its licence and providers are its sources' (`tables.sources`); `derived_from`
-    links name those sources and `via` links the pages their data came from.
+    represent them. Its licence, providers and `via` links are its template's, for a table from a
+    data source, or its sources' for a computed table (`tables.sources`), whose `derived_from`
+    links name those sources.
     """
     from open_geo_service.tables import store as table_store
     from open_geo_service.tables.sources import table_sources
@@ -630,11 +756,7 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     if columns:
         collection.extra_fields["table:columns"] = columns
 
-    catalog_href = absolute_url(request, CATALOG_PATH)
-    collection.clear_links()
-    collection.set_self_href(absolute_url(request, collection_path(dataset_id)))
-    collection.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    collection.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    _add_structural_links(collection, layout.Kind.TABLE, dataset_id, request)
     collection.add_link(
         pystac.Link(
             rel="alternate",
@@ -646,17 +768,11 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
     # One link per licence: values computed from several sources are bound by each.
     for href, title in sources.license_links():
         collection.add_link(pystac.Link(rel="license", target=href, media_type="text/html", title=title))
-    for recorded in ingestion_services.recorded_inputs(artifact):
-        input_id = str(recorded["collection_id"])
+    for link in _derived_from(artifact, request):
         collection.add_link(
-            pystac.Link(
-                rel="derived_from",
-                target=absolute_url(request, collection_path(input_id)),
-                media_type="application/json",
-                title=input_id,
-            )
+            pystac.Link(rel=link["rel"], target=link["href"], media_type=link["type"], title=link["title"])
         )
-    for source_url in _source_pages(dataset_id, {}):
+    for source_url in _source_pages(dataset_id, sources.template()):
         collection.add_link(pystac.Link(rel="via", target=source_url, media_type="text/html", title="Source"))
     for link in _document_links():
         collection.add_link(
@@ -792,13 +908,7 @@ def _add_feature_collection_links(
     names that one collection, so a `{version}` in `source_stac` is filled with the release this
     collection was read from, and the link is left out when there is no version to fill it.
     """
-    catalog_href = absolute_url(request, CATALOG_PATH)
-    collection.clear_links()
-    # Through `set_self_href`, not `add_link`: pystac emits the self link from that attribute,
-    # and a rel="self" link added by hand is dropped by `to_dict`. STAC Browser navigates by it.
-    collection.set_self_href(absolute_url(request, collection_path(dataset_id)))
-    collection.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    collection.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    _add_structural_links(collection, layout.Kind.VECTOR, dataset_id, request)
     collection.add_link(
         pystac.Link(
             rel="alternate",
@@ -834,6 +944,20 @@ def _add_feature_collection_links(
         collection.add_link(
             pystac.Link(rel=link["rel"], target=link["href"], media_type=link["type"], title=link["title"])
         )
+
+
+def _add_structural_links(collection: pystac.Collection, kind: layout.Kind, dataset_id: str, request: Request) -> None:
+    """Replace the collection's links with `self`, `root` and its sub-catalog as `parent`."""
+    collection.clear_links()
+    # Through `set_self_href`, not `add_link`: pystac emits the self link from that attribute,
+    # and a rel="self" link added by hand is dropped by `to_dict`. STAC Browser navigates by it.
+    collection.set_self_href(absolute_url(request, collection_path(kind, dataset_id)))
+    collection.add_link(
+        pystac.Link(rel="root", target=absolute_url(request, CATALOG_PATH), media_type="application/json")
+    )
+    collection.add_link(
+        pystac.Link(rel="parent", target=absolute_url(request, subcatalog_path(kind)), media_type="application/json")
+    )
 
 
 def _document_links() -> list[dict[str, str]]:
@@ -915,7 +1039,7 @@ def _source_pages(dataset_id: str, template: dict[str, Any]) -> list[str]:
     (the built-in normals and anomalies) names the sources of the inputs it was made from,
     following an input that is itself derived back to where its data came from.
     """
-    published = ingestion_services.stac_eligible_artifacts_by_dataset()
+    published = _eligible_artifacts_by_dataset()
     pages: list[str] = []
     seen: set[str] = set()
 
@@ -955,6 +1079,7 @@ def _build_collection_template(
     artifact: ArtifactRecord,
     collection_href: str,
     catalog_href: str,
+    parent_href: str,
     dataset_href: str,
     zarr_href: str,
     source_dataset: dict[str, Any],
@@ -993,7 +1118,7 @@ def _build_collection_template(
     template.clear_links()
     template.add_link(pystac.Link(rel="self", target=collection_href, media_type="application/json"))
     template.add_link(pystac.Link(rel="root", target=catalog_href, media_type="application/json"))
-    template.add_link(pystac.Link(rel="parent", target=catalog_href, media_type="application/json"))
+    template.add_link(pystac.Link(rel="parent", target=parent_href, media_type="application/json"))
     template.add_link(
         pystac.Link(rel="alternate", target=dataset_href, media_type="application/json", title="Dataset detail")
     )
@@ -1114,7 +1239,7 @@ def _build_collection_with_xstac(
 ) -> dict[str, Any]:
     # Keyed on period_type as well as the artifact: correcting a template's cadence
     # changes the payload (an irregular one gains `values`) without producing a new artifact.
-    cache_key = f"{artifact.artifact_id}:{period_type}"
+    cache_key = f"{_written(artifact)}:{period_type}"
     cached_payload = _xstac_collection_cache.get(cache_key)
     if cached_payload is not None:
         return deepcopy(cached_payload)
@@ -1150,6 +1275,8 @@ def _build_collection_with_xstac(
                 temporal_dimension=time_dimension,
                 x_dimension=x_dimension,
                 y_dimension=y_dimension,
+                x_step=_regular_step(ds[x_dimension].values),
+                y_step=_regular_step(ds[y_dimension].values),
                 # The store's own CRS, not a constant: these axes are in whatever the store
                 # uses, and seNorge's are UTM33 metres. See reference_system_for.
                 reference_system=reference_system_for(store_crs),
@@ -1188,7 +1315,7 @@ def _build_collection_with_xstac(
         extent_bbox = _wgs84_extent_from_store(ds, store_crs or "EPSG:4326", x_dimension, y_dimension)
         if extent_bbox is not None:
             payload.setdefault("extent", {}).setdefault("spatial", {})["bbox"] = [extent_bbox]
-        if time_dimension is not None and period_cadence(period_type) is Cadence.IRREGULAR:
+        if time_dimension is not None and _lists_temporal_values(payload, time_dimension, period_type):
             _add_temporal_values(payload, ds, time_dimension)
         payload.setdefault("assets", {}).setdefault("zarr", {})["bands"] = _store_bands(ds)
         _cache_xstac_collection_payload(cache_key, payload)
@@ -1216,7 +1343,7 @@ def _zarr_media_type(artifact: ArtifactRecord) -> str:
     *template*, which is rebuilt on every request — so it sits outside the xstac payload cache.
     See :func:`_cache_by_artifact` for why the key is the artifact id.
     """
-    cached = _zarr_media_type_cache.get(artifact.artifact_id)
+    cached = _zarr_media_type_cache.get(_written(artifact))
     if cached is not None:
         return cached
     try:
@@ -1224,17 +1351,26 @@ def _zarr_media_type(artifact: ArtifactRecord) -> str:
     except HTTPException:
         return ZARR_V3_MEDIA_TYPE
     media_type = zarr_media_type(store_path, icechunk=artifact.format == ArtifactFormat.ICECHUNK)
-    _cache_by_artifact(_zarr_media_type_cache, artifact.artifact_id, media_type)
+    _cache_by_artifact(_zarr_media_type_cache, _written(artifact), media_type)
     return media_type
 
 
-def _cache_by_artifact(cache: dict[str, _V], artifact_id: str, value: _V) -> None:
-    """Store *value* under *artifact_id*, evicting the oldest entry past the size bound.
+def _written(artifact: ArtifactRecord) -> str:
+    """What a cache of one store's metadata is keyed on: the record and when it was written.
 
-    Both per-artifact caches here are keyed on the artifact id rather than the store path: a
-    re-ingest reuses the path, so a path-keyed entry would go stale, while every write produces a
-    new artifact record. Refreshing an existing key keeps its insertion position, so a
-    frequently-rebuilt collection is not treated as newest and does not evict others.
+    Not the store path, which a re-ingest reuses, and not the artifact id alone, which an
+    overwrite or a store replacement keeps (`_upsert_artifact_record`) while the store changes.
+    Each write gives the record a new `created_at`; a publication or rollback moves the published
+    snapshot without one.
+    """
+    return f"{artifact.artifact_id}@{artifact.created_at.isoformat()}@{artifact.publication.snapshot_id}"
+
+
+def _cache_by_artifact(cache: dict[str, _V], artifact_id: str, value: _V) -> None:
+    """Store *value* under *artifact_id* (see `_written`), evicting the oldest entry past the size bound.
+
+    Refreshing an existing key keeps its insertion position, so a frequently-rebuilt collection
+    is not treated as newest and does not evict others.
     """
     if artifact_id in cache:
         cache[artifact_id] = value
@@ -1324,6 +1460,19 @@ def _override_time_step(collection: dict[str, Any], step: str | None, *, cadence
             return
 
 
+def _lists_temporal_values(collection: dict[str, Any], time_dimension: str, period_type: Any) -> bool:
+    """Whether the temporal dimension will be written without a step, so it must list its values.
+
+    An irregular cadence never has one. An unknown one, such as an openEO result saved without a
+    period type, keeps the step xstac inferred, which it leaves out for unevenly spaced timestamps.
+    """
+    cadence = period_cadence(period_type)
+    dim = (collection.get("cube:dimensions") or {}).get(time_dimension)
+    return cadence is Cadence.IRREGULAR or (
+        cadence is Cadence.UNKNOWN and isinstance(dim, dict) and not dim.get("step")
+    )
+
+
 def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimension: str) -> None:
     """List the temporal dimension's actual timestamps as ``values``.
 
@@ -1333,7 +1482,7 @@ def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimens
     with a single position and no slider. This mirrors ``_build_ordinal_dimensions``,
     which lists values for the same reason on a day-of-year axis.
 
-    Only emitted for irregular cadences. A regular one is fully described by extent plus
+    Only emitted when there is no step (`_lists_temporal_values`). A regular one is fully described by extent plus
     duration, and listing every timestamp would add one ISO string per period to a cached
     response for no gain — thousands of entries for a multi-year daily store.
     """
@@ -1391,13 +1540,28 @@ def reference_system_for(store_crs: str | int | None) -> int | str:
     return parsed.to_wkt()
 
 
+def _regular_step(values: Any) -> float | None:
+    """The step between a grid axis's coordinates, or None when they are not evenly spaced.
+
+    Within a thousandth of a cell: float coordinates such as WorldPop's are not exactly even,
+    and xstac publishes a step only when they are, which leaves a client unable to place a cell.
+    """
+    coords = np.asarray(values, dtype="float64")
+    if coords.size < 2:
+        return None
+    step = float((coords[-1] - coords[0]) / (coords.size - 1))
+    if step == 0 or not np.allclose(np.diff(coords), step, rtol=0, atol=abs(step) / 1000):
+        return None
+    return step
+
+
 def _build_static_cube_dimensions(ds: xr.Dataset, x_dim: str, y_dim: str) -> dict[str, Any]:
     """Build minimal cube:dimensions for a dataset with no time axis."""
     crs = reference_system_for(ds.attrs.get("proj:code"))
     x_vals = ds[x_dim].values
     y_vals = ds[y_dim].values
-    x_step = float(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else None
-    y_step = float(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else None
+    x_step = _regular_step(x_vals)
+    y_step = _regular_step(y_vals)
     return {
         x_dim: {
             "type": "spatial",

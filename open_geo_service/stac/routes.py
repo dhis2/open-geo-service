@@ -1,68 +1,24 @@
-"""Routes for the STAC catalogue.
+"""Routes for the STAC catalogue, served from the files the writer keeps in `catalog/`.
 
 Laid out as a static catalog, so a client that follows links reads it as files: the root
-`catalog.json` with `README.md` and `AGENTS.md` beside it, and one directory per collection holding
-`collection.json` with its own `README.md` and `AGENTS.md`. Each
-document has one URL, because its `describedby` and `agents` links are relative to it. Every route
-answers HEAD, as a static host does and a link checker expects; HEAD is kept out of the OpenAPI
-schema so each operation is listed once.
+`catalog.json`, a sub-catalog `{kind}/catalog.json` per kind of dataset, and one folder per
+collection, `{kind}/{id}/`, holding `collection.json` beside the dataset's data. Each catalog and
+collection has its `README.md` and `AGENTS.md` beside it. The links are relative, so `/stac`
+serves the datasets' data files too: it serves `catalog/` as a static host of the folder would.
+Every route answers HEAD, as a static host does and a link checker expects.
 """
 
-from fastapi import APIRouter, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
 
-from open_geo_service.stac import documents
-from open_geo_service.stac import services as stac_services
-from open_geo_service.stac.schemas import StacCatalogResponse
+from open_geo_service.stac import catalog_files
 
 router = APIRouter()
 
 
-# `response_model_exclude_none`: a link with no title or type leaves the field out. The core
-# catalog schema allows `title` only as a string, so a `null` one fails validation.
-@router.get("/catalog.json", response_model=StacCatalogResponse, response_model_exclude_none=True)
-@router.head(
-    "/catalog.json", response_model=StacCatalogResponse, response_model_exclude_none=True, include_in_schema=False
-)
-def get_stac_catalog_json(request: Request) -> dict[str, object]:
-    """Return the root STAC catalog."""
-    return stac_services.build_catalog(request)
-
-
-@router.get("/{dataset_id}/collection.json")
-@router.head("/{dataset_id}/collection.json", include_in_schema=False)
-def get_stac_collection(dataset_id: str, request: Request) -> dict[str, object]:
-    """Return one STAC collection document."""
-    return stac_services.build_collection(dataset_id, request)
-
-
-def _markdown(text: str) -> PlainTextResponse:
-    return PlainTextResponse(text, media_type=stac_services.MARKDOWN_MEDIA_TYPE)
-
-
-@router.get("/README.md", response_class=PlainTextResponse)
-@router.head("/README.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_catalog_readme(request: Request) -> PlainTextResponse:
-    """What the catalog holds, as the catalog's `describedby` link."""
-    return _markdown(documents.catalog_readme(request))
-
-
-@router.get("/AGENTS.md", response_class=PlainTextResponse)
-@router.head("/AGENTS.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_catalog_agents(request: Request) -> PlainTextResponse:
-    """How an agent reads the catalog, as its `agents` link."""
-    return _markdown(documents.catalog_agents(request))
-
-
-@router.get("/{dataset_id}/README.md", response_class=PlainTextResponse)
-@router.head("/{dataset_id}/README.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_collection_readme(dataset_id: str, request: Request) -> PlainTextResponse:
-    """A collection's title, description, licence and provenance."""
-    return _markdown(documents.collection_readme(dataset_id, request))
-
-
-@router.get("/{dataset_id}/AGENTS.md", response_class=PlainTextResponse)
-@router.head("/{dataset_id}/AGENTS.md", response_class=PlainTextResponse, include_in_schema=False)
-def get_collection_agents(dataset_id: str, request: Request) -> PlainTextResponse:
-    """How an agent reads a collection's data."""
-    return _markdown(documents.collection_agents(dataset_id, request))
+@router.get("/{path:path}", response_class=FileResponse)
+@router.head("/{path:path}", response_class=FileResponse, include_in_schema=False)
+def get_stac_file(path: str) -> FileResponse:
+    """A document of the STAC catalog, or a dataset's data file, at its path in the catalog."""
+    file, media_type = catalog_files.served_file(path)
+    return FileResponse(file, media_type=media_type, headers={"Cache-Control": catalog_files.cache_control(file)})

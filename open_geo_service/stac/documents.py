@@ -9,15 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 from open_geo_service.data_registry.services import datasets as registry_datasets
 from open_geo_service.features import store
 from open_geo_service.features import templates as feature_templates
-from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactFormat, ArtifactRecord
+from open_geo_service.shared import layout
 from open_geo_service.shared.licences import parse_licence
-from open_geo_service.shared.urls import absolute_url, path_segment
+from open_geo_service.shared.urls import absolute_url, configured_base, path_segment
 from open_geo_service.stac import services
 from open_geo_service.stac.media_types import data_group_open_kwargs
 
@@ -30,19 +30,51 @@ def catalog_readme(request: Request) -> str:
     lines = [
         f"# {_instance_name()}",
         "",
-        f"The published datasets of this instance, at {absolute_url(request, '/')}: rasters as "
-        "GeoZarr stores, vector datasets as GeoParquet, and tables as Parquet.",
+        "The published datasets of this instance: rasters as GeoZarr stores, vector datasets as "
+        "GeoParquet, and tables as Parquet.",
         "",
         "Each collection declares its own licence in its STAC document, and its providers where they are known.",
         "",
-        "## Collections",
-        "",
     ]
-    for dataset_id, artifact in services._eligible_artifacts_by_dataset().items():
-        href = absolute_url(request, services.collection_path(dataset_id))
-        kind = _KINDS.get(artifact.format, "raster")
-        lines.append(f"- [{artifact.dataset_name}]({href}) ({kind})")
-    return "\n".join(lines) + "\n"
+    artifacts = services._eligible_artifacts_by_dataset()
+    for kind in services.published_kinds(artifacts):
+        title, _description = services.SUBCATALOGS[kind]
+        lines += [f"## [{title}]({absolute_url(request, services.subcatalog_path(kind))})", ""]
+        lines += _collection_list(kind, artifacts, request)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def subcatalog_readme(kind: layout.Kind, request: Request) -> str:
+    """What one sub-catalog holds: its collections."""
+    artifacts = services.published_of_kind_or_404(kind)
+    title, description = services.SUBCATALOGS[kind]
+    lines = [f"# {title}", "", f"{description} Part of the {_instance_name()} catalog.", "", "## Collections", ""]
+    return "\n".join([*lines, *_collection_list(kind, artifacts, request)]) + "\n"
+
+
+def _collection_list(kind: layout.Kind, artifacts: dict[str, ArtifactRecord], request: Request) -> list[str]:
+    return [
+        f"- [{artifact.dataset_name}]({absolute_url(request, services.collection_path(kind, dataset_id))})"
+        for dataset_id, artifact in artifacts.items()
+        if layout.kind_of(artifact.format) is kind
+    ]
+
+
+_READING: dict[layout.Kind, str] = {
+    layout.Kind.RASTER: "A **raster** collection has an `icechunk` asset: an Icechunk repository of a Zarr v3 store "
+    "with GeoZarr metadata, which its `AGENTS.md` link says how to open. On an instance with a public address it "
+    'also has a `zarr` asset, the same data as a plain Zarr v3 store: `xr.open_zarr(asset["href"], '
+    '**asset["xarray:open_kwargs"])`. Each asset\'s `xarray:open_kwargs` name the full-resolution group of a '
+    "multiscale store.",
+    layout.Kind.VECTOR: "A **vector** collection has a `data` asset: one GeoParquet 1.1 file with a `bbox` covering "
+    "column, readable with DuckDB, GeoPandas or any Parquet reader. Its `AGENTS.md` link says how.",
+    layout.Kind.TABLE: "A **table** collection has a `data` asset: one Parquet file, whose columns `table:columns` "
+    "describes. Its `README.md` link says how to read it and what it joins to.",
+}
+"""How an agent reads a collection of each kind."""
+
+_RANGE_REQUESTS = "Every asset is served with range requests, so a reader fetches only what it needs."
 
 
 def catalog_agents(request: Request) -> str:
@@ -52,25 +84,38 @@ def catalog_agents(request: Request) -> str:
         [
             f"# Reading the {_instance_name()} catalog",
             "",
-            f"Start at {catalog}. Each `child` link is one collection.",
+            f"Start at {catalog}. Each `child` link is a sub-catalog of one kind of dataset, and each of "
+            "its `child` links is one collection.",
             "",
-            "- A **raster** collection has a `zarr` asset: a Zarr v3 store with GeoZarr metadata. Open it "
-            "with the asset's own `xarray:open_kwargs`, which name the full-resolution group of a "
-            'multiscale store: `xr.open_zarr(asset["href"], **asset["xarray:open_kwargs"])`.',
-            "- A **vector** collection has a `data` asset: one GeoParquet 1.1 file with a `bbox` covering "
-            "column, readable with DuckDB, GeoPandas or any Parquet reader. Its `AGENTS.md` link says how.",
-            "- A **table** collection has a `data` asset: one Parquet file, whose columns `table:columns` "
-            "describes. Its `README.md` link says how to read it and what it joins to.",
+            *(f"- {text}" for text in _READING.values()),
             "",
-            "Every asset is served with range requests, so a reader fetches only what it needs.",
+            _RANGE_REQUESTS,
             "",
         ]
     )
 
 
-def collection_readme(dataset_id: str, request: Request) -> str:
+def subcatalog_agents(kind: layout.Kind, request: Request) -> str:
+    """How an agent reads one sub-catalog."""
+    services.published_of_kind_or_404(kind)
+    here = absolute_url(request, services.subcatalog_path(kind))
+    return "\n".join(
+        [
+            f"# Reading {services.SUBCATALOGS[kind][0].lower()}",
+            "",
+            f"Start at {here}. Each `child` link is one collection.",
+            "",
+            _READING[kind],
+            "",
+            _RANGE_REQUESTS,
+            "",
+        ]
+    )
+
+
+def collection_readme(kind: layout.Kind, dataset_id: str, request: Request) -> str:
     """Title, description, licence, provenance and shape of one collection."""
-    artifact, template = _published_collection(dataset_id)
+    artifact, template = _published_collection(kind, dataset_id)
     if artifact.format == ArtifactFormat.PARQUET:
         return _table_readme(dataset_id, artifact, template, request)
     raster = artifact.format != ArtifactFormat.GEOPARQUET
@@ -113,7 +158,10 @@ def collection_readme(dataset_id: str, request: Request) -> str:
         lines.append("- A Zarr v3 store with GeoZarr metadata; its `AGENTS.md` link says how to open it.")
     elif artifact.features is not None:
         detail = artifact.features
-        types = ", ".join(store.stored_geometry_types(artifact)) or "unknown"
+        try:
+            types = ", ".join(store.stored_geometry_types(artifact)) or "unknown"
+        except (OSError, ValueError):  # an unreadable footer leaves the types unknown, as openEO does
+            types = "unknown"
         lines += [
             f"- {detail.feature_count} features, geometry types: {types}.",
             f"- Identifier property: `{detail.id_property}`.",
@@ -122,9 +170,9 @@ def collection_readme(dataset_id: str, request: Request) -> str:
     return "\n".join(lines) + "\n"
 
 
-def collection_agents(dataset_id: str, request: Request) -> str:
+def collection_agents(kind: layout.Kind, dataset_id: str, request: Request) -> str:
     """How an agent reads one collection's data."""
-    artifact, _template = _published_collection(dataset_id)
+    artifact, _template = _published_collection(kind, dataset_id)
     if artifact.format == ArtifactFormat.PARQUET:
         return _table_agents(dataset_id, artifact, request)
     if artifact.format != ArtifactFormat.GEOPARQUET:
@@ -133,37 +181,60 @@ def collection_agents(dataset_id: str, request: Request) -> str:
 
 
 def _raster_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) -> str:
-    """How an agent reads one raster collection: the store, how to open it, the variable."""
-    store_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
-    # The same arguments the STAC `zarr` asset carries as `xarray:open_kwargs`.
-    open_kwargs = {
-        **services._zarr_open_kwargs(artifact),
-        **data_group_open_kwargs(services._zarr_media_type(artifact)),
-    }
+    """How an agent reads one raster collection: the store, how to open it, the variable.
+
+    The Icechunk store is in the catalog folder beside this file; the Zarr route only on an
+    instance that knows its public address (see `stac/catalog_files.py`).
+    """
+    # The same arguments the STAC `zarr` and `icechunk` assets carry as `xarray:open_kwargs`.
+    data_group = data_group_open_kwargs(services._zarr_media_type(artifact))
+    open_kwargs = {**services._zarr_open_kwargs(artifact), **data_group}
     arguments = "".join(f", {name}={value!r}" for name, value in open_kwargs.items() if value is not None)
-    return "\n".join(
-        [
-            f"# Reading {artifact.dataset_name}",
+    lines = [
+        f"# Reading {artifact.dataset_name}",
+        "",
+        f"The values are in the variable `{artifact.variable}`, over time, latitude and longitude or the "
+        "store's own projected axes; the store's `spatial:` and `proj:` attributes give the grid. Any "
+        "reader fetches only the chunks it needs.",
+        "",
+    ]
+    if artifact.format == ArtifactFormat.ICECHUNK:
+        icechunk_href = absolute_url(request, f"/icechunk/{path_segment(dataset_id)}/")
+        lines += [
+            f"The data is an Icechunk repository of a Zarr v3 store with GeoZarr metadata: {icechunk_href}",
             "",
-            f"The data is a Zarr v3 store with GeoZarr metadata: {store_href}",
+            "With the Icechunk library and xarray, from a copy of this folder; over HTTP, use "
+            "`icechunk.http_storage` with the store's URL instead:",
             "",
-            f"- The values are in the variable `{artifact.variable}`, over time, latitude and longitude "
-            "or the store's own projected axes; the store's `spatial:` and `proj:` attributes give the grid.",
-            "- Any Zarr v3 reader can open it, over HTTP, reading only the chunks it needs.",
+            "```python",
+            "import icechunk",
+            "import xarray as xr",
+            f'repo = icechunk.Repository.open(icechunk.local_filesystem_storage("{icechunk_href}"))',
+            'session = repo.readonly_session("main")',
+            "ds = xr.open_zarr(session.store, consolidated=False"
+            + "".join(f", {name}={value!r}" for name, value in data_group.items())
+            + ")",
+            f'values = ds["{artifact.variable}"]',
+            "```",
             "",
-            "With xarray:",
+        ]
+    if configured_base() or artifact.format != ArtifactFormat.ICECHUNK:
+        store_href = absolute_url(request, f"/zarr/{path_segment(dataset_id)}")
+        lines += [
+            f"The same data as a plain Zarr v3 store, for any Zarr v3 reader over HTTP: {store_href}",
             "",
             "```python",
             "import xarray as xr",
             f'ds = xr.open_zarr("{store_href}"{arguments})',
-            f'values = ds["{artifact.variable}"]',
             "```",
             "",
-            f"The licence, providers and extent are in the STAC collection: "
-            f"{absolute_url(request, services.collection_path(dataset_id))}",
-            "",
         ]
-    )
+    lines += [
+        f"The licence, providers and extent are in the STAC collection: "
+        f"{absolute_url(request, services.collection_path(layout.kind_of(artifact.format), dataset_id))}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _feature_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) -> str:
@@ -197,7 +268,7 @@ def _feature_agents(dataset_id: str, artifact: ArtifactRecord, request: Request)
             f"copy, with the bounds in {units}.",
             "",
             f"The licence, providers and extent are in the STAC collection: "
-            f"{absolute_url(request, services.collection_path(dataset_id))}",
+            f"{absolute_url(request, services.collection_path(layout.kind_of(artifact.format), dataset_id))}",
             "",
         ]
     )
@@ -215,7 +286,9 @@ def _table_readme(dataset_id: str, artifact: ArtifactRecord, template: dict[str,
     lines += ["", "## Licence", ""]
     licences = [licence for licence in sources.licences if licence.identifier or licence.name]
     if not licences:
-        lines.append("Not declared by the datasets it was computed from.")
+        lines.append(
+            "Not declared." if sources.own is not None else "Not declared by the datasets it was computed from."
+        )
     else:
         if len(sources.licences) > 1:
             lines += ["Computed from several datasets, so the licence of each applies:", ""]
@@ -227,10 +300,9 @@ def _table_readme(dataset_id: str, artifact: ArtifactRecord, template: dict[str,
         name = f"[{provider['name']}]({provider['url']})" if provider.get("url") else provider["name"]
         roles = f" ({', '.join(provider['roles'])})" if provider.get("roles") else ""
         lines.append(f"- {name}{roles}")
-    for recorded in ingestion_services.recorded_inputs(artifact):
-        input_id = str(recorded["collection_id"])
-        lines.append(f"- Computed from: [{input_id}]({absolute_url(request, services.collection_path(input_id))})")
-    for source_url in services._source_pages(dataset_id, {}):
+    for link in services._derived_from(artifact, request):
+        lines.append(f"- Computed from: [{link['title']}]({link['href']})")
+    for source_url in services._source_pages(dataset_id, template):
         lines.append(f"- Source: {source_url}")
     lines.append(f"- Last updated: {artifact.created_at.isoformat()}")
 
@@ -344,17 +416,15 @@ def _table_agents(dataset_id: str, artifact: ArtifactRecord, request: Request) -
             else f"Or as JSON or CSV: {rows}",
             "",
             f"The licence, providers and columns are in the STAC collection: "
-            f"{absolute_url(request, services.collection_path(dataset_id))}",
+            f"{absolute_url(request, services.collection_path(layout.kind_of(artifact.format), dataset_id))}",
             "",
         ]
     )
 
 
-def _published_collection(dataset_id: str) -> tuple[ArtifactRecord, dict[str, Any]]:
+def _published_collection(kind: layout.Kind, dataset_id: str) -> tuple[ArtifactRecord, dict[str, Any]]:
     """The published collection's record and template, or 404 as the STAC route does."""
-    artifact = services._eligible_artifacts_by_dataset().get(dataset_id)
-    if artifact is None:
-        raise HTTPException(status_code=404, detail=f"No published collection '{dataset_id}'")
+    artifact = services.published_artifact(kind, dataset_id)
     if artifact.format == ArtifactFormat.GEOPARQUET:
         return artifact, feature_templates.get_feature_template(artifact.dataset_id) or {}
     if artifact.format == ArtifactFormat.PARQUET:
@@ -362,10 +432,6 @@ def _published_collection(dataset_id: str) -> tuple[ArtifactRecord, dict[str, An
 
         return artifact, table_sources(artifact).template()
     return artifact, registry_datasets.get_dataset(artifact.dataset_id) or {}
-
-
-_KINDS = {ArtifactFormat.GEOPARQUET: "vector", ArtifactFormat.PARQUET: "table"}
-"""How the catalog README names each collection's kind; any other format is a raster."""
 
 
 def _sql_identifier(name: str) -> str:

@@ -9,6 +9,7 @@ import urllib.parse
 from contextvars import ContextVar
 from http.cookies import SimpleCookie
 
+import anyio.to_thread
 from fastapi import Request
 from starlette.applications import Starlette
 from starlette.datastructures import Headers, MutableHeaders
@@ -18,16 +19,18 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from open_geo_service import config as api_config
 from open_geo_service import read_only
-from open_geo_service.auth import sessions
+from open_geo_service.auth import oidc, sessions
 from open_geo_service.auth.route_table import gated, listed_tier
 from open_geo_service.auth.tokens import (
     ANONYMOUS,
     OPEN,
+    AccessSettings,
+    OidcProvider,
     Principal,
     Tier,
     access_settings,
     authenticate,
-    configured_tokens,
+    authentication_on,
 )
 from open_geo_service.shared.negotiation import prefers_html, wants_json
 from open_geo_service.shared.urls import BASE_URL_ENV, mount_prefix, strip_mount
@@ -62,7 +65,7 @@ def current_viewer() -> Principal:
     viewer = _viewer.get()
     if viewer is not None:
         return viewer
-    return ANONYMOUS if configured_tokens() else OPEN
+    return ANONYMOUS if authentication_on() else OPEN
 
 
 def session_cookie_path(request: Request) -> str:
@@ -97,13 +100,14 @@ class AccessMiddleware:
             await _refuse(403, "read-only", "PermissionsInsufficient", message)(scope, receive, send)
             return
         principal = OPEN
-        tokens, gate_reads = access_settings()
-        if tokens:
+        settings = access_settings()
+        require_for_read = settings.require_for_read
+        if settings.on:
             headers = Headers(scope=scope)
             authorization = headers.get("authorization")
             session_id = _session_id(headers)
             if authorization is None and session_id is not None:
-                session = sessions.resolve(session_id, tokens)
+                session = sessions.resolve(session_id, settings)
                 if session is None:
                     # An expired or unknown cookie is no credential, not a refusal: refusing it
                     # would lock the browser out of every page, the sign-in page included.
@@ -111,7 +115,14 @@ class AccessMiddleware:
                 principal = session or ANONYMOUS
                 by_cookie = session is not None
             else:
-                resolved = authenticate(authorization, tokens)
+                try:
+                    resolved = await _authenticate(authorization, settings)
+                except oidc.ProviderUnavailable as exc:
+                    # Not a 401: a client would discard a token that may well be valid.
+                    logger.warning("Could not check a token: %s", exc)
+                    message = "The sign-in provider that issued the token cannot be reached. Try again later."
+                    await _refuse(503, "authentication", "ServiceUnavailable", message)(scope, receive, send)
+                    return
                 if resolved is None:
                     log_rejected_credential()
                     message = "The credential is not valid for this instance."
@@ -129,7 +140,7 @@ class AccessMiddleware:
                 await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
             needed = Tier.OPERATOR if required is None else required
-            if needed is Tier.PUBLIC and gate_reads and gated(method, path, page=_asks_for_page(scope, path)):
+            if needed is Tier.PUBLIC and require_for_read and gated(method, path, page=_asks_for_page(scope, path)):
                 needed = Tier.AUTHENTICATED
             if principal.tier < needed:
                 tier = needed.name.lower()
@@ -143,7 +154,7 @@ class AccessMiddleware:
                     message = f"{method} {path} needs the {tier} tier, which {principal.id} does not have."
                     await _refuse(403, "authentication", "PermissionsInsufficient", message)(scope, receive, send)
                 return
-            if gate_reads:
+            if require_for_read:
                 # Each answer is for one caller now, so a shared cache in front must not keep it.
                 send = _private(send)
         scope.setdefault("state", {})["principal"] = principal
@@ -152,6 +163,42 @@ class AccessMiddleware:
             await self.app(scope, receive, send)
         finally:
             _viewer.reset(reset)
+
+
+async def _authenticate(authorization: str | None, settings: AccessSettings) -> Principal | None:
+    """The principal an ``Authorization`` header names, as `tokens.authenticate` decides it, or a person.
+
+    Raises oidc.ProviderUnavailable when the provider cannot be reached to check a token.
+
+    A person sends an OIDC access token as openEO's ``Bearer oidc/<provider>/<token>``, or as a
+    plain ``Bearer <token>`` that a configured provider issued. Checking it may fetch the
+    provider's keys, so it runs off the event loop.
+    """
+    provider, token = _oidc_credential(authorization, settings.providers)
+    if provider is None:
+        return authenticate(authorization, settings.tokens)
+    try:
+        person = await anyio.to_thread.run_sync(oidc.person_from_access_token, token, provider)
+    except oidc.ProviderUnavailable:
+        raise
+    except oidc.TokenRejected as exc:
+        logger.debug("Rejected an OIDC token: %s", exc)
+        return None
+    return oidc.principal_for_person(person, settings.providers)
+
+
+def _oidc_credential(authorization: str | None, providers: tuple[OidcProvider, ...]) -> tuple[OidcProvider | None, str]:
+    """The provider an OIDC bearer token is for, and the token; no provider for any other credential."""
+    scheme, _, credential = (authorization or "").partition(" ")
+    credential = credential.strip()
+    if scheme.lower() != "bearer" or not providers:
+        return None, ""
+    if credential.startswith("oidc/"):
+        provider_id, _, token = credential.removeprefix("oidc/").partition("/")
+        # An unknown provider id falls through to the named tokens, which refuse it.
+        return next((p for p in providers if p.id == provider_id), None), token
+    issuer = oidc.unverified_issuer(credential)
+    return next((p for p in providers if p.issuer == issuer), None), credential
 
 
 def _session_id(headers: Headers) -> str | None:

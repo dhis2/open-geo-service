@@ -12,14 +12,17 @@ The STAC catalog is the starting point for data discovery. It is titled with the
 curl -s http://127.0.0.1:9000/stac/catalog.json | jq
 ```
 
-Each entry in `links` with `"rel": "child"` points to one dataset collection. Use the `href` from the catalog to fetch it:
+Each entry in `links` with `"rel": "child"` points to a sub-catalog of one kind of dataset: `rasters`, `vectors` or `tables`. Each child of a sub-catalog is one dataset collection. Use the `href`s to fetch them:
 
 ```bash
-# Replace {dataset_id} with any id from the catalog above, e.g. chirps3_precipitation_daily
-curl -s http://127.0.0.1:9000/stac/{dataset_id}/collection.json | jq
+curl -s http://127.0.0.1:9000/stac/rasters/catalog.json | jq
+# Replace {dataset_id} with any id from the sub-catalog above, e.g. chirps3_precipitation_daily
+curl -s http://127.0.0.1:9000/stac/rasters/{dataset_id}/collection.json | jq
 ```
 
-The `assets.zarr` field contains everything needed to open the dataset:
+A raster collection's `assets.icechunk` links the dataset's Icechunk store, relative to the
+collection, for Icechunk readers. Its `assets.zarr` serves the same data as plain Zarr, with
+everything needed to open it:
 
 ```json
 {
@@ -30,6 +33,14 @@ The `assets.zarr` field contains everything needed to open the dataset:
     }
   }
 }
+```
+
+The `zarr` asset is in the `/stac` collection only when the instance has a public address
+(`GEOSERVICE_BASE_URL`), as the catalog is written as files ([Data folder layout](data_folder_layout.md#the-catalog)).
+Without one, the openEO collection has it, built for the request:
+
+```bash
+curl -s http://127.0.0.1:9000/collections/{dataset_id} | jq .assets.zarr
 ```
 
 ## The Python client

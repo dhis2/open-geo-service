@@ -10,9 +10,12 @@ import numpy as np
 import xarray as xr
 from pyproj import Transformer
 
+from open_geo_service import storage
+
 from ...data_manager.services.downloader import get_icechunk_path, get_zarr_path
 from ...data_manager.services.utils import get_time_dim, get_x_y_dims
 from ...shared import forecast
+from ...shared.branches import WRITE_BRANCH
 from ...shared.crs import dataset_crs
 from ...shared.netcdf import write_netcdf
 from ...shared.provisional import FETCHED_AT
@@ -105,7 +108,7 @@ def get_data_coverage_for_paths(
     *,
     zarr_path: str | None = None,
     icechunk_path: str | None = None,
-    branch: str = "main",
+    branch: str = WRITE_BRANCH,
 ) -> dict[str, Any]:
     """Return coverage metadata for the concrete files created for one artifact, at *branch* of an Icechunk store."""
     provided = sum(value is not None for value in (zarr_path, icechunk_path))
@@ -210,8 +213,13 @@ def _read_time_chunk(ds: xr.Dataset, t_dim: str) -> int | None:
 
 
 def _open_zarr_group(store: Any, group: str | None, *, chunks: Any) -> xr.Dataset:
-    """``xr.open_zarr`` on one group; ``chunks`` is typed Any because the stub allows only a string."""
-    return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks)  # type: ignore[no-any-return]
+    """``xr.open_zarr`` on one group; ``chunks`` is typed Any because the stub allows only a string.
+
+    Values stay numbers whatever their units: xarray would otherwise decode a day count with
+    ``units: days`` (xclim's ``tx_days_above``, spells) to ``timedelta64`` (CLIM-1945). This is
+    xarray's announced future default; GeoService stores hold no timedelta variables.
+    """
+    return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks, decode_timedelta=False)  # type: ignore[no-any-return]
 
 
 def open_icechunk_dataset(
@@ -219,8 +227,8 @@ def open_icechunk_dataset(
 ) -> xr.Dataset:
     """Open an Icechunk-backed dataset through a readonly session pinned to the version it opened.
 
-    Opens what readers see (``published``, or ``main`` before the first publish) unless a writer
-    names its *branch*.
+    Opens what readers see (``main``, or the write branch before the first publish) unless a
+    writer names its *branch*.
 
     Dask chunks follow the stored chunks in space and merge them along time up to
     ``READ_CHUNK_TARGET_BYTES``, so computations are sized for dask rather than for storage.
@@ -236,8 +244,8 @@ def open_icechunk_dataset(
     path = Path(store_path)
     if not path.exists():
         raise FileNotFoundError(f"Icechunk store not found: {path}")
-    storage = icechunk.local_filesystem_storage(str(path))
-    repo = icechunk.Repository.open(storage)
+    repo_storage = storage.icechunk_storage(str(path))
+    repo = icechunk.Repository.open(repo_storage)
     if branch is None:
         from open_geo_service.streaming.store import read_snapshot
 
@@ -264,12 +272,9 @@ def open_icechunk_dataset(
         t_dim = None
     time_chunk = _read_time_chunk(probe, t_dim) if t_dim is not None and merge_time else None
     probe.close()
-    if time_chunk is not None and t_dim is not None:
-        ds = _open_zarr_group(session.store, group, chunks={t_dim: time_chunk})
-    elif not merge_time:
-        ds = _open_zarr_group(session.store, group, chunks={})
-    else:
-        ds = _open_zarr_group(session.store, group, chunks="auto")
+    # ``{}`` keeps the stored chunks; "auto" would merge every dimension, space included.
+    chunks = {t_dim: time_chunk} if time_chunk is not None and t_dim is not None else {}
+    ds = _open_zarr_group(session.store, group, chunks=chunks)
     if not with_fetched_at and FETCHED_AT in ds.variables:
         ds = ds.drop_vars(FETCHED_AT)
     if t_dim is not None:

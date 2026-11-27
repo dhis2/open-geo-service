@@ -79,7 +79,7 @@ def test_an_icechunk_store_is_measured_by_the_chunks_it_keeps(tmp_path: Path) ->
 
     store = tmp_path / "store.icechunk"
     repo = open_or_create_repo(store)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     # Random values, too large to compress below the size Icechunk inlines into manifests.
     data = np.random.default_rng(0).random((64, 64), dtype="float32")
     xr.Dataset({"v": (("y", "x"), data)}).to_zarr(session.store, mode="w", zarr_format=3)
@@ -88,8 +88,8 @@ def test_an_icechunk_store_is_measured_by_the_chunks_it_keeps(tmp_path: Path) ->
     assert 0 < size <= data.nbytes
 
     # Branch operations rewrite the repository file and keep backups of it: no chunk changes.
-    repo.create_branch("published", repo.lookup_branch("main"))
-    repo.delete_branch("published")
+    repo.create_branch("kept", repo.lookup_branch("ingest"))
+    repo.delete_branch("kept")
     assert stored_bytes(store) == size
 
     # A store Icechunk cannot report on is measured by its files instead.
@@ -236,7 +236,7 @@ def test_a_failed_append_that_keeps_its_commits_refreshes_the_recorded_size(
     def failing_sync(**_kwargs: object) -> object:
         # Commit two more days, as the orchestrator does period by period, then fail.
         repo = icechunk.Repository.open(icechunk.local_filesystem_storage(str(store_path)))
-        session = repo.writable_session("main")
+        session = repo.writable_session("ingest")
         cube("2026-01-04", 2).to_zarr(session.store, append_dim="t", zarr_format=3, consolidated=False)
         session.commit("append two days")
         raise RuntimeError("source failed on the third new day")
@@ -332,7 +332,7 @@ def test_the_backfill_keeps_statistics_a_sync_recorded_while_it_measured(
     record = _published_without_statistics(tmp_path, monkeypatch)
     synced = ArtifactStatistics(**dict.fromkeys(ArtifactStatistics.model_fields, 99.0))
 
-    def measure_while_a_sync_lands(store_path: object, variable: str, branch: str = "main") -> ArtifactStatistics:
+    def measure_while_a_sync_lands(store_path: object, variable: str, branch: str = "ingest") -> ArtifactStatistics:
         def sync(records: list[Any]) -> None:
             for index, stored in enumerate(records):
                 records[index] = stored.model_copy(update={"statistics": synced})

@@ -104,7 +104,7 @@ def test_a_source_licence_without_an_spdx_identifier_makes_the_table_other_and_l
     _computed("temperature", "districts")
 
     assert _listed(client)["license"] == "other"
-    collection = client.get("/stac/precip_districts/collection.json").json()
+    collection = client.get("/stac/tables/precip_districts/collection.json").json()
     assert collection["license"] == "other"
     assert [link["href"] for link in collection["links"] if link["rel"] == "license"] == [
         COPERNICUS_LICENCE,
@@ -137,18 +137,22 @@ def test_a_derived_source_without_a_licence_is_followed_to_the_datasets_it_was_c
     assert _listed(client)["license"] == "CC-BY-4.0 AND ODbL-1.0"
 
 
-def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(client: TestClient) -> None:
+def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A public instance: Portolan asks for the host's address, which only configuration knows.
+    monkeypatch.setenv("GEOSERVICE_BASE_URL", "http://testserver")
     record = _computed("precip", "districts")
 
-    catalog = client.get("/stac/catalog.json").json()
-    assert "http://testserver/stac/precip_districts/collection.json" in [
-        link["href"] for link in catalog["links"] if link["rel"] == "child"
-    ]
-    assert {"rel": "stac", "href": "/stac/precip_districts/collection.json", "title": "STAC collection"} in _listed(
-        client
-    )["links"]
+    catalog = client.get("/stac/tables/catalog.json").json()
+    assert "./precip_districts/collection.json" in [link["href"] for link in catalog["links"] if link["rel"] == "child"]
+    assert {
+        "rel": "stac",
+        "href": "/stac/tables/precip_districts/collection.json",
+        "title": "STAC collection",
+    } in _listed(client)["links"]
 
-    collection = client.get("/stac/precip_districts/collection.json").json()
+    collection = client.get("/stac/tables/precip_districts/collection.json").json()
     # STAC and Portolan take an SPDX identifier or `other`, not an expression: `other`, and a link to each.
     assert collection["license"] == "other"
     assert [(link["href"], link["title"]) for link in collection["links"] if link["rel"] == "license"] == [
@@ -165,7 +169,7 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     assert columns["period_start"]["type"] == "date32[day]"
 
     data = collection["assets"]["data"]
-    assert data["href"] == "http://testserver/tables/precip_districts/data.parquet"
+    assert data["href"] == f"./{Path(record.asset_paths[0]).name}", "the file beside the collection"
     assert data["roles"] == ["data"]
     assert data["description"]
     path = Path(record.asset_paths[0])
@@ -173,12 +177,12 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     assert data["file:checksum"].startswith("1220")
 
     links = collection["links"]
+    # Only the published input: `precip` has a template but no collection, so a link would not resolve.
     assert [link["href"] for link in links if link["rel"] == "derived_from"] == [
-        "http://testserver/stac/precip/collection.json",
-        "http://testserver/stac/districts/collection.json",
+        "../../vectors/districts/collection.json",
     ]
     assert [link["href"] for link in links if link["rel"] == "via"] == [PRECIP["source_url"]]
-    assert {link["rel"] for link in links} >= {"self", "root", "parent", "describedby", "agents"}
+    assert {link["rel"] for link in links} >= {"root", "parent", "describedby", "agents"}
     assert [(provider["name"], provider.get("roles")) for provider in collection["providers"]] == [
         ("UCSB Climate Hazards Center", ["producer"]),
         ("Overture Maps", ["producer", "licensor"]),
@@ -187,7 +191,11 @@ def test_the_stac_collection_describes_the_table_and_meets_the_portolan_schema(c
     ]
 
     # Over https, as an instance is served: Portolan refuses an http asset href without an https alternate.
-    served = TestClient(client.app, base_url="https://testserver").get("/stac/precip_districts/collection.json").json()
+    served = (
+        TestClient(client.app, base_url="https://testserver")
+        .get("/stac/tables/precip_districts/collection.json")
+        .json()
+    )
     schemas = Path(__file__).parent / "data"
     jsonschema.validate(served, json.loads((schemas / "portolan_v0.3.0.json").read_text()))
     jsonschema.validate(served, json.loads((schemas / "stac_processing_v1.2.0.json").read_text()))
@@ -205,17 +213,18 @@ def test_the_data_asset_serves_the_tables_file(client: TestClient) -> None:
 def test_the_readme_documents_the_columns_and_joins_the_table_to_its_features(client: TestClient) -> None:
     _computed("precip", "districts")
 
-    readme = client.get("/stac/precip_districts/README.md").text
+    readme = client.get("/stac/tables/precip_districts/README.md").text
     assert "- CC-BY-4.0\n- ODbL-1.0" in readme
     assert "Monthly periods from 2026-01 to 2026-02." in readme
     assert "| `value` | double |" in readme
-    assert "JOIN 'http://testserver/features/districts/data.parquet' AS f" in readme
+    # The features' file in the catalog, relative to the table's folder.
+    assert "JOIN '../../vectors/districts/districts." in readme
     assert """ON t."collection_id" = 'districts'""" in readme
     assert 'CAST(f."orgUnitCode" AS VARCHAR) = t."feature_id"' in readme
 
-    agents = client.get("/stac/precip_districts/AGENTS.md").text
-    assert "http://testserver/tables/precip_districts/data.parquet" in agents
-    assert "(table)" in client.get("/stac/README.md").text
+    agents = client.get("/stac/tables/precip_districts/AGENTS.md").text
+    assert "The data is one Parquet file: ./" in agents and "/tables/precip_districts/rows" in agents
+    assert "## [Tables](./tables/catalog.json)" in client.get("/stac/README.md").text
 
 
 def test_the_dataset_page_shows_each_features_latest_value(client: TestClient) -> None:
@@ -243,7 +252,7 @@ def test_the_dataset_page_shows_each_features_latest_value(client: TestClient) -
         "Precipitation by district: values per feature and monthly period, computed from Precipitation and Districts."
     )
     assert description in page
-    assert client.get("/stac/precip_districts/collection.json").json()["description"] == description
+    assert client.get("/stac/tables/precip_districts/collection.json").json()["description"] == description
 
     rows = client.get("/tables/precip_districts/rows", params={"feature": "D2"}).json()["items"]
     assert [(row["feature_id"], row["period"], row["value"]) for row in rows] == [
@@ -346,6 +355,8 @@ STATION_SCHEMA = """
     - {name: day, type: date, required: true, nullable: false, represents: period_start, description: Day observed.}
     - {name: rainfall, type: double, unit: mm, represents: value, description: Rainfall over the day.}
     - {name: gauges, type: int32, description: Gauges read.}
+    - {name: reading, type: double, represents: value, description: Reading of the station's other gauge.}
+    - {name: unit, type: string, description: Unit of the reading.}
   key: [station, day]
 - id: district_daily
   name: Daily district values, by a feature column named as the latest values name a period
@@ -374,7 +385,10 @@ def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_
         return store.write_rows(dataset_id="stations", rows=rows, dataset_name="Station rainfall", **arguments)
 
     record = write(
-        [{"station": "S1", "day": "2026-01-02", "rainfall": 4.0}, {"station": "S1", "day": "2026-01-01"}],
+        [
+            {"station": "S1", "day": "2026-01-02", "rainfall": 4.0, "reading": 0.2, "unit": "in"},
+            {"station": "S1", "day": "2026-01-01"},
+        ],
         schema="station_daily",
         period_type="daily",
     )
@@ -394,22 +408,24 @@ def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_
         ("S1", "2026-01-02", "2026-01-02", "2026-01-02", 4.0),
     ]
     header = client.get("/tables/stations/rows", params={"format": "csv"}).text.splitlines()[0]
-    assert header == "station,period,day,period_end,rainfall,gauges,written_at"
+    assert header == "station,period,day,period_end,rainfall,gauges,reading,unit,written_at"
     assert client.get("/tables/stations/rows", params={"feature": "S1"}).status_code == 400
     assert client.get("/tables/stations/rows", params={"reducer": "mean"}).status_code == 400
 
-    collection = client.get("/stac/stations/collection.json").json()
+    collection = client.get("/stac/tables/stations/collection.json").json()
     assert collection["description"] == "Station rainfall: values per daily period."
-    columns = ["station", "day", "rainfall", "gauges", "written_at"]
+    columns = ["station", "day", "rainfall", "gauges", "reading", "unit", "written_at"]
     assert [column["name"] for column in collection["table:columns"]] == columns
-    assert collection["table:columns"][2]["unit"] == "mm"
+    # A unit the schema declares for a column stands; the unit column gives the other values theirs.
+    units = {column["name"]: column.get("unit") for column in collection["table:columns"]}
+    assert (units["rainfall"], units["reading"]) == ("mm", "in")
     assert collection["extent"]["temporal"]["interval"] == [["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"]]
     assert collection["extent"]["spatial"]["bbox"] == [[-180.0, -90.0, 180.0, 90.0]]
 
-    readme = client.get("/stac/stations/README.md").text
+    readme = client.get("/stac/tables/stations/README.md").text
     assert "Daily periods from 2026-01-01 to 2026-01-02." in readme and "Joining" not in readme
     assert "| `rainfall` | double | mm | Rainfall over the day. |" in readme
-    agents = client.get("/stac/stations/AGENTS.md").text
+    agents = client.get("/stac/tables/stations/AGENTS.md").text
     assert "one per key: `station`, `day`" in agents and "GeoParquet" not in agents
     page = client.get("/datasets/stations", params={"f": "html"}).text
     assert "Station rainfall" in page and "Latest value of each feature" not in page
@@ -421,7 +437,7 @@ def test_a_table_follows_the_schema_it_declares_and_skips_what_its_roles_do_not_
     schema_file.write_text(STATION_SCHEMA.replace("Rainfall over", "Rain over"), encoding="utf-8")
     schemas.reset_schema_caches()
     write([{"station": "S1", "day": "2026-01-03", "rainfall": 1.0}])
-    assert "| `rainfall` | double | mm | Rain over the day. |" in client.get("/stac/stations/README.md").text
+    assert "| `rainfall` | double | mm | Rain over the day. |" in client.get("/stac/tables/stations/README.md").text
     schema_file.write_text(STATION_SCHEMA.replace("name: rainfall", "name: precipitation"), encoding="utf-8")
     schemas.reset_schema_caches()
     with pytest.raises(ValueError, match="'station_daily' has changed its columns or key since table dataset"):

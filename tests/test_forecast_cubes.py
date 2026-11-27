@@ -238,14 +238,12 @@ def test_the_contract_still_requires_t_on_a_plain_cube() -> None:
 def test_committed_periods_of_a_forecast_store_are_its_issue_times(tmp_path: Path) -> None:
     """Read against `t`, a forecast store looks empty — and sync then takes the coverage
     horizon as "already ingested", which is 35 days ahead, so no new run is ever due."""
-    import icechunk
-
-    from open_geo_service.streaming.store import read_committed_period_ids
+    from open_geo_service.shared.branches import WRITE_BRANCH
+    from open_geo_service.streaming.store import open_or_create_repo, read_committed_period_ids
 
     cube = _cube(["2026-03-01", "2026-03-02"], leads=5)
     store = tmp_path / "fc.icechunk"
-    repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(store)))
-    session = repo.writable_session("main")
+    session = open_or_create_repo(store).writable_session(WRITE_BRANCH)
     cube.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("fc")
 

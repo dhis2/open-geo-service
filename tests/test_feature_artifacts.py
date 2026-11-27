@@ -772,7 +772,7 @@ def test_a_refresh_replaces_the_collection_even_when_the_extract_window_changed(
 
 def test_a_raster_still_keeps_one_record_per_request_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The feature identity rule is narrow: raster version history is untouched by it."""
-    # Unpublished: registering a published record moves its store's published branch, and these have no store.
+    # Unpublished: registering a published record moves its store's `main` branch, and these have no store.
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -843,10 +843,10 @@ def test_the_catalogue_and_openeo_both_advertise_a_feature_collection(
     """Every surface agrees: in STAC, `/datasets` and openEO, which loads it as a vector cube (CLIM-1326)."""
     monkeypatch.setattr(services, "list_artifacts", lambda: SimpleNamespace(items=[_feature_artifact()]))
 
-    catalog = client.get("/stac/catalog.json").json()
+    catalog = client.get("/stac/vectors/catalog.json").json()
     dataset = client.get("/datasets/districts").json()
 
-    assert any(link["href"].endswith("/stac/districts/collection.json") for link in catalog["links"])
+    assert "./districts/collection.json" in [link["href"] for link in catalog["links"]]
     assert {link["rel"] for link in dataset["links"]} == {"self", "stac", "features"}
     assert [collection["id"] for collection in client.get("/collections").json()["collections"]] == ["districts"]
 
@@ -864,7 +864,7 @@ def test_an_unpublished_feature_collection_is_advertised_nowhere(
     catalog = client.get("/stac/catalog.json").json()
 
     assert all("districts" not in link["href"] for link in catalog["links"])
-    assert client.get("/stac/districts/collection.json").status_code == 404
+    assert client.get("/stac/vectors/districts/collection.json").status_code == 404
     assert {link["rel"] for link in client.get("/datasets/districts").json()["links"]} == {"self"}
 
 
@@ -886,10 +886,10 @@ def test_the_feature_builder_needs_no_datacube_machinery(client: TestClient, mon
     monkeypatch.setattr(stac_services, "_open_published_store", unreachable)
     monkeypatch.setattr(stac_services, "_zarr_media_type", unreachable)
 
-    response = client.get("/stac/districts/collection.json")
+    response = client.get("/stac/vectors/districts/collection.json")
 
     assert response.status_code == 200
-    assert response.json()["id"] == "districts"
+    assert response.json()["id"] == "vectors/districts"
 
 
 def test_openeo_refuses_to_open_a_feature_collection_as_a_datacube() -> None:
@@ -1081,7 +1081,7 @@ def test_dataset_links_offer_stac_and_features_but_not_zarr_for_a_feature_collec
     links = services._dataset_links("districts", published, published=published)
 
     assert {link.rel for link in links} == {"self", "stac", "features"}
-    assert any(link.rel == "stac" and link.href == "/stac/districts/collection.json" for link in links)
+    assert any(link.rel == "stac" and link.href == "/stac/vectors/districts/collection.json" for link in links)
     assert any(link.rel == "features" and link.href == "/features/districts" for link in links)
 
 
@@ -1105,10 +1105,10 @@ def test_stac_collection_builder_still_serves_a_raster(client: TestClient, monke
     monkeypatch.setattr(stac_services, "_zarr_asset_metadata", lambda _: {})
     monkeypatch.setattr(stac_services, "_zarr_open_kwargs", lambda _: {})
 
-    response = client.get("/stac/chirps3_precipitation_daily/collection.json")
+    response = client.get("/stac/rasters/chirps3_precipitation_daily/collection.json")
 
     assert response.status_code == 200
-    assert response.json()["id"] == "chirps3_precipitation_daily"
+    assert response.json()["id"] == "rasters/chirps3_precipitation_daily"
 
 
 # --- the server-rendered pages ------------------------------------------------------------

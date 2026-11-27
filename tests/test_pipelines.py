@@ -44,6 +44,7 @@ from open_geo_service.pipelines.schemas import (
     ValidationResult,
     WorkflowReference,
 )
+from open_geo_service.shared import layout
 
 from .conftest import MountedClientFactory, WebhookReceiver
 
@@ -2087,12 +2088,27 @@ def test_a_permanent_submission_failure_is_not_retried_and_can_run_again(
     runner.recover_runs()
     assert store.get_record("rain-to-dhis2").runs[0].submission == "failed"  # type: ignore[union-attr]
     assert openeo.started == []
+    # Who ran it again is recorded for audit; a run started in code, as above, names no one.
+    monkeypatch.setenv("GEOSERVICE_TEST_CAPS", "caps-secret-0123456789abcdef0123456789")
+    caps = {"id": "caps", "token_env": "GEOSERVICE_TEST_CAPS", "tier": "operator"}
+    api_config._cache["authentication"] = {"tokens": [caps]}  # type: ignore[index]
     retried = client.post(
-        f"/pipelines/rain-to-dhis2/runs/{failed.run_id}/retry", headers={"Accept": "application/json"}
+        f"/pipelines/rain-to-dhis2/runs/{failed.run_id}/retry",
+        headers={"Accept": "application/json", "Authorization": "Bearer caps-secret-0123456789abcdef0123456789"},
     )
     assert retried.status_code == 202
     body = retried.json()
     assert body["trigger"] == "retry" and body["retry_of"] == failed.run_id and body["submission"] == "submitted"
+    assert body["started_by"] == "token:caps" and failed.started_by is None
+    # Run status stays a public read, without who started it, in JSON and on the page.
+    run_url = f"/pipelines/rain-to-dhis2/runs/{body['run_id']}"
+    assert client.get(run_url, headers={"Accept": "application/json"}).json()["started_by"] is None
+    assert "by token:caps" not in client.get("/pipelines/rain-to-dhis2", headers={"Accept": "text/html"}).text
+    operator = {"Authorization": "Bearer caps-secret-0123456789abcdef0123456789"}
+    assert (
+        client.get("/pipelines/rain-to-dhis2", headers={"Accept": "text/html", **operator}).text.count("by token:caps")
+        == 1
+    )
     assert (body["start"], body["end"]) == ("2025-01-01", "2025-01-31") and body["job_id"] != failed.job_id
 
 
@@ -2645,6 +2661,7 @@ def test_a_dataset_update_runs_the_same_path_once(
     assert record is not None and len(record.runs) == 1
     run = record.runs[0]
     assert run.trigger == "dataset_update" and run.event_id == "evt-1" and run.mode == "dry_run"
+    assert run.started_by == "service:pipeline-runner"
     assert (run.start, run.end) == ("2025-01-31", "2025-02-28")
     assert run.source["artifact_id"] == "artifact-7" and run.source["datasets"] == ["rain_monthly"]
     assert len(openeo.started) == 1
@@ -3590,7 +3607,7 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
     )
     monkeypatch.setattr(registry, "CONFIGS_DIR", configs)
     registry.reset_template_caches()
-    (tmp_path / "managed" / "rasters").mkdir()
+    (tmp_path / "managed" / "catalog" / "rasters").mkdir(parents=True)
     monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path / "managed")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", tmp_path / "artifacts" / "records.json")
@@ -3624,7 +3641,7 @@ def test_end_to_end_an_anomaly_dataset_publishes_and_drives_a_pipeline_to_dhis2(
         if id == "rain_normal_monthly":
             return normal()
         if id == derived:  # what the anomaly job published, read back from its store
-            store = tmp_path / "managed" / "rasters" / f"{derived}.icechunk"
+            store = layout.raster_store(derived)
             with open_icechunk_dataset(str(store)) as ds:
                 return ds["precip"].load()
         raise AssertionError(f"unexpected collection {id}")

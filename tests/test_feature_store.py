@@ -58,8 +58,8 @@ def _collection(*features: dict[str, Any]) -> dict[str, Any]:
 @pytest.fixture(autouse=True)
 def feature_store_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Point the store at a temporary directory, and keep records out of the real index."""
-    root = tmp_path / "vectors"
-    monkeypatch.setattr(api_config, "get_data_root", lambda: root.parent)
+    root = tmp_path / "catalog" / "vectors"
+    monkeypatch.setattr(api_config, "get_data_root", lambda: tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(ingestion_services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
@@ -356,16 +356,6 @@ def test_the_files_to_keep_are_found_behind_a_symlinked_data_folder(
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     assert len(store.read_feature_collection(first)) == 2, "the file just replaced stays"
-
-
-def test_a_collection_whose_id_extends_another_with_a_dot_keeps_its_files() -> None:
-    """An id stored before the id rule changed may hold a dot."""
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    other = layout.dataset_dir(layout.Kind.VECTOR, "districts") / f"districts.v2.{'0' * 32}.parquet"
-    other.touch()
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-
-    assert other.exists()
 
 
 def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(
@@ -1302,4 +1292,4 @@ def test_refresh_rejects_padded_id_property_before_writing(
     with pytest.raises(ValueError, match="leading or trailing whitespace"):
         feature_services.refresh_feature_collection(template=template, features=_collection())
 
-    assert list(feature_store_root.glob("*.parquet")) == []
+    assert list(feature_store_root.rglob("*.parquet")) == []

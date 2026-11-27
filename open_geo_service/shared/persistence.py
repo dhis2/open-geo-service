@@ -18,6 +18,22 @@ from open_geo_service import writer_lease
 _UMASK = os.umask(0)
 os.umask(_UMASK)
 
+LOCK_RETRY_SECONDS = 0.05
+
+
+def lock_exclusive(handle: Any) -> None:
+    """Lock the open file ``handle`` exclusively, waiting however long another holder keeps it.
+
+    portalocker's blocking lock gives up after about 9 seconds on Windows, where the C runtime
+    tries ``LK_LOCK`` ten times a second apart, so this retries the non-blocking lock instead.
+    """
+    while True:
+        try:
+            portalocker.lock(handle, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            return
+        except portalocker.exceptions.AlreadyLocked:
+            time.sleep(LOCK_RETRY_SECONDS)
+
 
 @contextmanager
 def index_lock(path: Path) -> Generator[None]:
@@ -29,7 +45,7 @@ def index_lock(path: Path) -> Generator[None]:
     writer_lease.ensure_held()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix(path.suffix + ".lock"), "a", encoding="utf-8") as handle:
-        portalocker.lock(handle, portalocker.LOCK_EX)
+        lock_exclusive(handle)
         try:
             yield
         finally:
@@ -105,7 +121,7 @@ def atomic_text(path: Path, text: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, _file_mode(path))
-        _replace(temporary, path)
+        replace_file(temporary, path)
         temporary = None
         if os.name != "nt":
             descriptor = os.open(path.parent, os.O_RDONLY)
@@ -126,7 +142,7 @@ def _file_mode(path: Path) -> int:
         return 0o666 & ~_UMASK
 
 
-def _replace(source: str, target: Path, attempts: int = 20) -> None:
+def replace_file(source: str | Path, target: Path, attempts: int = 20) -> None:
     """`os.replace`, retried briefly while Windows refuses to replace a file a reader has open.
 
     Readers of some indexes, such as the artifact records, do not take the lock, so they never wait

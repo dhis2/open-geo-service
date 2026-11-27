@@ -470,7 +470,7 @@ def test_result_assets_managed_dataset_exposes_links(monkeypatch: pytest.MonkeyP
         lambda: {"my_aggregate": object()},
     )
     published = _result_assets(_record("managed://my_aggregate"))
-    assert published["stac"]["href"] == "/stac/my_aggregate/collection.json"
+    assert published["stac"]["href"] == "/stac/rasters/my_aggregate/collection.json"
 
 
 def _store_finished_job(job_id: str) -> None:
@@ -1665,7 +1665,11 @@ def test_persist_result_writes_icechunk_when_dataset_id_in_options(
     result = job_service._persist_result("job-managed", envelope)
 
     assert result == "managed://my_aggregate"
-    assert (tmp_path / "rasters" / "my_aggregate.icechunk").exists()
+    # The dataset's folder holds its store and nothing GeoService keeps for itself.
+    assert sorted(path.name for path in (tmp_path / "catalog" / "rasters" / "my_aggregate").iterdir()) == [
+        "my_aggregate.icechunk",
+        "thumbnail.png",
+    ]
     assert len(registered) == 1
     record, publish_flag = registered[0]
     assert record.dataset_id == "my_aggregate"
@@ -1722,7 +1726,7 @@ def test_persist_result_stamps_cf_attrs_from_template(
     envelope = SaveResultEnvelope(_small_dataset(), "Zarr", {"dataset_id": "cf_aggregate", "publish": False})
     job_service._persist_result("job-cf", envelope)
 
-    written = open_icechunk_dataset(str(tmp_path / "rasters" / "cf_aggregate.icechunk"))
+    written = open_icechunk_dataset(str(tmp_path / "catalog" / "rasters" / "cf_aggregate" / "cf_aggregate.icechunk"))
     try:
         attrs = written["precip"].attrs
         assert attrs.get("units") == "mm"
@@ -1771,7 +1775,7 @@ def test_persist_result_replaces_a_process_s_labels_with_the_template_s(
     options = {"dataset_id": "heat_days", "variable": "precip", "publish": False}
     job_service._persist_result("job-labels", SaveResultEnvelope(result, "Zarr", options))
 
-    written = open_icechunk_dataset(str(tmp_path / "rasters" / "heat_days.icechunk"))
+    written = open_icechunk_dataset(str(tmp_path / "catalog" / "rasters" / "heat_days" / "heat_days.icechunk"))
     try:
         attrs = written["precip"].attrs
         assert attrs["long_name"] == "Heat-stress days, WBGT max above 30 degrees C"
@@ -1867,7 +1871,7 @@ def test_persist_result_uses_icechunk_when_pyramid_needed(
 
     record, _ = registered[0]
     assert record.format == ArtifactFormat.ICECHUNK
-    assert record.path == str(tmp_path / "rasters" / "big_dataset.icechunk")
+    assert record.path == str(tmp_path / "catalog" / "rasters" / "big_dataset" / "big_dataset.icechunk")
 
 
 def test_persist_result_falls_through_to_ephemeral_zarr_without_dataset_id(

@@ -66,7 +66,7 @@ def test_read_committed_period_ids_ordinal_coord(tmp_path: Path) -> None:
     # garbage — otherwise resume would re-append everything.
     store_path = tmp_path / "ordinal.icechunk"
     repo = open_or_create_repo(store_path)
-    session = repo.writable_session("main")
+    session = repo.writable_session("ingest")
     _dayofyear_cube().to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("ingest: ordinal")
 
