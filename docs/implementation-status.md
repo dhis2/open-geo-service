@@ -209,7 +209,7 @@ Implemented sync behavior:
 3. Open Geo Service takes the bbox of the instance's configured extent
 4. Open Geo Service checks for an existing matching internal artifact
 5. if needed, Open Geo Service downloads the source data
-6. Open Geo Service writes the data to the dataset's Icechunk repository
+6. Open Geo Service writes a raster data source to the dataset's Icechunk repository, and a table data source's rows to its Parquet files
 7. Open Geo Service computes realized coverage metadata
 8. Open Geo Service stores an internal artifact record
 9. if `publish=true`, Open Geo Service publishes the dataset as a STAC collection
