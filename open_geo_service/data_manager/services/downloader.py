@@ -457,7 +457,14 @@ class _PyramidLevels:
 
 
 def _open_pyramid_levels(
-    store_path: Path, *, pyramid_method: str, t_dim: str | None, x_dim: str, y_dim: str, branch: str
+    store_path: Path,
+    *,
+    pyramid_method: str,
+    t_dim: str | None,
+    x_dim: str,
+    y_dim: str,
+    branch: str,
+    session: Any | None = None,
 ) -> _PyramidLevels | None:
     """Open a pyramid store on *branch* for an in-place update, or None when it cannot take one.
 
@@ -466,15 +473,18 @@ def _open_pyramid_levels(
     rebuilds then.
 
     ``t_dim`` defaults to the leading dim of level 0's data variables: publication renames
-    time aliases to ``t``, but a climatology keeps its own (``dayofyear``).
+    time aliases to ``t``, but a climatology keeps its own (``dayofyear``). ``session`` is a
+    writable session already open on *branch*, whose uncommitted writes to level 0 the levels
+    then follow; by default a new one is opened.
     """
     import icechunk
 
     from open_geo_service.stac.media_types import attributes_declare_multiscales
 
     method = _normalize_resampling_method(pyramid_method)
-    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
-    session = repo.writable_session(branch)
+    if session is None:
+        repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
+        session = repo.writable_session(branch)
     root = zarr.open_group(session.store, mode="r+")
     root_attrs = dict(root.attrs)
     if not attributes_declare_multiscales(root_attrs):
@@ -532,6 +542,16 @@ def append_pyramid_levels(
     )
     if pyramid is None:
         return None
+    appended = _extend_pyramid(pyramid)
+    if not appended:
+        return appended
+    _commit(pyramid.session, f"Appended {appended} period(s) to every pyramid level", amend=amend)
+    logger.info("Appended %d period(s) to the pyramid levels of '%s'", appended, store_path.name)
+    return appended
+
+
+def _extend_pyramid(pyramid: _PyramidLevels) -> int | None:
+    """Write the coarser levels of the periods level 0 has gained, uncommitted; as `append_pyramid_levels`."""
     session, root, groups, base, t_dim = pyramid.session, pyramid.root, pyramid.groups, pyramid.base, pyramid.t_dim
     base_t, total = pyramid.base_t, pyramid.total
 
@@ -580,8 +600,6 @@ def append_pyramid_levels(
 
     if root_times is not None:
         _write_root_time_coordinate(session.store, xr.Dataset(coords={t_dim: base_times}), time_dim=t_dim)
-    _commit(session, f"Appended {appended} period(s) to every pyramid level", amend=amend)
-    logger.info("Appended %d period(s) to the pyramid levels of '%s'", appended, store_path.name)
     return appended
 
 
@@ -611,6 +629,16 @@ def rewrite_pyramid_levels(
     )
     if pyramid is None:
         return None
+    rewritten = _rewrite_pyramid(pyramid, indices)
+    if not rewritten:
+        return rewritten
+    _commit(pyramid.session, f"Rewrote {rewritten} period(s) on every pyramid level", amend=amend)
+    logger.info("Rewrote %d period(s) on the pyramid levels of '%s'", rewritten, store_path.name)
+    return rewritten
+
+
+def _rewrite_pyramid(pyramid: _PyramidLevels, indices: list[int]) -> int | None:
+    """Rewrite the coarser levels of the periods at ``indices``, uncommitted; as `rewrite_pyramid_levels`."""
     base_arrays = pyramid.timed_arrays(pyramid.base)
     for group in pyramid.groups:
         arrays = pyramid.timed_arrays(group)
@@ -621,8 +649,6 @@ def rewrite_pyramid_levels(
     if not indices:
         return 0
     pyramid.write_periods(indices)
-    _commit(pyramid.session, f"Rewrote {len(set(indices))} period(s) on every pyramid level", amend=amend)
-    logger.info("Rewrote %d period(s) on the pyramid levels of '%s'", len(set(indices)), store_path.name)
     return len(set(indices))
 
 
@@ -938,6 +964,107 @@ def write_to_icechunk_store(
     if before_commit is not None:
         before_commit()
     return str(_commit(session, commit_message, amend=amend, metadata=metadata))
+
+
+def merge_into_icechunk_store(
+    ds: xr.Dataset,
+    store_path: Path,
+    x_dim: str = "x",
+    y_dim: str = "y",
+    t_dim: str = "t",
+    *,
+    crs: str | None = None,
+    pyramid_method: str = "mean",
+    commit_message: str = "Merged periods",
+    before_commit: Callable[[], None] | None = None,
+    branch: str = WRITE_BRANCH,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Write *ds*'s periods into the existing store at *store_path*, leaving its other periods as they are.
+
+    A period the store holds is written in its place and a later one is appended, the writes a
+    sync makes (CLIM-931); a pyramid's coarser levels follow those periods only. One commit,
+    with ``before_commit`` run just before it, as in `write_to_icechunk_store`. Returns the
+    committed snapshot id.
+
+    Raises ValueError, writing nothing, when *ds* holds a period before the store's last that
+    the store lacks, its grid or time-aligned variables differ from the store's, or the
+    pyramid's levels cannot be updated in place: such a result needs a full rewrite.
+    """
+    import rioxarray as _rxr  # noqa: F401  # pyright: ignore[reportUnusedImport]  # activates .rio accessor
+
+    from open_geo_service.shared.raster_contract import spatial_coords_match
+    from open_geo_service.stac.media_types import attributes_declare_multiscales
+    from open_geo_service.streaming.store import open_or_create_repo
+
+    prepared = prepare_for_publication(ds, fallback_crs=crs, time_dim="t", x_dim=x_dim, y_dim=y_dim)
+    t_dim = "t"
+    # As `write_to_icechunk_store` describes the CRS, since an append rewrites `spatial_ref`.
+    ds = prepared.dataset.assign_attrs(store_crs_attrs(prepared.crs)).sortby(t_dim)
+    ds = ds.proj.assign_crs(spatial_ref=prepared.crs)
+    ds = ds.rio.write_crs(prepared.crs)
+    ds = ds.proj.assign_crs(spatial_ref=prepared.crs)
+    repo = open_or_create_repo(store_path)
+    session = repo.writable_session(branch)
+    group = "0" if attributes_declare_multiscales(dict(zarr.open_group(session.store, mode="r").attrs)) else None
+    with xr.open_zarr(session.store, group=group, zarr_format=3) as stored:
+        stored_times = stored[t_dim].values
+        stored_timed = {str(name) for name, var in stored.data_vars.items() if t_dim in var.dims}
+        for axis in (x_dim, y_dim):
+            if not spatial_coords_match(stored[axis].values, ds[axis].values, axis=axis):
+                raise ValueError(
+                    f"Cannot merge into {store_path.name}: its {axis!r} coordinates differ from the result's"
+                )
+    timed = {str(name) for name, var in ds.data_vars.items() if t_dim in var.dims}
+    if timed != stored_timed:
+        raise ValueError(
+            f"Cannot merge into {store_path.name}: it holds {sorted(stored_timed)} along time, "
+            f"the result {sorted(timed)}"
+        )
+    positions = {value: index for index, value in enumerate(stored_times)}
+    in_place = [(step, positions[value]) for step, value in enumerate(ds[t_dim].values) if value in positions]
+    added = len(ds[t_dim]) - len(in_place)
+    if added and (
+        [step for step, _ in in_place] != list(range(len(in_place)))
+        or (len(stored_times) > 0 and ds[t_dim].values[len(in_place)] <= stored_times.max())
+    ):
+        raise ValueError(
+            f"Cannot merge into {store_path.name}: the result has periods the store lacks before its last one"
+        )
+
+    level = zarr.open_group(session.store, path=group or "", mode="r")
+    attrs = dict(level.attrs)  # xarray replaces a group's attrs with the written dataset's
+    along_time = ds.drop_vars([name for name in ds.variables if t_dim not in ds[name].dims])
+    for step, index in in_place:
+        along_time.isel({t_dim: [step]}).to_zarr(
+            session.store, group=group, region={t_dim: slice(index, index + 1)}, zarr_format=3
+        )
+    if added:
+        ds.isel({t_dim: slice(len(in_place), None)}).to_zarr(
+            session.store, group=group, append_dim=t_dim, zarr_format=3
+        )
+    zarr.open_group(session.store, path=group or "", mode="r+").attrs.put(attrs)
+
+    if group is not None:
+        pyramid = _open_pyramid_levels(
+            store_path,
+            pyramid_method=pyramid_method,
+            t_dim=t_dim,
+            x_dim=x_dim,
+            y_dim=y_dim,
+            branch=branch,
+            session=session,
+        )
+        if (
+            pyramid is None
+            or _extend_pyramid(pyramid) is None
+            or _rewrite_pyramid(pyramid, [index for _, index in in_place]) is None
+        ):
+            raise ValueError(f"Cannot merge into {store_path.name}: its pyramid levels cannot be updated in place")
+
+    if before_commit is not None:
+        before_commit()
+    return str(_commit(session, commit_message, amend=False, metadata=metadata))
 
 
 def _commit(session: Any, message: str, *, amend: bool, metadata: dict[str, Any] | None = None) -> str:
