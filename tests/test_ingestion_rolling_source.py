@@ -28,6 +28,8 @@ class _RollingPlugin(BaseDatasetPlugin):
         self.fetched: list[str] = []
         # A source with a preliminary product: final values are the day plus 100.
         self.final = False
+        # Periods the source lists before it has values for them.
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         self.queries.append((start, end))
@@ -37,7 +39,11 @@ class _RollingPlugin(BaseDatasetPlugin):
         assert period_id in self.available, "Retired source periods must not be fetched"
         self.fetched.append(period_id)
         data = xr.DataArray(
-            np.full((2, 2), int(period_id[-2:]) + (100 if self.final else 0), dtype="float32"),
+            np.full(
+                (2, 2),
+                np.nan if period_id in self.empty else int(period_id[-2:]) + (100 if self.final else 0),
+                dtype="float32",
+            ),
             dims=("y", "x"),
             coords={"y": [3.5, 2.5], "x": [1.5, 2.5]},
         )
@@ -297,9 +303,9 @@ def _sync(end: str) -> services.SyncResponse:
     return services.sync_dataset(dataset_id="rolling_precip", end=end, publish=False)
 
 
-def _pipeline_runs(response: services.SyncResponse) -> list[tuple[str, str, str] | None]:
-    """The interval a pipeline following the dataset runs for each update event the sync emits."""
-    return [runner.update_interval(event.data) for event in processes.sync_update_events("rolling_precip", response)]
+def _pipeline_runs(response: services.SyncResponse) -> list[list[tuple[str, str]]]:
+    """The intervals a pipeline following the dataset runs, one each, for each update event the sync emits."""
+    return [runner.update_intervals(event.data) for event in processes.sync_update_events("rolling_precip", response)]
 
 
 def _stored(store_path: Path) -> tuple[list[float], list[datetime | None]]:
@@ -356,9 +362,8 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     assert _stored(store_path) == ([101.0, 2.0], [refreshed_at, ingested_at])
     assert response.dataset is not None
     assert [p.period for p in response.dataset.provisional_periods] == ["2026-01-02"]
-    # A pipeline following the dataset reruns from the replaced day, so its final value reaches
-    # the destination: from the day before, as for an append, which re-sends the last kept period.
-    assert _pipeline_runs(response) == [("2025-12-31", "2026-01-02", "appended")]
+    # A pipeline following the dataset reruns the replaced day, so its final value reaches the destination.
+    assert _pipeline_runs(response) == [[("2026-01-01", "2026-01-01")]]
 
     # A sync skipped past the second day's maturity still replaces it at the next one, in the
     # same sync as a new day is added.
@@ -372,7 +377,8 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     )
     assert _stored(store_path) == ([101.0, 102.0, 103.0], [refreshed_at, later, later])
     assert response.dataset is not None and response.dataset.provisional_periods == []
-    assert _pipeline_runs(response) == [("2026-01-01", "2026-01-03", "appended")]
+    # The replaced day and the added one touch, and are run as listed, not joined.
+    assert _pipeline_runs(response) == [[("2026-01-02", "2026-01-02"), ("2026-01-03", "2026-01-03")]]
     # Chunked as `t`, rechunked at the end of each sync, so the refresh and the append above
     # wrote into a chunk of several periods, and the planner reads the array in few requests.
     root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
@@ -381,6 +387,31 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     # Fetched after maturity, no period is due again: each was fetched at most twice.
     assert _sync("2026-01-03").status == "up_to_date"
     assert plugin.fetched == ["2026-01-01", "2026-01-02", "2026-01-01", "2026-01-02", "2026-01-03"]
+
+    # A daily sync once several recent days are preliminary (CLIM-2029): the oldest of them is
+    # replaced and a new day added, and a pipeline runs those two alone, not the days in between.
+    clock["now"] = datetime(2026, 1, 21, 6, tzinfo=UTC)
+    plugin.available += [f"2026-01-{day:02d}" for day in range(4, 14)]
+    # A day is final from ten days after it ends, at midnight UTC: 2026-01-10 from 2026-01-21
+    # 00:00, so fetched at 06:00 it is final, and 2026-01-11 through 2026-01-13 are preliminary.
+    _sync("2026-01-13")
+    clock["now"] = datetime(2026, 1, 22, 6, tzinfo=UTC)
+    plugin.available.append("2026-01-14")
+    response = _sync("2026-01-14")
+    assert response.sync_detail is not None and response.dataset is not None
+    assert (response.sync_detail.refresh_start, response.sync_detail.refresh_end) == ("2026-01-11", "2026-01-11")
+    assert [p.period for p in response.dataset.provisional_periods] == ["2026-01-12", "2026-01-13", "2026-01-14"]
+    assert _pipeline_runs(response) == [[("2026-01-11", "2026-01-11"), ("2026-01-14", "2026-01-14")]]
+
+    # A new day listed before the source has values for it is held back, not stored, so the
+    # update lists only the day replaced with its final value, and ends where the store does.
+    clock["now"] = datetime(2026, 1, 23, 6, tzinfo=UTC)
+    plugin.available.append("2026-01-15")
+    plugin.empty.add("2026-01-15")
+    response = _sync("2026-01-15")
+    [event] = processes.sync_update_events("rolling_precip", response)
+    assert runner.update_intervals(event.data) == [("2026-01-12", "2026-01-12")]
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-14")
 
 
 def test_a_store_written_before_fetched_at_gets_it_on_the_next_append(

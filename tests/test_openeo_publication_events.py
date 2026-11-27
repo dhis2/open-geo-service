@@ -254,14 +254,15 @@ def test_a_published_managed_dataset_emits_one_full_rewrite_update(
         "dataset_id": _DATASET,
         "artifact_id": artifact.artifact_id,
         "action": "full_rewrite",
-        "previous_end": None,  # a full rewrite: no earlier period is known unchanged
-        "current_start": artifact.coverage.temporal.start,
-        "current_end": artifact.coverage.temporal.end,
+        # A full rewrite: no period is known unchanged.
+        "changes": [{"start": artifact.coverage.temporal.start, "end": artifact.coverage.temporal.end}],
+        "coverage_start": artifact.coverage.temporal.start,
+        "coverage_end": artifact.coverage.temporal.end,
         "producer_type": "openeo",
         "producer_job_id": "job-1",
         "output_snapshot_id": publication.snapshot_id,
     }
-    assert (event.data["current_start"], event.data["current_end"]) == ("2026-01-01", "2026-01-03")
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-03")
     # The live consumer got exactly that event, and the shared log holds it.
     assert received == [event]
     assert persisted_events() == [event]
@@ -331,7 +332,7 @@ def test_a_full_store_rewrite_with_changed_coverage_keeps_the_published_artifact
     assert (after.coverage.temporal.start, after.coverage.temporal.end) == ("2025-12-31", "2026-01-04")
     [event] = _record("second").events
     assert event.data["artifact_id"] == before.artifact_id
-    assert (event.data["current_start"], event.data["current_end"]) == ("2025-12-31", "2026-01-04")
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2025-12-31", "2026-01-04")
     assert [item.event_id for item in received] == [_record("first").events[0].event_id, event.event_id]
 
 
@@ -353,7 +354,7 @@ def test_a_rewrite_that_would_shrink_a_published_dataset_is_refused(
     [before] = _artifacts()
     first_event = _assert_one_published_event("first")
 
-    # Only the updated periods, as a trigger over [previous_end, current_end] computes them.
+    # Only the updated periods, as a trigger over an update's changes computes them.
     _job("second", 7.0, monkeypatch, start=start, periods=periods, max_attempts=2)
     assert service._execute("second") is None  # permanent: not retried
     second = _record("second")

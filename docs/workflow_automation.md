@@ -24,7 +24,9 @@ and save through a pipeline's named export with `save_result(..., options={"expo
 
 An update is recorded only after a successful ingestion, sync or openEO publication has
 persisted it. Failed, cancelled and no-op runs announce nothing, and neither does re-ingesting
-a dataset that is already current. Ingestion and sync, whether queued, scheduled, run inline,
+a dataset that is already current, or a run whose new periods were all held back for having no
+values yet (see [Empty periods at the end of a run are not stored](architecture.md#empty-periods-at-the-end-of-a-run-are-not-stored)).
+Ingestion and sync, whether queued, scheduled, run inline,
 or started from the admin pages, all use the same path. Work run inline is recorded as a
 completed job under `/ingestions/jobs`, because that record is what makes its event durable
 after the operation returns. Unlike queued ingestion, inline execution has no pre-write job
@@ -37,10 +39,12 @@ the recovered job finds the data current and still emits the event it owed, exac
 
 The event says what changed: `dataset_id`, `artifact_id`, `action` (`ingest`, the sync
 planner's `append` or `rematerialize`, or `full_rewrite` for a dataset an openEO job
-published), `previous_end` (the coverage end before the update; when a sync replaced preliminary
-periods with final values, the period before the first of them; `null` when the whole store is
-new or rewritten), and `current_start` and `current_end` (the coverage after it). A pipeline
-runs the interval the update affected; a recipe always recomputes the whole coverage.
+published), `changes` (the ranges of periods the update wrote, each `{"start", "end"}` with
+both ends inclusive), and `coverage_start` and `coverage_end` (the coverage after it). An append
+lists the periods it added; a sync that also replaced preliminary periods with final values
+lists those as a range of their own, so the periods between are not included; a new or
+rewritten store lists its whole coverage. Ranges never overlap, and two that touch are not
+joined. A pipeline runs each range; a recipe always recomputes the whole coverage.
 
 ## Updates from derived datasets
 
@@ -54,7 +58,7 @@ derived dataset needs nothing special.
   record: an artifact that was already published stays published, and is announced, even when
   the job did not ask to publish. An unpublished output is stored and registered without one.
 - **It describes a full rewrite.** The managed writer replaces the whole store, so the event's
-  `action` is `full_rewrite`, `previous_end` is empty and `current_start`/`current_end` are the
+  `action` is `full_rewrite`, and its one change and `coverage_start`/`coverage_end` are the
   committed dataset's coverage. It does not claim which periods changed, so a pipeline on the
   dataset re-runs its whole coverage on every publication.
 - **A rewrite never shortens a published dataset.** One that would start later or end earlier

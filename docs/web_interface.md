@@ -271,22 +271,20 @@ refusal leaves the earlier delivery exactly as it was. If sending fails after th
 earlier delivery is kept and only the error is noted; the next attempt reuses the same new key,
 so a delivery the framework had already reserved is found rather than sent twice.
 
-**Dataset updates.** An update describes itself in one of two ways, and a run covers what it
-says changed, not the dataset's whole coverage:
+**Dataset updates.** An update lists the ranges of periods it changed (`changes`, see
+[Workflow automation](workflow_automation.md)), and the pipeline starts one run per range, not
+one over the dataset's whole coverage:
 
-- an *append* (`previous_end` set) changed the periods after `previous_end` and kept the earlier
-  ones as they were. The run covers `previous_end` to `current_end`, re-sending the last period
-  already stored, an overwrite at the destination;
-- a *rewrite* (`previous_end` empty: a new store or a rematerialisation) may have changed any
-  period, so the run covers the whole coverage after it, `current_start` to `current_end`.
+- an *append* lists the periods it added;
+- a sync that replaces preliminary periods with final values (see
+  [Preliminary periods](architecture.md#preliminary-periods)) lists them as a range of their own,
+  so their final values reach the destination without rerunning the periods in between;
+- a *rewrite* (a new store or a rematerialisation) may have changed any period, and lists the
+  whole coverage after it.
 
-The run records which (`source.update`). A sync that replaces preliminary periods with final
-values (see [Preliminary periods](architecture.md#preliminary-periods)) is an append whose
-`previous_end` lies before the first replaced period, so the run carries the final values to
-the destination. It covers every period from there to `current_end`, including those in between
-that did not change. Any other revision of past data at the source is followed only if the
-dataset is rematerialised; run that interval by hand. The interval's ends are passed to the
-workflow as the updates give them.
+The runs of one update are recorded together, with the decision on it. Any other revision of
+past data at the source is followed only if the dataset is rematerialised; run that interval by
+hand. Each range's ends are passed to the workflow as the update gives them.
 
 Each pipeline keeps a durable checkpoint of the updates it has decided on, written in the same
 write as the run an update starts. What happens to an update:
