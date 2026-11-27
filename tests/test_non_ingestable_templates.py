@@ -257,6 +257,16 @@ _BROKEN_RASTER = """\
   source_url: https://example.org
   sync: {kind: temporal}
   ingestion: {plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugn}
+- id: monthly_elevation
+  name: A static plugin copied into a monthly template
+  description: A raster template with a time axis whose plugin implements only fetch().
+  variable: elevation
+  units: m
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: open_geo_service.plugins.rasters.copdem.CopDEMPlugin}
 """
 
 _BROKEN_TABLE = """\
@@ -290,7 +300,11 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
     )
 
     listed = {t["id"]: t for t in client.get("/data-sources").json()}
-    broken = [("typo_rainfall", "cannot be imported"), ("wrong_class_table", "is not a BaseTablePlugin")]
+    broken = [
+        ("typo_rainfall", "cannot be imported"),
+        ("monthly_elevation", "does not implement periods() and fetch_period()"),
+        ("wrong_class_table", "is not a BaseTablePlugin"),
+    ]
     for dataset_id, reason in broken:
         assert listed[dataset_id]["ingestable"] is False
         assert reason in listed[dataset_id]["ingestion_error"]
@@ -304,5 +318,7 @@ def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
         page = client.get(f"/data-sources/{dataset_id}", params={"f": "html"}).text
         assert reason in page
         assert 'name="start"' not in page
+    # The listing can be public: it names the kind of failure, not the exception.
+    assert "AttributeError" not in listed["typo_rainfall"]["ingestion_error"]
     assert listed["chirps3_precipitation_daily"]["ingestable"] is True
     assert "ingestion_error" not in listed["chirps3_precipitation_daily"]

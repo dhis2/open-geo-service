@@ -200,6 +200,7 @@ async def test_manage_ingest_strips_string_inputs_and_treats_blank_end_as_none(
     template = {
         "id": "chirps3_precipitation_daily",
         "name": "CHIRPS3 precipitation",
+        "period_type": "daily",
         "ingestion": {"plugin": "open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin"},
     }
     monkeypatch.setattr(system_routes.asyncio, "to_thread", fake_to_thread)
