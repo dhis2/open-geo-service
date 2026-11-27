@@ -1,4 +1,4 @@
-"""Tests for the SPI curated wrapper and auto-registered xclim index processes."""
+"""Tests for the auto-registered xclim index processes, SPI among them."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import pandas as pd
 import pytest
 import xarray as xr
 from fastapi.testclient import TestClient
+from xclim.core import ValidationError
 from xclim.core.indicator import registry
 
 from open_geo_service.openeo.plugin_processes import load_plugin_processes
 from open_geo_service.openeo.xclim_processes import _REALMS, REPLACED
-from open_geo_service.plugins.processes.climate_indices import spi
 from open_geo_service.plugins.processes.precipitation_conversion import amount2rate, rate2amount
 from open_geo_service.process import get_process_metadata
 
@@ -39,81 +39,21 @@ def daily_tasmax() -> xr.DataArray:
 
 
 # ---------------------------------------------------------------------------
-# SPI — curated wrapper
+# SPI — xclim's own indicator, registered like the others (CLIM-2021)
 # ---------------------------------------------------------------------------
-
-
-def test_spi_is_registered_as_process() -> None:
-    meta = get_process_metadata(spi)
-    assert meta is not None
-    assert meta["id"] == "spi"
-    assert "SPI" in meta["summary"]
-
-
-def test_spi_parameters_include_window_and_calibration() -> None:
-    meta = get_process_metadata(spi)
-    assert meta is not None
-    param_names = {p["name"] for p in meta["parameters"]}
-    assert {"pr", "window", "cal_start", "cal_end", "freq"} <= param_names
-
-
-def test_spi_window_defaults() -> None:
-    meta = get_process_metadata(spi)
-    assert meta is not None
-    window_param = next(p for p in meta["parameters"] if p["name"] == "window")
-    assert window_param["optional"] is True
-    assert window_param["default"] == 1
-
-
-def test_spi1_returns_dataarray_with_time_dimension(daily_precip: xr.DataArray) -> None:
-    result = spi(daily_precip, window=1)
-    assert isinstance(result, xr.DataArray)
-    assert "time" in result.dims
-
-
-def test_spi1_output_length_matches_monthly_resampling(daily_precip: xr.DataArray) -> None:
-    result = spi(daily_precip, window=1)
-    assert result.sizes["time"] == 60
-
-
-def test_spi_drops_xclim_fit_diagnostic_coords(daily_precip: xr.DataArray) -> None:
-    """xclim attaches gamma-fit diagnostics as non-dim coords; we drop them so the
-    published store / STAC cube:variables expose only the SPI field, while keeping
-    georeferencing coords like spatial_ref."""
-    cube = daily_precip.assign_coords(spatial_ref=0)
-    result = spi(cube, window=3)
-    assert not {"prob_of_zero", "number_of_zeros", "number_of_notnull"} & set(result.coords)
-    assert "spatial_ref" in result.coords
-    assert result.dtype == "float32"
-
-
-def test_spi_accepts_ogs_t_dimension_and_returns_t(daily_precip: xr.DataArray) -> None:
-    """OGS stores name the temporal dim 't'; xclim needs 'time'. The wrapper renames
-    on-the-fly and restores 't' on the output, so graphs need no rename_dimension."""
-    cube_t = daily_precip.rename({"time": "t"})
-    result = spi(cube_t, window=1)
-    assert isinstance(result, xr.DataArray)
-    assert "t" in result.dims and "time" not in result.dims
-    assert result.sizes["t"] == 60
-
-
-def test_spi3_produces_different_values_than_spi1(daily_precip: xr.DataArray) -> None:
-    r1 = spi(daily_precip, window=1)
-    r3 = spi(daily_precip, window=3)
-    assert not np.allclose(r1.values, r3.values, equal_nan=True)
-
-
-def test_spi_with_calibration_period(daily_precip: xr.DataArray) -> None:
-    result = spi(daily_precip, window=1, cal_start="2000-01-01", cal_end="2002-12-31")
-    assert isinstance(result, xr.DataArray)
-    assert result.sizes["time"] == 60
 
 
 def test_spi_appears_in_get_processes_endpoint(client: TestClient) -> None:
     response = client.get("/processes")
     assert response.status_code == 200
-    ids = {p["id"] for p in response.json()["processes"]}
+    procs = {p["id"]: p for p in response.json()["processes"]}
+    ids = set(procs)
     assert {"spi", "amount2rate", "rate2amount"} <= ids
+    assert "SPI" in procs["spi"]["summary"]
+    spi_params = {p["name"]: p for p in procs["spi"]["parameters"]}
+    # The fit is the caller's choice, as xclim offers it.
+    assert {"pr", "window", "freq", "cal_start", "cal_end", "dist", "method", "fitkwargs"} <= set(spi_params)
+    assert spi_params["window"]["default"] == 1
     # Of xclim's `convert` realm, only the water-budget chain SPEI needs; its humidity converters
     # would repeat the earthkit-meteo processes under other names.
     assert {"potential_evapotranspiration", "water_budget", "water_budget_from_tas"} <= ids
@@ -176,18 +116,18 @@ def test_amount2rate_refuses_a_climatology() -> None:
         amount2rate(normal)
 
 
-def test_spi_of_totals_is_the_spi_of_accumulated_totals(daily_precip: xr.DataArray) -> None:
-    """SPI-3 is SPI-1 of 3-month totals (WMO-No. 1090), computed here without the wrapper's
-    own monthly sum or xclim's window. In float64, as float32 sums differ in the last digits."""
-    totals = _totals(pd.DatetimeIndex(daily_precip.time.values), daily_precip.values).astype("float64")
-    three_months = totals.resample(t="MS").sum().rolling(t=3).sum()
-    reference = spi(three_months.assign_attrs(units="mm month-1"), window=1)
+def test_spi_of_precipitation_totals_takes_their_rate(daily_precip: xr.DataArray) -> None:
+    """The chain in docs/climate_indices.md, through the registered processes."""
+    procs = dict(load_plugin_processes())
+    totals = _totals(pd.DatetimeIndex(daily_precip.time.values), daily_precip.values)
 
-    xr.testing.assert_allclose(spi(totals, window=3), reference)
-    # A rate, from amount2rate or stored, still goes to xclim as it is.
-    assert spi(amount2rate(totals), window=3).sizes["t"] == 60
-    with pytest.raises(ValueError, match="freq must be 'MS'"):
-        spi(totals, freq="YS")
+    spi3 = procs["spi"](pr=procs["amount2rate"](data=totals), window=3, freq="MS")
+
+    assert spi3.dims == ("t", "y", "x")
+    assert spi3.sizes["t"] == 60
+    assert np.isfinite(spi3.values).any()
+    with pytest.raises(ValidationError, match="units mm are not compatible"):
+        procs["spi"](pr=totals, window=3, freq="MS")
 
 
 def test_spei_from_precipitation_totals_and_temperature() -> None:
@@ -207,12 +147,6 @@ def test_spei_from_precipitation_totals_and_temperature() -> None:
     assert spei.dims == ("t", "y", "x")
     assert spei.sizes["t"] == 48
     assert np.isfinite(spei.values).any()
-
-
-def test_spi_process_summary_in_catalog(client: TestClient) -> None:
-    response = client.get("/processes")
-    procs = {p["id"]: p for p in response.json()["processes"]}
-    assert "SPI" in procs["spi"]["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -314,22 +248,6 @@ def test_xclim_returns_schema_is_datacube() -> None:
     assert meta is not None
     schema = meta.get("returns", {}).get("schema", {})
     assert schema.get("subtype") == "datacube", f"expected datacube subtype in returns schema, got {schema}"
-
-
-def test_spi_nullable_string_params_have_no_null_default() -> None:
-    """str | None parameters should not emit default=None with a string schema.
-
-    Emitting default=null alongside schema={'type':'string'} is a mismatch
-    that confuses clients which trust the metadata.
-    """
-    meta = get_process_metadata(spi)
-    assert meta is not None
-    for param in meta["parameters"]:
-        schema = param.get("schema", {})
-        if schema.get("type") == "string":
-            assert param.get("default") is not None or "default" not in param, (
-                f"Parameter '{param['name']}' has schema type=string but default=null"
-            )
 
 
 def test_dry_spell_via_process_graph(client: TestClient, daily_precip: xr.DataArray) -> None:

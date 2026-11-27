@@ -225,7 +225,7 @@
                   {% for r in runs %}
                   <tr>
                     <td>{{ r.submitted_at | when }}</td>
-                    <td>{{ r.trigger | replace('_', ' ') }}{% if r.source.dataset_id %} <span class="note">{{ r.source.dataset_id }}</span>{% endif %}</td>
+                    <td>{{ r.trigger | replace('_', ' ') }}{% if r.source.dataset_id %} <span class="note">{{ r.source.dataset_id }}</span>{% endif %}{% if r.started_by %} <span class="note">by {{ r.started_by }}</span>{% endif %}</td>
                     <td>{{ r.start }} to {{ r.end }}</td>
                     <td><span class="chip">{{ r.mode | replace('_', ' ') }}</span></td>
                     {% set stopped = r.submission == 'failed' or r.job_outcome or r.job_status in ['error', 'canceled'] %}

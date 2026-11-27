@@ -360,11 +360,79 @@ plain HTTP from another machine the page says so instead of showing the form. Be
 terminates TLS or rewrites the `Host` header, set `GEOSERVICE_BASE_URL` to the public origin, so
 the pages' origin is recognised; without it, sign-in is refused as coming from another site.
 
+People can sign in with an account they already have, through an OIDC provider: DHIS2 2.42 or
+later, Keycloak, Microsoft Entra ID, or any other that speaks OpenID Connect. A directory such as
+LDAP or Active Directory is reached through a provider in front of it (Keycloak, ADFS, Entra ID);
+Open Geo Service never talks to it directly.
+
+```yaml
+authentication:
+  oidc:
+    - id: dhis2
+      title: DHIS2
+      issuer: https://dhis2.example.org/          # exactly as the provider's discovery document gives it
+      client_id: open-geo-service
+      client_secret_env: GEOSERVICE_OIDC_SECRET   # omit for a public client; PKCE is always used
+      access_tokens: dhis2                        # rfc9068 (the default), keycloak or dhis2
+      scopes: [openid, profile]                   # optional; shown with its default
+      openeo_client_id: openeo                    # optional: the client openEO clients sign in with
+      openeo_grant_types: [authorization_code+pkce, refresh_token]
+```
+
+Register Open Geo Service with the provider as a client whose redirect URI is
+`<public origin>/sign-in/oidc/<id>/callback`. **Sign in** then offers *Sign in with DHIS2*, and
+the person comes back signed in for the same 8 hours as with a token. People who sign in get the
+authenticated tier; operators keep using named tokens until provider roles map to tiers
+(CLIM-1481). `GET /me` names a person `oidc:<issuer>#<subject>`, with a name to show; treat the id
+as opaque. Their batch jobs and stored process graphs are theirs alone, as a token's are.
+
+`scopes` sets what Open Geo Service requests at browser sign-in and advertises to openEO clients.
+The default is `[openid, profile]`. Include `openid` in any explicit list and register the requested
+scopes on both clients at the provider. Request `email` only if the integration needs it. Some DHIS2
+versions fail to issue a token when `email` is requested for a user without an email address.
+
+Programs send the provider's access token as `Authorization: Bearer <token>`, or, from an openEO
+client, as `Bearer oidc/<id>/<token>`. Open Geo Service accepts a JWT signed with the provider's
+published keys, from its issuer exactly, not expired, with a subject, and issued to an accepted
+audience: the `audience` list when it is given, otherwise `client_id` and `openeo_client_id`. A
+token for any other application of the same provider is refused, and so is an ID token: what marks
+an access token apart differs by provider, so `access_tokens` names the rule.
+
+| `access_tokens` | Access token | For |
+| --- | --- | --- |
+| `rfc9068` (default) | header `typ` is `at+jwt` or `application/at+jwt`, with the claims RFC 9068 requires | a provider issuing RFC 9068 access tokens |
+| `keycloak` | the claim `typ` is `Bearer` (an ID token's is `ID`) | Keycloak |
+| `dhis2` | carries `scope` and no `azp` or `nonce` (an ID token carries `azp` and no `scope`) | DHIS2 2.43 |
+
+`GET /credentials/oidc` lists the providers. With `openeo_client_id` set to a public client
+registered for openEO clients, and `openeo_grant_types` to the flows it allows, an openEO client
+signs in without a client id of its own. Which flow depends on the provider: with DHIS2, call
+`connection.authenticate_oidc_authorization_code(provider_id="dhis2")`, and register the exact
+loopback redirect the client listens on, for example `http://localhost:8765/callback` with
+`server_address=("localhost", 8765)`. The generic `authenticate_oidc()` falls back to the device
+flow, which DHIS2 does not offer.
+
+DHIS2 2.43 as the provider, checked on a local instance (an Open Geo Service browser session and the
+openEO client's bearer token give the same DHIS2 user the same id):
+
+- In `dhis.conf`, set `server.base.url` to its public address, `oauth2.server.enabled = on`, and a
+  persistent signing key through `oauth2.server.jwt.keystore.path`, `.password`, `.alias` and
+  `.key-password` (a PKCS12 file made with `keytool -genkeypair -keyalg RSA`). Without a
+  persistent key, every restart invalidates the tokens it issued.
+- Register two clients at `POST /api/oAuth2Clients`, both with `clientAuthenticationMethods: none`,
+  `authorizationGrantTypes: authorization_code,refresh_token` and `scopes: openid,profile`:
+  `open-geo-service` with the redirect URI above, and `openeo` with the openEO client's loopback
+  redirect. DHIS2 asks each person to consent the first time.
+- Its issuer ends in a slash (`https://dhis2.example.org/`), the subject is the username, and a
+  token carries the client it was issued to as its audience.
+- DHIS2 2.43 allows only `authorization_code` and `refresh_token` on a client, so it has no device
+  flow: a script or headless openEO client keeps using a named token.
+
 A private instance can gate reads too:
 
 ```yaml
 authentication:
-  gate_reads: true
+  require_for_read: true
   tokens: [...]
 ```
 
@@ -372,15 +440,39 @@ Then every read (the pages, STAC, Zarr, Icechunk, GeoParquet, PMTiles, thumbnail
 `/features`, `/processes`) needs a token of either tier, and a signed-out browser is sent to the
 sign-in page. What a client needs to find out how to sign in stays public: openEO capabilities at
 `GET /` with `Accept: application/json`, `/.well-known/openeo`, `/credentials/*`, the API
-reference, `/health` and `/me`. The STAC catalog and collections declare `basic` and `bearer`
-schemes with the STAC Authentication extension. A client may send `Basic` with the token id as
+reference, `/health` and `/me`. The STAC catalog and collections declare how to sign in with the
+STAC Authentication extension: `bearer`, `basic` when tokens are configured, and an
+`openIdConnect` scheme for each OIDC provider. A client may send `Basic` with the token id as
 the username and the secret as the password, which is what QGIS, GDAL (`GDAL_HTTP_USERPWD`) and
-STAC Browser can send; deploy STAC Browser with `authConfig: {type: "http", scheme: "basic"}`,
-since it does not offer a sign-in from the catalog's schemes. Its catalog page loads thumbnails
+STAC Browser can send. STAC Browser does not offer a sign-in from the catalog's schemes, so deploy
+it with one in `authConfig`: `{type: "http", scheme: "basic"}` for tokens, or, for people, the
+provider's scheme as the catalog declares it:
+
+```js
+historyMode: 'history',  // STAC Browser's OpenID Connect sign-in needs it
+authConfig: {
+  type: 'openIdConnect',
+  openIdConnectUrl: 'https://id.example.org/realms/ogs/.well-known/openid-configuration',
+  oidcConfig: {client_id: 'stac-browser'},  // its default
+},
+```
+
+Register that client at the provider as a public client with PKCE and the redirect URI
+`<STAC Browser base URL>/auth`, the base URL including any path STAC Browser is served under
+(`https://example.org/browser/auth`). Then have its access tokens accepted. With Keycloak, give
+the client an audience mapper that adds this instance's `client_id`. Otherwise, list every
+accepted audience: an explicit `audience` replaces the default of `client_id` and
+`openeo_client_id`, so leaving one out refuses its tokens.
+
+```yaml
+      audience: [open-geo-service, openeo, stac-browser]
+```
+
+STAC Browser 3.3.4 then signs in through the provider and sends the access token as `Bearer`. Its catalog page loads thumbnails
 as plain images, which carry no credential, so they stay blank until signed URLs arrive
 (CLIM-1482); a collection's own page shows its thumbnail. Every response is marked
 `Cache-Control: private`, so a caching proxy in front does not serve one caller's answer to
-another. Open Geo Service refuses to start with `gate_reads` and no token.
+another. Open Geo Service refuses to start with `require_for_read` and neither a token nor a provider.
 
 The design and the later steps are in [Authentication and authorization](authentication.md).
 

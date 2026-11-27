@@ -212,8 +212,13 @@ def _read_time_chunk(ds: xr.Dataset, t_dim: str) -> int | None:
 
 
 def _open_zarr_group(store: Any, group: str | None, *, chunks: Any) -> xr.Dataset:
-    """``xr.open_zarr`` on one group; ``chunks`` is typed Any because the stub allows only a string."""
-    return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks)  # type: ignore[no-any-return]
+    """``xr.open_zarr`` on one group; ``chunks`` is typed Any because the stub allows only a string.
+
+    Values stay numbers whatever their units: xarray would otherwise decode a day count with
+    ``units: days`` (xclim's ``tx_days_above``, spells) to ``timedelta64`` (CLIM-1945). This is
+    xarray's announced future default; GeoService stores hold no timedelta variables.
+    """
+    return xr.open_zarr(store, group=group, zarr_format=3, chunks=chunks, decode_timedelta=False)  # type: ignore[no-any-return]
 
 
 def open_icechunk_dataset(
@@ -266,12 +271,9 @@ def open_icechunk_dataset(
         t_dim = None
     time_chunk = _read_time_chunk(probe, t_dim) if t_dim is not None and merge_time else None
     probe.close()
-    if time_chunk is not None and t_dim is not None:
-        ds = _open_zarr_group(session.store, group, chunks={t_dim: time_chunk})
-    elif not merge_time:
-        ds = _open_zarr_group(session.store, group, chunks={})
-    else:
-        ds = _open_zarr_group(session.store, group, chunks="auto")
+    # ``{}`` keeps the stored chunks; "auto" would merge every dimension, space included.
+    chunks = {t_dim: time_chunk} if time_chunk is not None and t_dim is not None else {}
+    ds = _open_zarr_group(session.store, group, chunks=chunks)
     if not with_fetched_at and FETCHED_AT in ds.variables:
         ds = ds.drop_vars(FETCHED_AT)
     if t_dim is not None:

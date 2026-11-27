@@ -66,7 +66,7 @@ changes a route's tier. With authentication on, `POST /result` still needs the a
 tier. Only with authentication off is it open to anyone, as public read-only instances serve the
 openEO Web Editor today.
 
-Reads stay public by default. A private deployment gates them with `authentication.gate_reads`:
+Reads stay public by default. A private deployment gates them with `authentication.require_for_read`:
 every public route then needs the authenticated tier, except the few a client needs to find out
 how to sign in (openEO discovery, `/credentials/*`, the API reference, `/health`, `/me` and
 sign-in itself). `GET /` is both: openEO capabilities stay public, and the landing page, which
@@ -78,22 +78,25 @@ proxy in front does not serve one caller's answer to another.
 Whether reads are gated or not, a signed-out browser asking for a page it cannot open is sent to
 sign in and brought back, rather than shown the JSON refusal a client gets.
 
-The STAC catalog and collections then declare `basic` and `bearer` schemes with the STAC
-Authentication extension (v1.2.0), and mark the links and assets on this instance with
-`auth:refs`. Basic carries the token id and secret, which QGIS, GDAL and STAC Browser can send;
-the middleware already accepts it on every route. STAC Browser offers a sign-in from its own
-`authConfig`, not from the catalog's schemes, and supports only basic among HTTP schemes, so it is
-deployed with `authConfig` set to http basic. The web interface and its map viewer read with
-the session cookie, since their requests are same-origin. Advertising a scheme does not make
-every reader send the credential: until signed links exist (see [Private data](#private-data)), a
-reader that cannot send a header cannot load the Zarr, PMTiles and GeoParquet assets.
+The STAC catalog and collections then declare their schemes with the STAC Authentication
+extension (v1.2.0), and mark the links and assets on this instance with `auth:refs`: `bearer`
+always, `basic` when named tokens are configured, and an `openIdConnect` scheme for each OIDC
+provider, pointing at its discovery document. Basic carries the token id and secret, which QGIS,
+GDAL and STAC Browser can send; bearer carries a token's secret or a provider's access token.
+STAC Browser offers a sign-in from its own `authConfig`, not from the catalog's schemes, so it is
+deployed with `authConfig` set to http basic or to the provider's `openIdConnect` scheme. The
+web interface and its map viewer read with the session cookie, since their requests are
+same-origin. Advertising a scheme does not make every reader send the credential: until signed
+links exist (see [Private data](#private-data)), a reader that cannot send a header cannot load
+the Zarr, PMTiles and GeoParquet assets.
 
 ## Where it is enforced
 
 One ASGI middleware decides every request before the application reads the request body. It
 finds the credential, resolves the principal, applies read-only mode, and compares the
 principal's tier with the route's. A missing or invalid credential gets `401` with
-`WWW-Authenticate: Bearer`, and a principal without the tier gets `403`. Routes never check
+`WWW-Authenticate: Bearer`, and a principal without the tier gets `403`. An OIDC token whose
+provider cannot be reached to check it gets `503`, so a client keeps the token and retries. Routes never check
 credentials themselves.
 
 The middleware sits inside CORS, so a `401` or `403` still carries the headers a browser needs to
@@ -162,9 +165,15 @@ browser app or the openEO Web Editor, sends a bearer token. Cross-site cookies, 
 
 Providers are listed in configuration and advertised at `/credentials/oidc`, so openEO clients
 discover them. Open Geo Service validates each token's signature against the provider's published keys, along
-with the issuer, the audience, the expiry and the token type. It maps the issuer and subject to a
-local principal id. The operator tier comes from a claim the provider sends, or from a small local
-mapping.
+with the issuer, the audience, the expiry and the token type; it accepts JWT access tokens, not
+opaque ones. Since providers mark an access token apart from an ID token in different ways, each
+provider names its rule: RFC 9068 by default, or the shape Keycloak or DHIS2 2.43 gives its tokens.
+A person is the principal `oidc:<issuer>#<subject>`, the same whether they arrive with a bearer
+token or sign in to the web interface, where the authorization code flow with PKCE, tied to the
+browser that started it by a short-lived cookie, ends in the same session cookie as a token's
+sign-in. Every person gets the authenticated tier, in a request and in a batch job resumed without
+one; operators keep named tokens until step 5 maps provider roles to tiers. The id is opaque to
+callers; CHAP should agree on the same form before either service stores OIDC owners.
 
 | Deployment | Identity |
 | --- | --- |
@@ -177,6 +186,10 @@ mapping.
 DHIS2 from 2.42 is a full OIDC provider. Without a configured keystore it generates a new signing
 key at every start, which invalidates every token, so a production DHIS2 used this way needs a
 persistent keystore.
+
+DHIS2 2.43 allows only the authorization code and refresh token flows on a client, so a headless
+openEO client cannot sign in against it with the device flow; scripts keep using named tokens, or
+a provider with the device flow.
 
 DHIS2 is an identity source, never a dependency. Open Geo Service runs without DHIS2, and signing in through
 DHIS2 never implies the right to operate the service. A DHIS2 role grants an Open Geo Service tier only through an
@@ -214,8 +227,11 @@ process graph. Records from before owners were recorded, or stored while authent
 off, have none, and only operators reach them. `GET /me` reports the caller.
 
 Pipeline runs, delivery records and dataset updates are reached only with the operator tier, so
-ownership does not limit them. They will record the principal, how it authenticated and, where
-there is one, the acting person, for audit.
+ownership does not limit them. A run records who started it, as `started_by`: the caller of a run
+by hand or a retry, or `service:pipeline-runner` for a dataset update. Only operators see it; a
+run's status stays readable wherever reads are. How it authenticated and, where there is one,
+the acting person will follow for audit. Runs get an owner once people can start them, with
+roles mapped to tiers (CLIM-1481).
 
 The scheduler and the pipeline runner act as service principals, so an unattended delivery is as
 attributable as one started by hand. The credentials Open Geo Service uses for upstream sources and DHIS2
@@ -254,8 +270,6 @@ Each step ships on its own and is useful alone; no later step redoes an earlier 
 
 - Which claim or mapping grants the operator tier to a person, and who administers it on a
   country instance.
-- Whether headless openEO clients can sign in against DHIS2 2.42, whose documented flows are
-  authorization code and refresh token, or need a provider with the device flow.
 - Which DHIS2 versions the target countries run.
 - For routes: whether DHIS2 replaces an `X-Forwarded-User` header the client sent, and which
   request headers, such as `Range`, reach Open Geo Service.
