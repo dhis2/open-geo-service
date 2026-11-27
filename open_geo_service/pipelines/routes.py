@@ -527,7 +527,7 @@ def _caller(request: Request) -> str | None:
 
 def _start(pipeline_id: str, context: runner.RunContext) -> Any:
     try:
-        return runner.run_pipeline(pipeline_id, context)
+        return runner.run_pipeline(pipeline_id, context)[0]
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -546,7 +546,7 @@ async def run_pipeline(request: Request, pipeline_id: str) -> Response:
     _require_writable()
     _record_or_404(pipeline_id)
     body = await _interval(request, RunRequest)
-    context = runner.RunContext(start=body.start, end=body.end, mode=body.mode, started_by=_caller(request))
+    context = runner.RunContext(intervals=[(body.start, body.end)], mode=body.mode, started_by=_caller(request))
     run = _start(pipeline_id, context)
     return _started(request, pipeline_id, run)
 
@@ -578,8 +578,7 @@ def retry_pipeline_run(request: Request, pipeline_id: str, run_id: str) -> Respo
     if previous is None:
         raise HTTPException(status_code=404, detail=f"pipeline '{pipeline_id}' has no run '{run_id}'")
     context = runner.RunContext(
-        start=previous.start,
-        end=previous.end,
+        intervals=[(previous.start, previous.end)],
         trigger="retry",
         started_by=_caller(request),
         mode=previous.mode,

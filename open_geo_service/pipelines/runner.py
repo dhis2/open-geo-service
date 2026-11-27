@@ -1,12 +1,11 @@
-"""The one way a pipeline runs: `start_runs`, whoever asks.
+"""The one way a pipeline runs: `run_pipeline`, whoever asks.
 
 An operator's run, a retry and each range a source dataset update changed all resolve to a
-`RunContext` with an explicit interval and go through `start_runs` (`run_pipeline` for one).
-It checks the pipeline may run, stores the run with its deterministic job id *before* the job
-exists, then submits the workflow as an
-openEO batch job. When the job finishes, `on_job_finished` hands the saved result to the
-export delivery framework, the same path as ``POST /exports/{id}``, under the run's
-idempotency key.
+`RunContext` with explicit intervals and go through `run_pipeline`. It checks the pipeline
+may run, stores the run with its deterministic job id *before* the job exists, then submits
+the workflow as an openEO batch job. When the job finishes, `on_job_finished` hands the saved
+result to the export delivery framework, the same path as ``POST /exports/{id}``, under the
+run's idempotency key.
 
 Recovery. `recover_runs` finishes what an interruption or a transient failure left open:
 it resubmits pending runs, hands off finished jobs whose completion was missed, records
@@ -201,10 +200,9 @@ class RunRefused(ValueError):
 
 @dataclass(frozen=True)
 class RunContext:
-    """Why a run happens and over which interval. Every run has an explicit interval."""
+    """Why a pipeline runs and over which intervals, each explicit: one run per interval."""
 
-    start: str
-    end: str
+    intervals: list[tuple[str, str]]
     trigger: RunTrigger = "manual"
     started_by: str | None = None
     mode: Literal["dry_run", "live"] | None = None
@@ -274,21 +272,15 @@ def _refusal(record: PipelineRecord, context: RunContext, mode: str) -> str | No
     return None
 
 
-def run_pipeline(pipeline_id: str, context: RunContext) -> PipelineRun:
-    """Run the pipeline's workflow over ``context``'s interval and deliver it when it finishes.
+def run_pipeline(pipeline_id: str, context: RunContext) -> list[PipelineRun]:
+    """Run the pipeline's workflow over each of ``context``'s intervals and deliver each when it finishes.
 
-    Returns the run, or the existing one when the same event or request already produced it.
+    A run by hand or a retry has one interval; a dataset update has one per range it changed.
+    The runs and the decision on the update are written together, so a stop between them cannot
+    leave a range decided and never run.
+
+    Returns the runs, or the existing ones when the same event or request already produced them.
     Raises LookupError for an unknown pipeline and RunRefused when it may not run.
-    """
-    return start_runs(pipeline_id, [context])[0]
-
-
-def start_runs(pipeline_id: str, contexts: list[RunContext]) -> list[PipelineRun]:
-    """Start one run per context, all recorded in one write, as ``run_pipeline`` does for one.
-
-    A dataset update starts a run for each range it changed. The runs and the decision on the
-    update are written together, so a stop between them cannot leave a range decided and never
-    run. The contexts share their trigger, mode and event, and differ in their interval.
     """
     from open_geo_service.exports.service import resolve_named_export
     from open_geo_service.openeo.jobs import triggered_job_id
@@ -297,9 +289,8 @@ def start_runs(pipeline_id: str, contexts: list[RunContext]) -> list[PipelineRun
     if record is None:
         raise LookupError(f"Unknown pipeline '{pipeline_id}'")
     spec = record.spec
-    first = contexts[0]
-    mode: Literal["dry_run", "live"] = first.mode or ("live" if spec.delivery.mode == "live" else "dry_run")
-    refusal = _refusal(record, first, mode)
+    mode: Literal["dry_run", "live"] = context.mode or ("live" if spec.delivery.mode == "live" else "dry_run")
+    refusal = _refusal(record, context, mode)
     if refusal is not None:
         raise RunRefused(refusal)
     bound = workflow_binding.bind(spec.workflow)
@@ -312,12 +303,12 @@ def start_runs(pipeline_id: str, contexts: list[RunContext]) -> list[PipelineRun
     resolve_named_export(plugin.format, {"export": spec.id})
 
     runs: list[PipelineRun] = []
-    for context in contexts:
+    for start, end in context.intervals:
         process, resolved = workflow_binding.build_process(
-            spec.workflow, bound, start=context.start, end=context.end, save_format=plugin.format, export_id=spec.id
+            spec.workflow, bound, start=start, end=end, save_format=plugin.format, export_id=spec.id
         )
         run_id = uuid4().hex
-        source = _source_key(context.event_id, run_id, context.start, context.end)
+        source = _source_key(context.event_id, run_id, start, end)
         runs.append(
             PipelineRun(
                 run_id=run_id,
@@ -333,8 +324,8 @@ def start_runs(pipeline_id: str, contexts: list[RunContext]) -> list[PipelineRun
                 source={"datasets": list(bound.dataset_ids), **context.source},
                 job_id=triggered_job_id(source, trigger_id(spec.id)),
                 mode=mode,
-                start=context.start,
-                end=context.end,
+                start=start,
+                end=end,
                 submitted_at=utc_now().isoformat(),
                 idempotency_key=f"pipeline:{spec.id}:{source}:{mode}",
                 submission="pending",
@@ -354,15 +345,15 @@ def start_runs(pipeline_id: str, contexts: list[RunContext]) -> list[PipelineRun
         ]
         if existing:
             return existing
-        if first.event_id is not None and _decided(current, first.event_id, first.event_time):
-            raise RunRefused(f"update {first.event_id} was already decided for this pipeline")
+        if context.event_id is not None and _decided(current, context.event_id, context.event_time):
+            raise RunRefused(f"update {context.event_id} was already decided for this pipeline")
         if current.revision != record.revision:
             raise RunRefused("the pipeline changed while the run was being prepared; run it again")
         for run in runs:
             current.runs.insert(0, run)
-        if first.event_id is not None and first.event_time is not None:
+        if context.event_id is not None and context.event_time is not None:
             # Decided in the same write as the runs it starts.
-            current.events.handled[first.event_id] = first.event_time
+            current.events.handled[context.event_id] = context.event_time
         _prune(current)
         return runs
 
@@ -794,21 +785,16 @@ def update_intervals(data: dict[str, Any]) -> list[tuple[str, str]]:
     return intervals
 
 
-def _event_contexts(event: Any) -> list[RunContext]:
+def _event_context(event: Any) -> RunContext:
     data = event.data
-    source = {key: data[key] for key in ("dataset_id", "artifact_id", "action") if data.get(key) is not None}
-    return [
-        RunContext(
-            start=start,
-            end=end,
-            trigger="dataset_update",
-            started_by=PIPELINE_RUNNER,
-            event_id=event.event_id,
-            event_time=_utc(event.time).isoformat(),
-            source=source,
-        )
-        for start, end in update_intervals(data)
-    ]
+    return RunContext(
+        intervals=update_intervals(data),
+        trigger="dataset_update",
+        started_by=PIPELINE_RUNNER,
+        event_id=event.event_id,
+        event_time=_utc(event.time).isoformat(),
+        source={key: data[key] for key in ("dataset_id", "artifact_id", "action") if data.get(key) is not None},
+    )
 
 
 def _skip(pipeline_id: str, event: Any, reason: str, *, decide: bool = True) -> None:
@@ -928,13 +914,13 @@ def _dispatch(record: PipelineRecord, event: Any, *, live: bool = False) -> date
         return None
     if event.data.get("dataset_id") not in bound.dataset_ids:
         return None  # not this pipeline's source: decided the same way every time
-    contexts = _event_contexts(event)
-    if not contexts:
+    context = _event_context(event)
+    if not context.intervals:
         logger.warning("Pipeline '%s' skips update %s: it lists no changed periods", spec.id, event.event_id)
         _skip(spec.id, event, "the update lists no changed periods")
         return None
     try:
-        start_runs(spec.id, contexts)
+        run_pipeline(spec.id, context)
     except RunRefused as exc:
         _skip(spec.id, event, str(exc))
     except Exception as exc:

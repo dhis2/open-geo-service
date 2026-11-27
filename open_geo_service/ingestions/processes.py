@@ -17,11 +17,11 @@ from open_geo_service.shared.time import next_period_string
 logger = logging.getLogger(__name__)
 
 INGEST_EVENT_ACTION = "ingest"
+"""`action` of the update event an ingestion emits; syncs report their planner action instead."""
 FULL_REWRITE_EVENT_ACTION = "full_rewrite"
 """`action` of an update that replaced the whole stored dataset, such as an openEO publication.
 
 Its one change is the whole coverage: every period may have changed."""
-"""`action` of the update event an ingestion emits; syncs report their planner action instead."""
 
 _UPDATE_MARKER = "dataset_update_planned"
 """Cursor key recording that an attempt of this job planned a change to stored data.

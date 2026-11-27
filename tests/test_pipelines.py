@@ -2021,7 +2021,7 @@ def test_a_failed_hand_off_is_recorded_and_recoverable(
     monkeypatch.setattr(delivery_module, "submit_delivery", refuse)
     _dhis2(monkeypatch)
     _validated()
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     stored = store.get_record("rain-to-dhis2")
     assert (
@@ -2045,7 +2045,7 @@ def test_submission_retries_a_transient_failure_a_bounded_number_of_times(
     _dhis2(monkeypatch)
     _validated()
     openeo.fail_create = OSError("job store unavailable")
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     assert run.submission == "pending" and run.submission_attempts == 1 and "unavailable" in (run.error or "")
     assert run.process is not None  # kept until a job holds it
 
@@ -2055,7 +2055,7 @@ def test_submission_retries_a_transient_failure_a_bounded_number_of_times(
     assert recovered.submission == "submitted" and recovered.error is None and recovered.process is None
     assert openeo.started == [run.job_id]
 
-    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     openeo.fail_create = OSError("still unavailable")
     for _ in range(runner.MAX_SUBMISSION_ATTEMPTS + 2):
         runner.recover_runs()
@@ -2066,7 +2066,7 @@ def test_submission_retries_a_transient_failure_a_bounded_number_of_times(
     # Note the second run submitted normally before the outage; only the first was retried.
     assert gave_up.submission == "submitted"
     openeo.fail_create = OSError("down")
-    flaky = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-03-01", end="2025-03-31"))
+    flaky = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-03-01", "2025-03-31")]))[0]
     for _ in range(runner.MAX_SUBMISSION_ATTEMPTS + 2):
         runner.recover_runs()
     stored = next(r for r in store.get_record("rain-to-dhis2").runs if r.run_id == flaky.run_id)  # type: ignore[union-attr]
@@ -2079,7 +2079,7 @@ def test_a_permanent_submission_failure_is_not_retried_and_can_run_again(
     _dhis2(monkeypatch)
     _validated()
     openeo.fail_create = ValueError("process.process_graph must be an object")
-    failed = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    failed = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     assert failed.submission == "failed" and failed.submission_attempts == 1
     polled = client.get(f"/pipelines/rain-to-dhis2/runs/{failed.run_id}").json()
     assert polled["status"] == "failed" and polled["failure"]["stage"] == "submission"
@@ -2131,7 +2131,7 @@ def test_delivery_hand_off_recovers_transient_failures_and_stops_on_permanent_on
         return "delivery-1", len(attempts) > 1
 
     monkeypatch.setattr(delivery_module, "submit_delivery", submit)
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     stored = store.get_record("rain-to-dhis2").runs[0]  # type: ignore[union-attr]
     assert stored.delivery == "awaiting" and stored.delivery_attempts == 1 and "lock timeout" in (stored.error or "")
@@ -2144,7 +2144,7 @@ def test_delivery_hand_off_recovers_transient_failures_and_stops_on_permanent_on
     # Every attempt used the run's one key: the framework's reservation prevents a second send.
     assert set(attempts) == {run.idempotency_key} and len(attempts) == 2
 
-    second = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    second = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     outcome["raise"] = HTTPException(status_code=409, detail="Export mapping or references changed")
     runner.on_job_finished(openeo.finish(second.job_id))
     for _ in range(3):
@@ -2152,7 +2152,7 @@ def test_delivery_hand_off_recovers_transient_failures_and_stops_on_permanent_on
     stored = next(r for r in store.get_record("rain-to-dhis2").runs if r.run_id == second.run_id)  # type: ignore[union-attr]
     assert stored.delivery == "failed" and stored.delivery_attempts == 1  # permanent: not retried
 
-    third = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-03-01", end="2025-03-31"))
+    third = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-03-01", "2025-03-31")]))[0]
     outcome["raise"] = OSError("still locked")
     runner.on_job_finished(openeo.finish(third.job_id))
     for _ in range(runner.MAX_DELIVERY_ATTEMPTS + 2):
@@ -2169,8 +2169,8 @@ def test_jobs_that_end_without_a_result_are_recorded_not_delivered(
 ) -> None:
     _dhis2(monkeypatch)
     _validated()
-    errored = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
-    gone = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    errored = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
+    gone = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     openeo.finish(errored.job_id, "error")
     openeo.drop(gone.job_id)
     runner.recover_runs()
@@ -2187,7 +2187,7 @@ def test_a_missed_completion_is_delivered_by_recovery(
 ) -> None:
     _dhis2(monkeypatch)
     _validated()
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     openeo.finish(run.job_id)  # the process stopped before the finish listener ran
     runner.recover_runs()
     runner.recover_runs()
@@ -2203,10 +2203,13 @@ def test_resuming_releases_eligible_held_deliveries(
     _dhis2(monkeypatch)
     _validated()
     _approve(live=True)
-    live = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31", mode="live"))
+    live = runner.run_pipeline(
+        "rain-to-dhis2",
+        runner.RunContext(intervals=[("2025-01-01", "2025-01-31")], mode="live"),
+    )[0]
     html = {"Accept": "text/html"}
     assert client.post("/pipelines/rain-to-dhis2/mode/paused", headers=html, follow_redirects=False).status_code == 303
-    dry = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    dry = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     runner.on_job_finished(openeo.finish(live.job_id))
     runner.on_job_finished(openeo.finish(dry.job_id))
     runner.recover_runs()  # paused: recovery releases nothing
@@ -2227,7 +2230,7 @@ def test_an_unconfirmed_delivery_can_be_sent_again_under_a_new_key(
 ) -> None:
     _dhis2(monkeypatch)
     _validated()
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     url = f"/pipelines/rain-to-dhis2/runs/{run.run_id}/redeliver"
     json_only = {"Accept": "application/json"}
@@ -2241,7 +2244,7 @@ def test_an_unconfirmed_delivery_can_be_sent_again_under_a_new_key(
     assert confirmed.status_code == 409 and "settled" in confirmed.text and len(deliveries) == 1
 
     # An answer that never came: the destination may hold part of it. DHIS2 upserts, so a repeat is safe.
-    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     runner.on_job_finished(openeo.finish(other.job_id))
     deliveries.outcomes["delivery-2"] = ("successful", {"outcome": "unknown"})
     again = client.post(f"/pipelines/rain-to-dhis2/runs/{other.run_id}/redeliver", headers=json_only)
@@ -2260,7 +2263,7 @@ def test_redelivery_is_refused_where_a_repeat_could_duplicate(
     _dhis2(monkeypatch)
     _validated()
     monkeypatch.setattr(Dhis2ExportPlugin, "redelivery_safe", False)
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     deliveries.outcomes["delivery-1"] = ("failed", None)
     failure = runner.run_view("rain-to-dhis2", store.get_record("rain-to-dhis2").runs[0], "").failure  # type: ignore[union-attr]
@@ -2289,8 +2292,8 @@ def test_handed_off_is_not_delivered_until_the_delivery_job_confirms(
     runs = []
     for index, (delivery_id, (job, _)) in enumerate(outcomes.items()):
         run = runner.run_pipeline(
-            "rain-to-dhis2", runner.RunContext(start=f"2025-0{index + 1}-01", end=f"2025-0{index + 1}-28")
-        )
+            "rain-to-dhis2", runner.RunContext(intervals=[(f"2025-0{index + 1}-01", f"2025-0{index + 1}-28")])
+        )[0]
         runner.on_job_finished(openeo.finish(run.job_id))
         deliveries.outcomes[delivery_id] = job
         runs.append(run.run_id)
@@ -2318,8 +2321,8 @@ def test_a_failing_pipeline_posts_once_and_again_when_it_recovers_or_is_resolved
     monkeypatch.setattr(runner, "_event_consumer", notifications.consume)
 
     def run(month: int, delivery: str) -> runner.PipelineRun:
-        interval = runner.RunContext(start=f"2025-0{month}-01", end=f"2025-0{month}-28")
-        started = runner.run_pipeline("rain-to-dhis2", interval)
+        interval = runner.RunContext(intervals=[(f"2025-0{month}-01", f"2025-0{month}-28")])
+        started = runner.run_pipeline("rain-to-dhis2", interval)[0]
         runner.on_job_finished(openeo.finish(started.job_id))
         if delivery == "failed":
             deliveries.outcomes[f"delivery-{len(deliveries)}"] = ("failed", None)
@@ -2384,7 +2387,7 @@ def test_a_missing_delivery_record_is_unknown_and_resolved_by_an_operator(
     _dhis2(monkeypatch)
     _validated()
     json_only = {"Accept": "application/json"}
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     deliveries.outcomes["delivery-1"] = ("missing", None)
     # Read as unknown before recovery records it, which a read-only instance never does.
@@ -2401,7 +2404,7 @@ def test_a_missing_delivery_record_is_unknown_and_resolved_by_an_operator(
     assert again.status_code == 200 and deliveries[1][3] == f"{run.idempotency_key}:round-1"
 
     # Where it is not, the operator checks the destination and acknowledges; nothing is sent.
-    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    other = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     runner.on_job_finished(openeo.finish(other.job_id))
     deliveries.outcomes["delivery-3"] = ("missing", None)
     monkeypatch.setattr(Dhis2ExportPlugin, "redelivery_safe", False)
@@ -2426,7 +2429,10 @@ def test_a_refused_redelivery_leaves_the_earlier_round_unchanged(
     _validated()
     _approve(live=True)
     json_only, html = {"Accept": "application/json"}, {"Accept": "text/html"}
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31", mode="live"))
+    run = runner.run_pipeline(
+        "rain-to-dhis2",
+        runner.RunContext(intervals=[("2025-01-01", "2025-01-31")], mode="live"),
+    )[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     deliveries.outcomes["delivery-1"] = ("failed", None)
     runner.recover_runs()
@@ -2543,7 +2549,7 @@ def test_a_busy_result_or_export_is_retried_not_given_up(
         return "delivery-1", False
 
     monkeypatch.setattr(delivery_module, "submit_delivery", submit)
-    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    run = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     runner.on_job_finished(openeo.finish(run.job_id))
     assert store.get_record("rain-to-dhis2").runs[0].delivery == "awaiting"  # type: ignore[union-attr]
     busy["on"] = False
@@ -2582,7 +2588,10 @@ def test_live_runs_and_deliveries_follow_the_mode(
     _dhis2(monkeypatch)
     _validated()
     _approve(live=True)
-    live = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31", mode="live"))
+    live = runner.run_pipeline(
+        "rain-to-dhis2",
+        runner.RunContext(intervals=[("2025-01-01", "2025-01-31")], mode="live"),
+    )[0]
     assert live.mode == "live"
     # Paused while the live job ran: the job finishes, its delivery is held.
     assert (
@@ -2600,7 +2609,7 @@ def test_live_runs_and_deliveries_follow_the_mode(
     assert refused.status_code == 409 and "make it live" in refused.text
 
     # A paused pipeline still runs a dry run by hand, and an operator may deliver it.
-    dry = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    dry = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     runner.on_job_finished(openeo.finish(dry.job_id))
     assert store.get_record("rain-to-dhis2").runs[0].delivery == "held"  # type: ignore[union-attr]
     assert (
@@ -2614,7 +2623,7 @@ def test_live_runs_and_deliveries_follow_the_mode(
     assert deliveries[-1][2] is True
 
     with pytest.raises(runner.RunRefused, match="needs the pipeline to be live"):
-        runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31", mode="live"))
+        runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")], mode="live"))
     assert (
         client.post(
             "/pipelines/rain-to-dhis2/mode/live", headers={"Accept": "text/html"}, follow_redirects=False
@@ -2639,7 +2648,7 @@ def _update_event(event_id: str = "evt-1", *, dataset_id: str = "rain_monthly", 
             "dataset_id": dataset_id,
             "artifact_id": "artifact-7",
             "action": "append",
-            "changes": [{"start": "2025-01-31", "end": "2025-02-28"}],
+            "changes": [{"start": "2025-02-01", "end": "2025-02-28"}],
             "coverage_start": "2024-01-01",
             "coverage_end": "2025-02-28",
         },
@@ -2662,7 +2671,7 @@ def test_a_dataset_update_runs_the_same_path_once(
     run = record.runs[0]
     assert run.trigger == "dataset_update" and run.event_id == "evt-1" and run.mode == "dry_run"
     assert run.started_by == "service:pipeline-runner"
-    assert (run.start, run.end) == ("2025-01-31", "2025-02-28")
+    assert (run.start, run.end) == ("2025-02-01", "2025-02-28")
     assert run.source["artifact_id"] == "artifact-7" and run.source["datasets"] == ["rain_monthly"]
     assert len(openeo.started) == 1
 
@@ -2682,7 +2691,7 @@ def test_paused_or_manual_pipelines_ignore_updates(
     assert openeo.started == [] and all(not record.runs for record in store.list_records())
     with pytest.raises(runner.RunRefused, match="does not run on updates"):
         runner.run_pipeline(
-            "paused-one", runner.RunContext(start="a", end="b", trigger="dataset_update", event_id="evt-x")
+            "paused-one", runner.RunContext(intervals=[("a", "b")], trigger="dataset_update", event_id="evt-x")
         )
 
 
@@ -2705,10 +2714,10 @@ def test_reconcile_finishes_what_a_restart_interrupted(
     _validated()
     # A run stored as pending whose job was never created: the process died in between.
     openeo.fail_create = OSError("killed")
-    pending = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+    pending = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))[0]
     openeo.fail_create = None
     # A finished job whose hand-off never happened, and an update nobody dispatched.
-    done = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-02-01", end="2025-02-28"))
+    done = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     openeo.finish(done.job_id)
     monkeypatch.setattr(job_store, "list_job_records", lambda: [_job_with(_update_event("evt-9"))])
 
@@ -2732,19 +2741,19 @@ def test_history_pruning_keeps_every_unresolved_run(
     _dhis2(monkeypatch)
     _validated()
     monkeypatch.setattr(runner, "_RUNS_KEPT", 3)
-    still_running = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2024-01-01", end="2024-01-31"))
-    errored = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2024-02-01", end="2024-02-29"))
+    still_running = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2024-01-01", "2024-01-31")]))[0]
+    errored = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2024-02-01", "2024-02-29")]))[0]
     openeo.finish(errored.job_id, "error")
-    gone = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2024-03-01", end="2024-03-31"))
+    gone = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2024-03-01", "2024-03-31")]))[0]
     openeo.drop(gone.job_id)
     openeo.fail_create = ValueError("refused")
-    refused = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2024-04-01", end="2024-04-30"))
+    refused = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2024-04-01", "2024-04-30")]))[0]
     openeo.fail_create = None
     runner.recover_runs()
     for month in range(5, 11):
         run = runner.run_pipeline(
-            "rain-to-dhis2", runner.RunContext(start=f"2024-{month:02d}-01", end=f"2024-{month:02d}-28")
-        )
+            "rain-to-dhis2", runner.RunContext(intervals=[(f"2024-{month:02d}-01", f"2024-{month:02d}-28")])
+        )[0]
         runner.on_job_finished(openeo.finish(run.job_id))
         runner.recover_runs()  # the delivery job confirmed it: settled
     record = store.get_record("rain-to-dhis2")
@@ -2756,7 +2765,7 @@ def test_history_pruning_keeps_every_unresolved_run(
 
     # Running it again supersedes the errored run, which may then go.
     client.post(f"/pipelines/rain-to-dhis2/runs/{errored.run_id}/retry", headers={"Accept": "application/json"})
-    runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2024-11-01", end="2024-11-30"))
+    runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2024-11-01", "2024-11-30")]))
     assert errored.run_id not in {run.run_id for run in store.get_record("rain-to-dhis2").runs}  # type: ignore[union-attr]
     # The kept running run is still found when its job finishes, and delivered.
     runner.on_job_finished(openeo.finish(still_running.job_id))
@@ -2773,14 +2782,14 @@ def test_an_update_runs_each_range_it_changed_once(
     _validated()
     # A sync that replaced an old preliminary period and added a new one (CLIM-2029).
     event = _update_event()
-    event.data["changes"] = [{"start": "2024-10-31", "end": "2024-10-31"}, {"start": "2025-01-31", "end": "2025-02-28"}]
+    event.data["changes"] = [{"start": "2024-10-31", "end": "2024-10-31"}, {"start": "2025-02-01", "end": "2025-02-28"}]
     runner.consume([event])
     runner.consume([event])  # delivered twice
     record = store.get_record("rain-to-dhis2")
     assert record is not None and "evt-1" in record.events.handled
     assert sorted((run.start, run.end) for run in record.runs) == [
         ("2024-10-31", "2024-10-31"),
-        ("2025-01-31", "2025-02-28"),
+        ("2025-02-01", "2025-02-28"),
     ]
     assert len({run.job_id for run in record.runs}) == 2 and len(openeo.started) == 2
 
@@ -2958,7 +2967,7 @@ def test_manual_and_update_runs_share_the_bindings_and_the_export(
 
     _dhis2(monkeypatch)
     record = _validated()
-    manual = runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-31", end="2025-02-28"))
+    manual = runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-02-01", "2025-02-28")]))[0]
     runner.consume([_update_event()])
     automatic = next(r for r in store.get_record("rain-to-dhis2").runs if r.trigger == "dataset_update")  # type: ignore[union-attr]
     assert (manual.start, manual.end) == (automatic.start, automatic.end)
@@ -2987,7 +2996,7 @@ def test_updates_while_paused_are_listed_not_run_on_resume(
     assert record is not None and record.runs == [] and openeo.started == []
     skipped = record.events.skipped
     assert [(item.event_id, item.reason) for item in skipped] == [("evt-paused", "the pipeline was paused")]
-    assert skipped[0].intervals == [("2025-01-31", "2025-02-28")]  # the interval to run by hand
+    assert skipped[0].intervals == [("2025-02-01", "2025-02-28")]  # the interval to run by hand
 
 
 def test_a_refused_update_is_listed_with_its_interval(
@@ -3004,7 +3013,7 @@ def test_a_refused_update_is_listed_with_its_interval(
     record = store.get_record("rain-to-dhis2")
     assert record is not None and record.runs == [] and "evt-1" in record.events.handled
     assert record.events.skipped[0].reason == "the pipeline changed since it was last validated; re-check it"
-    assert record.events.skipped[0].intervals == [("2025-01-31", "2025-02-28")]
+    assert record.events.skipped[0].intervals == [("2025-02-01", "2025-02-28")]
 
 
 def test_an_unreachable_destination_does_not_stop_an_update_run(
@@ -3257,7 +3266,7 @@ def test_a_check_for_an_older_revision_is_never_installed(client: TestClient, mo
     with pytest.raises(ValueError, match="Unknown export"):
         resolve_named_export("DHIS2JSON", {"export": "rain-to-dhis2"})
     with pytest.raises(runner.RunRefused, match="changed since it was last validated"):
-        runner.run_pipeline("rain-to-dhis2", runner.RunContext(start="2025-01-01", end="2025-01-31"))
+        runner.run_pipeline("rain-to-dhis2", runner.RunContext(intervals=[("2025-01-01", "2025-01-31")]))
 
 
 # --- end to end ------------------------------------------------------------------------------

@@ -282,10 +282,9 @@ one over the dataset's whole coverage:
 - a *rewrite* (a new store or a rematerialisation) may have changed any period, and lists the
   whole coverage after it.
 
-The runs of one update are recorded together, with the decision on it. An update recorded
-before this format, which lists no ranges, is skipped and listed with its reason. Any other
-revision of past data at the source is followed only if the dataset is rematerialised; run that
-interval by hand. Each range's ends are passed to the workflow as the update gives them.
+The runs of one update are recorded together, with the decision on it. Any other revision of
+past data at the source is followed only if the dataset is rematerialised; run that interval by
+hand. Each range's ends are passed to the workflow as the update gives them.
 
 Each pipeline keeps a durable checkpoint of the updates it has decided on, written in the same
 write as the run an update starts. What happens to an update:
