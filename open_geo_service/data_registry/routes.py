@@ -20,7 +20,13 @@ def _with_ingestability(dataset: dict[str, Any]) -> dict[str, Any]:
     an operator no way to tell an ingestable template from a workflow output, and the answer
     arrives as a failed ingest (CLIM-912).
     """
-    return {**dataset, "itemType": "coverage", "ingestable": datasets.is_ingestable(dataset)}
+    return {**dataset, "itemType": "coverage", **_ingestability(dataset)}
+
+
+def _ingestability(template: dict[str, Any]) -> dict[str, Any]:
+    """`ingestable`, and `ingestion_error` when the plugin a template declares cannot be loaded (CLIM-2043)."""
+    ingestable, reason = datasets.ingestability(template)
+    return {"ingestable": ingestable, **({"ingestion_error": reason} if reason else {})}
 
 
 def _feature_template_view(template: dict[str, Any], providers: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -75,8 +81,8 @@ def list_data_sources(request: Request, response: Response) -> list[dict[str, An
 
 
 def _table_template_view(template: dict[str, Any]) -> dict[str, Any]:
-    """A table template, marked as one; it declares its plugin, so it can be ingested."""
-    return {**template, "itemType": "table", "ingestable": True}
+    """A table template, marked as one; every table template declares a plugin."""
+    return {**template, "itemType": "table", **_ingestability(template)}
 
 
 def _get_dataset_or_404(dataset_id: str) -> dict[str, Any]:

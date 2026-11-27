@@ -181,6 +181,22 @@ def is_ingestable(dataset: dict[str, Any]) -> bool:
     return isinstance(plugin, str) and bool(plugin.strip())
 
 
+def ingestability(template: dict[str, Any]) -> tuple[bool, str | None]:
+    """Whether *template* can be ingested here, and why not when its plugin is what stops it.
+
+    False without a reason for a template that declares no plugin (a workflow output, see
+    `is_ingestable`); False with the reason when the plugin it names cannot be loaded or does
+    not fit the template (`plugin_load_error`). The listing, the data source page and the
+    ingest routes all decide from this.
+    """
+    if not is_ingestable(template):
+        return False, None
+    from open_geo_service.shared.plugin_loader import plugin_load_error
+
+    reason = plugin_load_error(template)
+    return reason is None, reason
+
+
 def get_dataset(dataset_id: str) -> dict[str, Any] | None:
     """Get a raster dataset template for a given id."""
     datasets_lookup = {d["id"]: d for d in list_datasets()}

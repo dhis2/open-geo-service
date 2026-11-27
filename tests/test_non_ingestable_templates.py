@@ -12,6 +12,8 @@ the request was well formed, it just named a dataset with no upstream.
 """
 
 import re
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -242,3 +244,107 @@ def test_a_derived_template_needs_no_source_page() -> None:
     template = _template(sync={"kind": "static"}, produced_by="climate_normal", license="CC-BY-4.0")
 
     registry._validate_dataset_template(template, source="derived.yaml")  # does not raise
+
+
+# -- a declared plugin that cannot be loaded (CLIM-2043) --------------------------------------
+
+_BROKEN_RASTER = """\
+- id: typo_rainfall
+  name: Rainfall with a typo in its plugin
+  description: A raster template whose plugin path does not import.
+  variable: precip
+  units: mm
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugn}
+- id: monthly_elevation
+  name: A static plugin copied into a monthly template
+  description: A raster template with a time axis whose plugin implements only fetch().
+  variable: elevation
+  units: m
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: open_geo_service.plugins.rasters.copdem.CopDEMPlugin}
+- id: lazy_rainfall
+  name: A plugin exported lazily by a module that fails to load it
+  description: A raster template whose module raises ImportError from its __getattr__.
+  variable: precip
+  units: mm
+  period_type: monthly
+  license: CC-BY-4.0
+  source_url: https://example.org
+  sync: {kind: temporal}
+  ingestion: {plugin: lazy_plugins.LazyPlugin}
+"""
+
+_BROKEN_TABLE = """\
+- id: wrong_class_table
+  name: A table whose plugin is not a table plugin
+  description: A table template naming a raster plugin.
+  source_url: https://example.org
+  license: CC-BY-4.0
+  period_type: monthly
+  collection: districts
+  ingestion: {plugin: open_geo_service.plugins.rasters.chirps3.CHIRPS3MonthlyPlugin}
+"""
+
+
+def test_a_plugin_that_cannot_be_loaded_is_reported_and_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Listed as not ingestable with the reason, refused before a job starts, and the page
+    says why instead of offering a form that fails. Each plugin is checked, and logged, once."""
+    from open_geo_service import config as api_config
+    from open_geo_service.extents import services as extent_services
+    from open_geo_service.shared import plugin_loader
+
+    plugin_loader._plugin_error.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+    def missing_dependency(name: str) -> Any:
+        raise ImportError(f"an optional dependency of {name} is not installed")
+
+    lazy = types.ModuleType("lazy_plugins")
+    lazy.__getattr__ = missing_dependency  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lazy_plugins", lazy)
+
+    (tmp_path / "rasters").mkdir()
+    (tmp_path / "rasters" / "typo.yaml").write_text(_BROKEN_RASTER, encoding="utf-8")
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "tables" / "wrong.yaml").write_text(_BROKEN_TABLE, encoding="utf-8")
+    config = api_config.get_config()
+    monkeypatch.setattr(api_config, "get_config", lambda: {**config, "plugins_dir": str(tmp_path)})
+    monkeypatch.setattr(
+        extent_services, "get_extent_or_404", lambda: {"bbox": [-13.5, 6.9, -10.1, 10.0], "country_code": "SLE"}
+    )
+
+    listed = {t["id"]: t for t in client.get("/data-sources").json()}
+    broken = [
+        ("typo_rainfall", "cannot be imported"),
+        ("monthly_elevation", "does not implement periods() and fetch_period()"),
+        ("wrong_class_table", "is not a BaseTablePlugin"),
+        ("lazy_rainfall", "raised an error looking it up"),
+    ]
+    for dataset_id, reason in broken:
+        assert listed[dataset_id]["ingestable"] is False
+        assert reason in listed[dataset_id]["ingestion_error"]
+        for headers in ({}, {"Prefer": "respond-async"}):
+            response = client.post("/ingestions", json={"dataset_id": dataset_id}, headers=headers)
+            assert response.status_code == 400, response.text
+            assert reason in response.json()["detail"]
+        form = client.post("/manage/ingest", data={"dataset_id": dataset_id, "start": "2025-01"})
+        assert form.status_code == 400, form.text
+        assert reason in form.json()["error"]
+        page = client.get(f"/data-sources/{dataset_id}", params={"f": "html"}).text
+        assert reason in page
+        assert 'name="start"' not in page
+    # The listing can be public: it names the kind of failure, not the exception.
+    assert "AttributeError" not in listed["typo_rainfall"]["ingestion_error"]
+    assert listed["chirps3_precipitation_daily"]["ingestable"] is True
+    assert "ingestion_error" not in listed["chirps3_precipitation_daily"]
+    logged = [r.getMessage() for r in caplog.records if "cannot be ingested" in r.getMessage()]
+    for plugin in ("CHIRPS3MonthlyPlugn", "copdem.CopDEMPlugin", "chirps3.CHIRPS3MonthlyPlugin", "LazyPlugin"):
+        assert sum(f"{plugin}'" in message for message in logged) == 1, logged

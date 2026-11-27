@@ -157,7 +157,8 @@ async def manage_ingest(request: Request) -> Response:
 
         # Both checks belong here rather than inside create_artifact: the work below runs in an
         # event stream, where a refusal arrives as an event after a 200 instead of as the
-        # refusal it is. A workflow output has nothing to fetch from...
+        # refusal it is. A workflow output or a plugin that cannot be loaded has nothing to
+        # fetch from...
         ensure_ingestable(template)
         # ...and only a forecast may leave the start blank.
         # A climatology has no start to give: its ids are ordinals and its reference period is

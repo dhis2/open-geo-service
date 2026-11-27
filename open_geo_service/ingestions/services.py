@@ -430,21 +430,30 @@ def get_latest_artifact_for_dataset_or_404(dataset_id: str) -> ArtifactRecord:
     return max(artifacts, key=lambda artifact: artifact.created_at)
 
 
-def ensure_ingestable(dataset: dict[str, object]) -> None:
-    """Raise 400 unless *dataset* declares a source to fetch from.
+def ensure_ingestable(dataset: dict[str, Any], *, check_plugin: bool = True) -> None:
+    """Raise 400 unless *dataset* declares a source to fetch from, through a plugin that loads.
 
     Called at every entrance to ingestion, not only inside `create_artifact`. The async
     branch of `POST /ingestions` (`Prefer: respond-async`) enqueues a job and returns 202
-    before `create_artifact` runs, so a check that lived only there turned a client mistake
-    into an accepted job that later failed — with a logged traceback, and with the 400 the
-    caller needed buried in the job record instead of in the response.
+    before `create_artifact` runs, and the web form answers in an event stream, so a check
+    that lived only there turned a client mistake into an accepted job that later failed —
+    with a logged traceback, and with the 400 the caller needed buried in the job record
+    instead of in the response.
 
     400 rather than 500. The request is well formed and the template is valid; it simply has
-    no upstream, which is a property of the dataset the caller named. A 500 says the server
-    broke and invites a retry that cannot succeed (CLIM-912).
+    no upstream it can reach, which is a property of the dataset the caller named. A 500 says
+    the server broke and invites a retry that cannot succeed (CLIM-912, CLIM-2043).
+
+    ``check_plugin=False`` checks only that a plugin is declared, for `create_artifact`, which
+    loads the plugin itself and so runs the same check on it.
     """
-    if registry_datasets.is_ingestable(dataset):
+    ingestable, reason = (
+        registry_datasets.ingestability(dataset) if check_plugin else (registry_datasets.is_ingestable(dataset), None)
+    )
+    if ingestable:
         return
+    if reason is not None:
+        raise HTTPException(status_code=400, detail=f"Data source '{dataset['id']}' cannot be ingested: {reason}")
     raise HTTPException(
         status_code=400,
         detail=(
@@ -503,7 +512,7 @@ def create_artifact(
     # depend on the request, and checking it later meant an operator who picked a workflow
     # output was first told to supply a start period — advice for a request that could never
     # have succeeded.
-    ensure_ingestable(dataset)
+    ensure_ingestable(dataset, check_plugin=False)
 
     from open_geo_service.tables import templates as table_templates
 

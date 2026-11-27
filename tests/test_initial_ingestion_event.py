@@ -59,7 +59,7 @@ def instance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[s
         "name": "Rolling precipitation",
         "variable": "precip",
         "period_type": "daily",
-        "ingestion": {"plugin": "example.RollingPlugin"},
+        "ingestion": {"plugin": "open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin"},
     }
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: plugin)
     monkeypatch.setattr(services.downloader, "get_icechunk_path", lambda _: tmp_path / "rolling.icechunk")
