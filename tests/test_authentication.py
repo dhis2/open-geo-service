@@ -469,7 +469,7 @@ HTML = {"Accept": "text/html"}
 def browser(client: TestClient) -> TestClient:
     """The client over HTTPS, which sign-in needs. It keeps no cookies: each test sends the
     session cookie by hand, so which requests carry it is visible in the test."""
-    client.base_url = httpx.URL("https://testserver")
+    client.base_url = "https://testserver"
     client.cookies.jar.set_policy(DefaultCookiePolicy(blocked_domains=["testserver.local"]))
     return client
 
@@ -567,7 +567,7 @@ def test_sign_in_is_offered_only_over_https_or_on_this_machine(auth_on: None, cl
     assert "needs HTTPS" in over_http.text and 'name="token"' not in over_http.text
     refused = client.post("/sign-in", data={"token": OPERATOR_SECRET}, headers={"Origin": "http://testserver"})
     assert refused.status_code == 403 and "set-cookie" not in refused.headers
-    client.base_url = httpx.URL("http://localhost:8000")
+    client.base_url = "http://localhost:8000"
     # The server offers the form; the browser shows it only in a secure context, which a proxy
     # rewriting Host to a loopback address cannot fake.
     local = client.get("/sign-in").text
@@ -625,7 +625,7 @@ def test_a_person_is_one_principal_by_web_sign_in_and_by_bearer_token(
     assert client.get(dropped, headers=transaction).status_code == 401
     # Under a deployment prefix the cookie and the redirect follow the prefix.
     mounted = mounted_client_factory("/geoservice")
-    mounted.base_url = httpx.URL("https://testserver")
+    mounted.base_url = "https://testserver"  # a string: TestClient may be httpx2's, not httpx's
     under_prefix = mounted.get("/sign-in/oidc/idp", follow_redirects=False)
     assert "Path=/geoservice/sign-in/oidc/idp/callback" in under_prefix.headers["set-cookie"]
     assert "redirect_uri=https%3A%2F%2Ftestserver%2Fgeoservice%2Fsign-in" in under_prefix.headers["location"]

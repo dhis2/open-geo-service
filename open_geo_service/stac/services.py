@@ -1275,6 +1275,8 @@ def _build_collection_with_xstac(
                 temporal_dimension=time_dimension,
                 x_dimension=x_dimension,
                 y_dimension=y_dimension,
+                x_step=_regular_step(ds[x_dimension].values),
+                y_step=_regular_step(ds[y_dimension].values),
                 # The store's own CRS, not a constant: these axes are in whatever the store
                 # uses, and seNorge's are UTM33 metres. See reference_system_for.
                 reference_system=reference_system_for(store_crs),
@@ -1308,7 +1310,7 @@ def _build_collection_with_xstac(
         extent_bbox = _wgs84_extent_from_store(ds, store_crs or "EPSG:4326", x_dimension, y_dimension)
         if extent_bbox is not None:
             payload.setdefault("extent", {}).setdefault("spatial", {})["bbox"] = [extent_bbox]
-        if time_dimension is not None and period_cadence(period_type) is Cadence.IRREGULAR:
+        if time_dimension is not None and _lists_temporal_values(payload, time_dimension, period_type):
             _add_temporal_values(payload, ds, time_dimension)
         payload.setdefault("assets", {}).setdefault("zarr", {})["bands"] = _store_bands(ds)
         _cache_xstac_collection_payload(cache_key, payload)
@@ -1453,6 +1455,19 @@ def _override_time_step(collection: dict[str, Any], step: str | None, *, cadence
             return
 
 
+def _lists_temporal_values(collection: dict[str, Any], time_dimension: str, period_type: Any) -> bool:
+    """Whether the temporal dimension will be written without a step, so it must list its values.
+
+    An irregular cadence never has one. An unknown one, such as an openEO result saved without a
+    period type, keeps the step xstac inferred, which it leaves out for unevenly spaced timestamps.
+    """
+    cadence = period_cadence(period_type)
+    dim = (collection.get("cube:dimensions") or {}).get(time_dimension)
+    return cadence is Cadence.IRREGULAR or (
+        cadence is Cadence.UNKNOWN and isinstance(dim, dict) and not dim.get("step")
+    )
+
+
 def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimension: str) -> None:
     """List the temporal dimension's actual timestamps as ``values``.
 
@@ -1462,7 +1477,7 @@ def _add_temporal_values(collection: dict[str, Any], ds: xr.Dataset, time_dimens
     with a single position and no slider. This mirrors ``_build_ordinal_dimensions``,
     which lists values for the same reason on a day-of-year axis.
 
-    Only emitted for irregular cadences. A regular one is fully described by extent plus
+    Only emitted when there is no step (`_lists_temporal_values`). A regular one is fully described by extent plus
     duration, and listing every timestamp would add one ISO string per period to a cached
     response for no gain — thousands of entries for a multi-year daily store.
     """
@@ -1520,13 +1535,28 @@ def reference_system_for(store_crs: str | int | None) -> int | str:
     return parsed.to_wkt()
 
 
+def _regular_step(values: Any) -> float | None:
+    """The step between a grid axis's coordinates, or None when they are not evenly spaced.
+
+    Within a thousandth of a cell: float coordinates such as WorldPop's are not exactly even,
+    and xstac publishes a step only when they are, which leaves a client unable to place a cell.
+    """
+    coords = np.asarray(values, dtype="float64")
+    if coords.size < 2:
+        return None
+    step = float((coords[-1] - coords[0]) / (coords.size - 1))
+    if step == 0 or not np.allclose(np.diff(coords), step, rtol=0, atol=abs(step) / 1000):
+        return None
+    return step
+
+
 def _build_static_cube_dimensions(ds: xr.Dataset, x_dim: str, y_dim: str) -> dict[str, Any]:
     """Build minimal cube:dimensions for a dataset with no time axis."""
     crs = reference_system_for(ds.attrs.get("proj:code"))
     x_vals = ds[x_dim].values
     y_vals = ds[y_dim].values
-    x_step = float(x_vals[1] - x_vals[0]) if len(x_vals) > 1 else None
-    y_step = float(y_vals[1] - y_vals[0]) if len(y_vals) > 1 else None
+    x_step = _regular_step(x_vals)
+    y_step = _regular_step(y_vals)
     return {
         x_dim: {
             "type": "spatial",

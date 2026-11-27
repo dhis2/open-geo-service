@@ -273,3 +273,18 @@ def is_read_only() -> bool:
             "Quoted values like 'false' are strings, not booleans."
         )
     return raw
+
+
+def is_mcp_enabled() -> bool:
+    """Return True when the instance serves its MCP endpoint at `/mcp` (CLIM-851).
+
+    Set ``mcp: true`` in geoservice.yaml. Off by default while the tools settle. The config is
+    read once per process, so a change takes a restart.
+    """
+    raw = get_config().get("mcp", False)
+    if not isinstance(raw, bool):
+        raise ValueError(
+            f"mcp in GEOSERVICE_CONFIG must be true or false, got {type(raw).__name__}. "
+            "Quoted values like 'false' are strings, not booleans."
+        )
+    return raw

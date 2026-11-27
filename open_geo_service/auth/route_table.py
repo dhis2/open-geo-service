@@ -85,6 +85,12 @@ ROUTE_TABLE: dict[Tier, frozenset[str]] = {
             "GET /schedules/sync/{dataset_id}",
             "GET /schedules/sync/{dataset_id}/delete",
             "GET /sync/{dataset_id}/plan",
+            # MCP sends every message, a read as much as anything else, as a POST. Its tools
+            # reach the rest of the API in-process, through the access middleware, so a tool can
+            # do no more than the caller could do directly (CLIM-851).
+            "GET /mcp",
+            "POST /mcp",
+            "DELETE /mcp",
         }
     ),
     Tier.AUTHENTICATED: frozenset(

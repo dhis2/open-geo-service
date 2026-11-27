@@ -744,6 +744,9 @@ def test_build_collection_with_xstac_normalizes_pystac_collection(
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
 
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
+
         def close(self) -> None:
             pass
 
@@ -778,6 +781,9 @@ def test_collection_reuses_cached_xstac_payload(
     class DummyDataset:
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
+
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
 
         def close(self) -> None:
             pass
@@ -846,6 +852,9 @@ def test_collection_preserves_template_links_when_xstac_mutates_template(
     class DummyDataset:
         attrs: dict[str, object] = {}
         data_vars: dict[str, object] = {}
+
+        def __getitem__(self, _: str) -> SimpleNamespace:
+            return SimpleNamespace(values=[0.0])  # one coordinate: no step
 
         def close(self) -> None:
             pass
