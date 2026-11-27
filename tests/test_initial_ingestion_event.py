@@ -33,6 +33,8 @@ class _Plugin(BaseDatasetPlugin):
         self.available = ["2026-01-01", "2026-01-02"]
         self.fail = False
         self.on_fetch: Any = None
+        # Periods the source lists before it has values for them.
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         return [period for period in self.available if start <= period <= end]
@@ -43,7 +45,7 @@ class _Plugin(BaseDatasetPlugin):
         if self.fail:
             raise RuntimeError("source unavailable")
         data = xr.DataArray(
-            np.full((2, 2), int(period_id[-2:]), dtype="float32"),
+            np.full((2, 2), np.nan if period_id in self.empty else int(period_id[-2:]), dtype="float32"),
             dims=("y", "x"),
             coords={"y": [3.5, 2.5], "x": [1.5, 2.5]},
         )
@@ -156,6 +158,14 @@ def test_extending_ingestion_reports_what_was_stored_before(instance: dict[str, 
     assert event.data["changes"] == [{"start": "2026-01-03", "end": "2026-01-03"}]  # the added period alone
     assert event.data["coverage_end"] == "2026-01-03"
     assert len(_handed_on(instance, expected=2)) == 2
+
+    # A new day listed before the source has values for it is held back: nothing was stored,
+    # so nothing is announced.
+    instance["plugin"].available.append("2026-01-04")
+    instance["plugin"].empty.add("2026-01-04")
+    held = _ingest(instance, end="2026-01-04")
+    assert held.status == JobStatus.SUCCESSFUL, held.error
+    assert held.events == []
 
 
 def test_failed_ingestion_emits_nothing(instance: dict[str, Any]) -> None:

@@ -9,7 +9,15 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from open_geo_service.ingestions import processes
-from open_geo_service.ingestions.schemas import SyncAction, SyncDetail, SyncKind, SyncResponse
+from open_geo_service.ingestions.schemas import (
+    ArtifactCoverage,
+    CoverageTemporal,
+    DatasetDetailRecord,
+    SyncAction,
+    SyncDetail,
+    SyncKind,
+    SyncResponse,
+)
 from open_geo_service.jobs.models import (
     JobEventDraft,
     JobExecutionResult,
@@ -51,7 +59,10 @@ def _sync_response(action: SyncAction, *, status: str = "completed") -> SyncResp
         sync_id="artifact-2" if status == "completed" else None,
         status=status,
         message="test",
-        dataset=None,
+        # Only the coverage the sync stored, which its update is built from.
+        dataset=DatasetDetailRecord.model_construct(
+            extent=ArtifactCoverage.model_construct(temporal=CoverageTemporal(start="2026-01-01", end="2026-01-03"))
+        ),
         sync_detail=SyncDetail(
             source_dataset_id="source",
             sync_kind=SyncKind.TEMPORAL,

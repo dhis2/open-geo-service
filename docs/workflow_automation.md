@@ -24,7 +24,9 @@ and save through a pipeline's named export with `save_result(..., options={"expo
 
 An update is recorded only after a successful ingestion, sync or openEO publication has
 persisted it. Failed, cancelled and no-op runs announce nothing, and neither does re-ingesting
-a dataset that is already current. Ingestion and sync, whether queued, scheduled, run inline,
+a dataset that is already current, or a run whose new periods were all held back for having no
+values yet (see [Empty periods at the end of a run are not stored](architecture.md#empty-periods-at-the-end-of-a-run-are-not-stored)).
+Ingestion and sync, whether queued, scheduled, run inline,
 or started from the admin pages, all use the same path. Work run inline is recorded as a
 completed job under `/ingestions/jobs`, because that record is what makes its event durable
 after the operation returns. Unlike queued ingestion, inline execution has no pre-write job

@@ -28,6 +28,8 @@ class _RollingPlugin(BaseDatasetPlugin):
         self.fetched: list[str] = []
         # A source with a preliminary product: final values are the day plus 100.
         self.final = False
+        # Periods the source lists before it has values for them.
+        self.empty: set[str] = set()
 
     async def periods(self, start: str, end: str) -> list[str]:
         self.queries.append((start, end))
@@ -37,7 +39,11 @@ class _RollingPlugin(BaseDatasetPlugin):
         assert period_id in self.available, "Retired source periods must not be fetched"
         self.fetched.append(period_id)
         data = xr.DataArray(
-            np.full((2, 2), int(period_id[-2:]) + (100 if self.final else 0), dtype="float32"),
+            np.full(
+                (2, 2),
+                np.nan if period_id in self.empty else int(period_id[-2:]) + (100 if self.final else 0),
+                dtype="float32",
+            ),
             dims=("y", "x"),
             coords={"y": [3.5, 2.5], "x": [1.5, 2.5]},
         )
@@ -396,6 +402,16 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     assert (response.sync_detail.refresh_start, response.sync_detail.refresh_end) == ("2026-01-11", "2026-01-11")
     assert [p.period for p in response.dataset.provisional_periods] == ["2026-01-12", "2026-01-13", "2026-01-14"]
     assert _pipeline_runs(response) == [[("2026-01-11", "2026-01-11"), ("2026-01-14", "2026-01-14")]]
+
+    # A new day listed before the source has values for it is held back, not stored, so the
+    # update lists only the day replaced with its final value, and ends where the store does.
+    clock["now"] = datetime(2026, 1, 23, 6, tzinfo=UTC)
+    plugin.available.append("2026-01-15")
+    plugin.empty.add("2026-01-15")
+    response = _sync("2026-01-15")
+    [event] = processes.sync_update_events("rolling_precip", response)
+    assert runner.update_intervals(event.data) == [("2026-01-12", "2026-01-12")]
+    assert (event.data["coverage_start"], event.data["coverage_end"]) == ("2026-01-01", "2026-01-14")
 
 
 def test_a_store_written_before_fetched_at_gets_it_on_the_next_append(

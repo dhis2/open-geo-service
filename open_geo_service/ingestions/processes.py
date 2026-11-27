@@ -12,7 +12,7 @@ from open_geo_service.extents import services as extent_services
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.schemas import ArtifactRecord, SyncAction, SyncResponse
 from open_geo_service.jobs.models import DATASET_UPDATED_EVENT_TYPE, JobEventDraft, JobExecutionResult
-from open_geo_service.shared.time import next_period_string
+from open_geo_service.shared.time import next_period_string, parse_period_string_to_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +128,14 @@ def ingest_dataset(
     previous_end = marker.get("previous_end")
     # An ingestion extending a store added the periods after its previous end; otherwise every period is new.
     first = next_period_string(previous_end, str(dataset["period_type"])) if previous_end else temporal.start
+    changes = added_range(first, previous_end, temporal.end)
+    if not changes:
+        return artifact, []
     event = dataset_update_event(
         dataset_id=str(dataset["id"]),
         artifact_id=artifact.artifact_id,
         action=INGEST_EVENT_ACTION,
-        changes=period_range(first, temporal.end),
+        changes=changes,
         coverage_start=temporal.start,
         coverage_end=temporal.end,
     )
@@ -144,8 +147,24 @@ def period_range(first: str | None, last: str | None) -> list[tuple[str, str]]:
     return [(first, last)] if first is not None and last is not None else []
 
 
+def added_range(first: str | None, previous_end: str | None, stored_end: str | None) -> list[tuple[str, str]]:
+    """``changes`` holding the new periods a write stored, from ``first`` to ``stored_end``.
+
+    Empty when the store ends no later than ``previous_end``: every new period was held back
+    for having no values yet (see "Empty periods at the end of a run are not stored" in
+    docs/architecture.md), so the plan's end is not what was stored.
+    """
+    if (
+        previous_end is not None
+        and stored_end is not None
+        and parse_period_string_to_datetime(stored_end) <= parse_period_string_to_datetime(previous_end)
+    ):
+        return []
+    return period_range(first, stored_end)
+
+
 def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEventDraft]:
-    """Describe the change a completed sync made, if it wrote data."""
+    """Describe the change a completed sync made, if it wrote data, from the coverage it committed."""
     detail = response.sync_detail
     if (
         response.status != "completed"
@@ -157,24 +176,30 @@ def sync_update_events(dataset_id: str, response: SyncResponse) -> list[JobEvent
         }
     ):
         return []
+    if response.dataset is None:
+        logger.warning("Sync of %s completed without its dataset; no update is announced", dataset_id)
+        return []
+    stored = response.dataset.extent.temporal
     if detail.action == SyncAction.REMATERIALIZE:
         # A rematerialization may rewrite every historical value.
-        changes = period_range(detail.current_start, detail.target_end)
+        changes = period_range(stored.start, stored.end)
     else:
         # An append lists the preliminary periods it replaced with final values (CLIM-931) and
         # the new periods it added, as two ranges: the stored periods between them did not change.
         changes = []
         if detail.refresh_start is not None and detail.refresh_end is not None:
             changes.append((detail.refresh_start, detail.refresh_end))
-        changes += period_range(detail.delta_start, detail.target_end)
+        changes += added_range(detail.delta_start, detail.current_end, stored.end)
+    if not changes:
+        return []
     return [
         dataset_update_event(
             dataset_id=dataset_id,
             artifact_id=response.sync_id,
             action=detail.action.value,
             changes=changes,
-            coverage_start=detail.current_start,
-            coverage_end=detail.target_end,
+            coverage_start=stored.start,
+            coverage_end=stored.end,
         )
     ]
 
