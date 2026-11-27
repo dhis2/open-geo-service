@@ -206,7 +206,7 @@ Implemented sync behavior:
 
 1. client submits `dataset_id`, `start`, and optional `end`
 2. Open Geo Service resolves the data source from the registry
-3. Open Geo Service takes the bbox of the instance's configured extent
+3. for a raster data source, Open Geo Service takes the bbox of the instance's configured extent
 4. Open Geo Service checks for an existing matching internal artifact
 5. if needed, Open Geo Service downloads the source data
 6. Open Geo Service writes a raster data source to the dataset's Icechunk repository, and a table data source's rows to its Parquet files
