@@ -413,8 +413,23 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
     (data / "catalog" / "rasters").rename(elsewhere)
     (data / "catalog" / "rasters").symlink_to(elsewhere, target_is_directory=True)
     assert client.get("/stac/rasters/rain/rain.icechunk/repo").status_code == 200
+    assert client.get("/icechunk/rain/repo").status_code == 200
     assert client.get("/stac/rasters/rain/collection.json").status_code == 200
     assert client.get("/stac/rasters/districts/README.md").status_code == 404
+    # Written through such a link too: a feature refresh and a table write, then read back.
+    for kind in ("vectors", "tables"):
+        (data / "catalog" / kind).rename(elsewhere.parent / kind)
+        (data / "catalog" / kind).symlink_to(elsewhere.parent / kind, target_is_directory=True)
+    feature_services.refresh_feature_collection(
+        template=DISTRICTS, features={"type": "FeatureCollection", "features": [_box("D1"), _box("D2")]}
+    )
+    table_store.write_rows(
+        dataset_id="rain_districts",
+        collection_id="districts",
+        rows=[{"feature_id": "D2", "period_start": "2026-01-01", "value": 2.0, "reducer": "mean"}],
+    )
+    assert client.get("/features/districts/data.parquet").status_code == 200
+    assert len(client.get("/tables/rain_districts/rows").json()["items"]) == 2
 
 
 def test_the_client_lists_every_kind_through_the_relative_links(data: Path) -> None:

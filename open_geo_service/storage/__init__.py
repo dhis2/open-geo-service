@@ -11,6 +11,7 @@ explained in docs/data_folder_layout.md.
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 
@@ -55,8 +56,13 @@ def objects() -> Objects:
     """The data folder's objects, staged in its `tmp/` folder (`layout.STAGING`), created by the first write."""
     from open_geo_service.shared import layout
 
-    root = api_config.get_data_root()
-    return Objects(root, staging=root / layout.STAGING)
+    return _objects_at(api_config.get_data_root(), layout.STAGING)
+
+
+@functools.cache
+def _objects_at(root: Path, staging: str) -> Objects:
+    # One per data folder, so a read does not build obstore's store again.
+    return Objects(root, staging=root / staging)
 
 
 def locate(path: Path | str) -> tuple[Objects, str]:
@@ -68,10 +74,8 @@ def locate(path: Path | str) -> tuple[Objects, str]:
     store = objects()
     # As written first, so a folder of `catalog/` that is a link to another disk stays in it;
     # then resolved, for a path through a link to the data folder itself.
-    for candidate, root in (
-        (Path(os.path.abspath(path)), Path(os.path.abspath(store.root))),
-        (Path(path).resolve(), store.root.resolve()),
-    ):
+    written = (Path(os.path.abspath(path)), Path(os.path.abspath(store.root)))
+    for candidate, root in (written, (Path(path).resolve(), store.root.resolve())):
         if candidate.is_relative_to(root):
             return store, candidate.relative_to(root).as_posix()
     raise ValueError(f"'{path}' is not in the data folder")
