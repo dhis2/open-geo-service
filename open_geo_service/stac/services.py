@@ -97,8 +97,9 @@ def file_fields(path: Path) -> dict[str, object]:
     Only for a file: a Zarr or Icechunk store is a directory of chunks, with neither one size nor
     one checksum. The checksum is a sha256 multihash (`1220` and the hex digest), computed once
     for each version of the file, as its key, size and time of writing identify it. Size and
-    checksum come from one read, so a file replaced in between (a thumbnail refresh) can't pair
-    one version's size with the other's checksum.
+    checksum come from one read, and a checksum is cached only when the file did not change during
+    the read, so a file replaced in between (a thumbnail refresh) can't pair one version's size
+    with the other's checksum.
     """
     found = storage.stat(path)
     if found is None:
@@ -111,10 +112,12 @@ def file_fields(path: Path) -> dict[str, object]:
     # Read and hashed outside the lock, so one large file does not hold up every other request.
     data = storage.read(path)
     checksum = "1220" + hashlib.sha256(data).hexdigest()
-    with _CHECKSUMS_LOCK:
-        _CHECKSUMS[version] = checksum
-        while len(_CHECKSUMS) > 256:
-            _CHECKSUMS.pop(next(iter(_CHECKSUMS)))
+    after = storage.stat(path)
+    if after is not None and (after.key, after.size, after.modified) == version:
+        with _CHECKSUMS_LOCK:
+            _CHECKSUMS[version] = checksum
+            while len(_CHECKSUMS) > 256:
+                _CHECKSUMS.pop(next(iter(_CHECKSUMS)))
     return {"file:size": len(data), "file:checksum": checksum}
 
 

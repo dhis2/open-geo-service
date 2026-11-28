@@ -1587,8 +1587,9 @@ def _create_streaming_artifact(
             period_type=str(dataset.get("period_type")) if dataset.get("period_type") is not None else None,
             version=_resolve_artifact_version(dataset),
             format=ArtifactFormat.ICECHUNK,
-            path=str(store_path.resolve()),
-            asset_paths=[str(store_path.resolve())],
+            # As written, not resolved: a folder of `catalog/` may be a link to another disk.
+            path=os.path.abspath(store_path),
+            asset_paths=[os.path.abspath(store_path)],
             # After the write branch has moved, like the thumbnail: the size and statistics of the new version.
             size_bytes=stored_bytes(store_path),
             statistics=measure_statistics(store_path, str(dataset["variable"])),
@@ -2453,11 +2454,12 @@ IMMUTABLE_CACHE = "max-age=31536000, immutable"
 def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
     """Serve a raw Icechunk store file for native SDK access via icechunk.http_storage()."""
     artifact = _get_latest_published_icechunk_artifact(dataset_id)
-    store_root = Path(artifact.path or artifact.asset_paths[0]).resolve()
+    # Normalised as written rather than resolved, so a linked folder of `catalog/` is served.
+    store_root = Path(os.path.abspath(artifact.path or artifact.asset_paths[0]))
 
     # A client given the asset href, which ends in a slash, asks for `<href>/repo`; without the
     # strip, `//repo` would name the absolute path /repo.
-    full_path = (store_root / file_path.lstrip("/")).resolve()
+    full_path = Path(os.path.abspath(store_root / file_path.lstrip("/")))
     if not full_path.is_relative_to(store_root):
         raise HTTPException(status_code=404, detail="Not found")
     if not storage.exists(full_path):
@@ -2973,7 +2975,7 @@ def _refresh_recorded_size(store_path: Path) -> None:
     never masks the failure that led here.
     """
     try:
-        path = str(store_path.resolve())
+        path = os.path.abspath(store_path)
         size = stored_bytes(store_path)
 
         def newest(records: list[ArtifactRecord]) -> int | None:
