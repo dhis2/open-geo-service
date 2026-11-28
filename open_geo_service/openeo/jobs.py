@@ -214,6 +214,7 @@ def _serialize(record: OpenEOJobRecord) -> dict[str, object]:
     data["retry_at"] = record.retry_at.isoformat() if record.retry_at is not None else None
     data["publishing"] = record.publishing
     data["publication"] = record.publication.model_dump(mode="json") if record.publication is not None else None
+    data["merge_publication"] = record.merge_publication
     data["events"] = [event.model_dump(mode="json", by_alias=True) for event in record.events]
     return data
 
@@ -617,6 +618,7 @@ class OpenEOJobService:
         trigger_id: str,
         max_attempts: int = 1,
         job_id: str | None = None,
+        merge_publication: bool = False,
     ) -> tuple[OpenEOJobRecord, bool]:
         """Create at most one job for a durable event and automation trigger.
 
@@ -627,6 +629,9 @@ class OpenEOJobService:
         ``job_id`` is that ID when the caller already decided and stored it, so the job is
         created under the stored ID even if how the ID is derived has changed since;
         otherwise it is derived from the event and the trigger.
+
+        With ``merge_publication``, a managed dataset the job publishes keeps its other periods:
+        the result's periods are written into the existing store.
         """
         # `type(...) is int`, not isinstance: a bool is an int, and a caller outside the
         # configuration path is not held to the annotation at runtime.
@@ -657,6 +662,7 @@ class OpenEOJobService:
             trigger_id=trigger_id,
             source_event_id=source_event_id,
             max_attempts=max_attempts,
+            merge_publication=merge_publication,
         )
 
         def _create_once(records: list[dict[str, object]]) -> tuple[OpenEOJobRecord, bool]:
@@ -1530,7 +1536,12 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
     persists it, so it is later than any read of the job store that did not see it.
     """
     from open_geo_service.ingestions import services as ingestion_services
-    from open_geo_service.ingestions.processes import FULL_REWRITE_EVENT_ACTION, dataset_update_event, period_range
+    from open_geo_service.ingestions.processes import (
+        FULL_REWRITE_EVENT_ACTION,
+        MERGE_EVENT_ACTION,
+        dataset_update_event,
+        period_range,
+    )
     from open_geo_service.ingestions.schemas import ArtifactProvenance, ArtifactRecord, PublicationStatus
 
     job = store_get_job(job_id)
@@ -1553,9 +1564,13 @@ def complete_managed_publication(job_id: str, snapshot_id: str) -> OpenEOJobReco
         dataset_update_event(
             dataset_id=publication.dataset_id,
             artifact_id=stored.artifact_id,
-            action=FULL_REWRITE_EVENT_ACTION,
-            # The store was replaced as a whole: no period is known unchanged.
-            changes=period_range(stored.coverage.temporal.start, stored.coverage.temporal.end),
+            action=FULL_REWRITE_EVENT_ACTION if publication.changes is None else MERGE_EVENT_ACTION,
+            # A store replaced as a whole has no period known unchanged.
+            changes=(
+                period_range(stored.coverage.temporal.start, stored.coverage.temporal.end)
+                if publication.changes is None
+                else publication.changes
+            ),
             coverage_start=stored.coverage.temporal.start,
             coverage_end=stored.coverage.temporal.end,
             producer_type="openeo",
@@ -1602,15 +1617,66 @@ def _coverage_point(label: str | None) -> Any:
         return None
 
 
+def _period_coverage(coverage: Any, ds: Any, t_dim: str | None, period_type: str | None) -> Any:
+    """*coverage* with its time bounds as *period_type* periods (``2026-07``), as ingestion records them.
+
+    Its update's ``changes`` and a later merge then name periods the same way as the
+    dataset's other records. Kept as dates when the result has no periods to name.
+    """
+    from open_geo_service.shared.time import numpy_datetime_to_period_string
+
+    if t_dim is None or t_dim not in ds.coords or ds.sizes.get(t_dim, 0) == 0 or period_type in (None, "climatology"):
+        return coverage
+    periods = numpy_datetime_to_period_string(ds[t_dim].values, period_type).tolist()
+    temporal = coverage.temporal.model_copy(update={"start": min(periods), "end": max(periods)})
+    return coverage.model_copy(update={"temporal": temporal})
+
+
+def _plan_merge(
+    ds: Any, dataset_id: str, store_path: Path, t_dim: str | None, period_type: str | None, coverage: Any
+) -> tuple[list[tuple[str, str]], Any]:
+    """The range a merge of ``ds`` writes, and the store's coverage after it.
+
+    Raises ValueError, a permanent error, when the result cannot be merged: it has no time
+    axis of periods, or it would leave a gap after the store's last period.
+    """
+    from open_geo_service.ingestions.services import get_latest_artifact_for_dataset_or_404
+    from open_geo_service.shared.time import next_period_string, numpy_datetime_to_period_string
+    from open_geo_service.streaming.store import read_committed_period_ids_ordered
+
+    start, end = coverage.temporal.start, coverage.temporal.end
+    if t_dim is None or period_type in (None, "climatology") or start is None or end is None:
+        raise ValueError(f"Cannot merge into '{dataset_id}': the result has no time axis of periods")
+    stored = read_committed_period_ids_ordered(store_path, period_type)
+    held = set(stored)
+    expected = next_period_string(stored[-1], period_type) if stored else None
+    for period in sorted(set(numpy_datetime_to_period_string(ds[t_dim].values, period_type).tolist())):
+        if period in held:
+            continue
+        if expected is not None and period != expected:
+            raise ValueError(f"Cannot merge {period} into '{dataset_id}': the store would have no {expected}")
+        expected = next_period_string(period, period_type)
+    temporal = get_latest_artifact_for_dataset_or_404(dataset_id).coverage.temporal
+    merged = coverage.model_copy(
+        update={
+            "temporal": temporal.model_copy(
+                update={"start": temporal.start or start, "end": max(temporal.end or end, end)}
+            )
+        }
+    )
+    return [(start, end)], merged
+
+
 def _refuse_coverage_shrink(record: Any) -> None:
     """Refuse a full-store rewrite that would shorten a published managed dataset.
 
     The writer replaces the whole store, so a job that computes only recent periods (a trigger
-    over the event's ``changes``) would silently drop the history a
-    published dataset holds. Until derived datasets can be appended to, a rewrite must cover
-    at least the published coverage: it may start earlier and end later, never start later or
-    end earlier. The same rule a release sync follows. A boundary the published dataset has
-    but the result lacks (a result with no time axis, or with its temporal metadata lost)
+    over the event's ``changes``) would silently drop the history a published dataset holds;
+    a derived dataset's refresh of changed ranges merges into the store instead
+    (`_plan_merge`). A rewrite must cover at least the published coverage: it may start
+    earlier and end later, never start later or end earlier. The same rule a release sync
+    follows. A boundary the published dataset has but the result lacks (a result with no time
+    axis, or with its temporal metadata lost)
     cannot be shown not to shrink it, so it is refused too; a dataset published without that
     boundary may still be rewritten. Raised as a ValueError, which is a permanent error while
     saving: retrying the same graph would shrink it the same way.
@@ -1766,10 +1832,17 @@ def _write_managed_zarr(
     _reject_incompatible_template_units(ds, variable, cf_attrs)
     apply_cf_metadata(ds, cf_attrs, variable=variable, overwrite=True)
 
-    coverage = _derive_coverage(ds, x_dim, y_dim, t_dim, crs)
     period_type: str | None = _derive_period_type(ds, options, source_template, t_dim)
+    # The dataset's own period type: a result of one period has no spacing to tell it from.
+    stored_type = template.get("period_type") or period_type
+    coverage = _period_coverage(_derive_coverage(ds, x_dim, y_dim, t_dim, crs), ds, t_dim, stored_type)
     store_path = layout.raster_store(dataset_id)
     store_path.parent.mkdir(parents=True, exist_ok=True)
+    # The ranges a merge writes into the existing store; None replaces the store as a whole.
+    changes: list[tuple[str, str]] | None = None
+    merging = job_id is not None and (job := store_get_job(job_id)) is not None and job.merge_publication
+    if merging and store_path.exists():
+        changes, coverage = _plan_merge(ds, dataset_id, store_path, t_dim, stored_type, coverage)
 
     # Validate the complete record before crossing the store commit's point of no return.
     # Only its measured byte size depends on the committed store and is filled in afterwards.
@@ -1831,24 +1904,41 @@ def _write_managed_zarr(
                     base_snapshot_id=store_head(store_path),
                     publish_requested=_publish_raw,
                     record=record.model_dump(mode="json"),
+                    changes=changes,
                 ),
             )
         try:
-            snapshot_id = downloader.write_to_icechunk_store(
-                _strip_non_serializable_attrs(ds),
-                store_path,
-                x_dim,
-                y_dim,
-                t_dim,
-                crs=crs,
-                pyramid_method=downloader.resampling_method_from_template(template),
-                commit_message=commit_message,
-                # The point of no return: a cancelled job stops here, before the commit, so
-                # the store keeps its previous state and nothing is published.
-                before_commit=enter_publication,
-                # One commit holds the whole result, so it is a version a rollback may publish.
-                metadata=COMPLETE_VERSION,
-            )
+            if changes is not None:
+                assert t_dim is not None  # checked by _plan_merge
+                snapshot_id = downloader.merge_into_icechunk_store(
+                    _strip_non_serializable_attrs(ds),
+                    store_path,
+                    x_dim,
+                    y_dim,
+                    t_dim,
+                    crs=crs,
+                    pyramid_method=downloader.resampling_method_from_template(template),
+                    commit_message=commit_message,
+                    before_commit=enter_publication,
+                    # The store's other periods are as complete as before, so this is a version too.
+                    metadata=COMPLETE_VERSION,
+                )
+            else:
+                snapshot_id = downloader.write_to_icechunk_store(
+                    _strip_non_serializable_attrs(ds),
+                    store_path,
+                    x_dim,
+                    y_dim,
+                    t_dim,
+                    crs=crs,
+                    pyramid_method=downloader.resampling_method_from_template(template),
+                    commit_message=commit_message,
+                    # The point of no return: a cancelled job stops here, before the commit, so
+                    # the store keeps its previous state and nothing is published.
+                    before_commit=enter_publication,
+                    # One commit holds the whole result, so it is a version a rollback may publish.
+                    metadata=COMPLETE_VERSION,
+                )
         except ExecutionCancelled:
             if created_template is not None:
                 # Registered by this attempt for a dataset that now will not exist.

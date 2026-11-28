@@ -73,6 +73,10 @@ class ManagedPublication(BaseModel):
     )
     publish_requested: bool
     record: dict[str, Any] = Field(description="The validated artifact record to register once committed.")
+    changes: list[tuple[str, str]] | None = Field(
+        default=None,
+        description="The ranges a merge wrote, for its update event; None when the store was replaced as a whole.",
+    )
     snapshot_id: str | None = None
     artifact_id: str | None = None
     published: bool | None = Field(default=None, description="The artifact's effective publication state.")
@@ -121,6 +125,9 @@ class OpenEOJobRecord(BaseModel):
     publishing: bool = Field(default=False, exclude=True)
     # The managed dataset this job publishes through save_result, from intent to outcome.
     publication: ManagedPublication | None = Field(default=None, exclude=True)
+    # Set on a derived dataset's refresh of changed ranges: its result's periods are written into
+    # the existing store (`merge_into_icechunk_store`) instead of replacing it.
+    merge_publication: bool = Field(default=False, exclude=True)
     # Durable domain events this job produced (a `dataset.updated` for a published managed
     # dataset), written in the same store mutation as the outcome they describe.
     events: list[JobEvent] = Field(default_factory=list, exclude=True)

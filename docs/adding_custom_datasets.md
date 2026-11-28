@@ -303,24 +303,28 @@ Give `produced_by` the whole recipe instead, and Open Geo Service can run it:
   `dataset_id: {from_parameter: output_dataset_id}`, as `climate_normal`, `climate_anomaly` and
   `temporal_change` do.
 - `refresh_on` names the argument holding the dataset that drives this one. When that dataset
-  updates, by a sync or by another recipe, Open Geo Service runs the workflow again over that dataset's full
-  coverage, filling the workflow's one temporal-interval parameter, which the recipe leaves out.
-  Updates of the other datasets it reads, such as the normal above, do not refresh it.
+  updates, by a sync or by another recipe, Open Geo Service runs the workflow again over each range
+  of periods the update changed (see [Workflow automation](workflow_automation.md)), filling the
+  workflow's one temporal-interval parameter, which the recipe leaves out, and writes those
+  periods into the dataset. Updates of the other datasets it reads, such as the normal above, do
+  not refresh it.
 - Without `refresh_on` the recipe has a fixed range: set the temporal-interval parameter in
   `arguments`, as for a normal. Open Geo Service checks such a recipe at startup but never runs it; an
   operator runs the workflow when the dataset is needed.
 
 Only a derived dataset that exists is kept current: create it once by running the workflow over
 its input's full coverage. A built-in recipe therefore does nothing on an instance that never
-created its dataset. The run that creates it counts as current, so the first refresh comes with
-the input's next update; a dataset created before its input's latest update is refreshed at the
-next reconciliation. Each refresh is an openEO batch job, listed under `GET /jobs` with the
-title `Refresh <dataset id>`. It runs the workflow as defined when it was submitted, and editing
-the recipe or the workflow makes the next reconciliation refresh the dataset again. One refresh
-of a dataset runs at a time: updates that arrive meanwhile are taken up when it finishes, as one
-run over the newest coverage, or, when it fails, at the next reconciliation. A refresh that
-fails is not retried by itself beyond its job's attempts; the next update of its input starts a
-new one. Updates missed while Open Geo Service was stopped are caught up at startup and every 15 minutes.
+created its dataset. The run that creates it covers the input's updates before it, so the first
+refresh comes with the input's next update. Each refresh is an openEO batch job, listed under
+`GET /jobs` with the title `Refresh <dataset id>: <range>`. It runs the workflow as defined when
+it was submitted. One refresh of a dataset runs at a time, since each writes the same store:
+those for later ranges or updates wait as created jobs and start in order as each finishes.
+
+A refresh recomputes the whole history instead, replacing the store, in two cases: the recipe or
+the workflow changed since the last refresh (at startup, or at the input's next update for a
+workflow edited while Open Geo Service runs), and the update after a refresh that failed or was
+cancelled, whose periods were never written. A failed refresh is not retried by itself beyond its
+job's attempts. Updates missed while Open Geo Service was stopped are caught up at startup.
 
 The recipe is checked at startup, against the registered workflows: an unknown workflow or
 argument, a missing argument, a time range set where `refresh_on` should fill it (or left open

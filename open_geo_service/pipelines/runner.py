@@ -32,7 +32,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -768,25 +768,9 @@ def _decided(record: PipelineRecord, event_id: str, event_time: str | None) -> b
     return through is not None and when is not None and when < through
 
 
-def update_intervals(data: dict[str, Any]) -> list[tuple[str, str]]:
-    """The intervals a dataset update changed, as its ``changes`` list them; empty when it lists none.
-
-    Each is run by itself: the periods between two of them did not change. An update in the
-    shape before CLIM-2029, with no ``changes``, lists none.
-    """
-    changes = data.get("changes")
-    if not isinstance(changes, list):
-        return []
-    intervals: list[tuple[str, str]] = []
-    for change in cast(list[Any], changes):
-        start, end = (change.get("start"), change.get("end")) if isinstance(change, dict) else (None, None)
-        if not isinstance(start, str) or not isinstance(end, str):
-            return []
-        intervals.append((start, end))
-    return intervals
-
-
 def _event_context(event: Any) -> RunContext:
+    from open_geo_service.ingestions.processes import update_intervals
+
     data = event.data
     return RunContext(
         intervals=update_intervals(data),
@@ -804,6 +788,7 @@ def _skip(pipeline_id: str, event: Any, reason: str, *, decide: bool = True) -> 
     With ``decide`` it is also marked decided, so it is not reconsidered. An update seen while
     the pipeline is paused is only listed: the checkpoint starts afresh when it resumes.
     """
+    from open_geo_service.ingestions.processes import update_intervals
     from open_geo_service.pipelines.schemas import SkippedUpdate
 
     entry = SkippedUpdate(

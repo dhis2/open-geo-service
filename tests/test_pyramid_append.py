@@ -253,6 +253,40 @@ def test_a_climatology_appends_along_its_own_time_dim(tmp_path: Path, monkeypatc
         assert np.array_equal(a[level]["dayofyear"][...], b[level]["dayofyear"][...]), level
 
 
+@pytest.mark.parametrize("pyramid", [True, False])
+def test_a_merge_writes_its_periods_in_place_and_after_the_end_and_matches_a_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pyramid: bool
+) -> None:
+    """A derived dataset's refresh writes only the periods it recomputed (CLIM-1857)."""
+    if pyramid:
+        monkeypatch.setattr(downloader, "_PYRAMID_PIXEL_THRESHOLD", 64 * 64)
+        monkeypatch.setattr(downloader, "_PYRAMID_TARGET_TILE_SIZE", 24)
+    rng = np.random.default_rng(0)
+    times = np.array([f"2026-0{month}-01" for month in range(1, 6)], dtype="datetime64[ns]")
+    full = xr.Dataset(
+        {"tg": (("t", "y", "x"), rng.normal(size=(5, NY, NX)).astype("float32"))},
+        coords={"t": times, "y": np.linspace(4.0, 2.0, NY), "x": np.linspace(1.0, 3.0, NX)},
+    )
+    merged, rebuilt = tmp_path / "merged.icechunk", tmp_path / "rebuilt.icechunk"
+    stale = full.isel(t=slice(0, 3)).copy(deep=True)
+    stale["tg"][1] = 0.0
+    downloader.write_to_icechunk_store(stale, merged, crs="EPSG:4326")
+
+    earlier = full.isel(t=[0]).assign_coords(t=np.array(["2025-12-01"], dtype="datetime64[ns]"))
+    with pytest.raises(ValueError, match="lacks before its last"):
+        downloader.merge_into_icechunk_store(earlier, merged, crs="EPSG:4326")
+    downloader.merge_into_icechunk_store(full.isel(t=slice(1, 5)), merged, crs="EPSG:4326", commit_message="m")
+
+    downloader.write_to_icechunk_store(full, rebuilt, crs="EPSG:4326")
+    if pyramid:
+        _assert_same_store(merged, rebuilt)
+    else:
+        a, b = _root(merged), _root(rebuilt)
+        assert dict(a.attrs) == dict(b.attrs)
+        for name in ("tg", "t"):
+            assert np.array_equal(a[name][...], b[name][...], equal_nan=True), name
+
+
 def test_a_sync_with_nothing_new_leaves_the_store_alone(pyramid_sync: dict[str, Any]) -> None:
     state = pyramid_sync
     _ingest(state, "2026-01-03")
