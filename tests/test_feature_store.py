@@ -837,13 +837,16 @@ def test_a_failed_first_registration_keeps_rather_than_deletes_the_unregistered_
         with pytest.raises(RuntimeError, match="unwritable"):
             feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert len(_collection_files()) == 1, "not deleted immediately"
+    (abandoned,) = _collection_files()
 
-    # Nor left forever: the next successful refresh removes it once the grace period is over.
+    # Nor left forever: the next successful refresh lists it as replaced, and one after the grace
+    # period removes it.
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    assert abandoned.exists(), "a reader may have resolved it before its record was removed"
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert len(_collection_files()) == 1, "the abandoned file is gone; only the successful write remains"
+    assert not abandoned.exists()
 
 
 def test_publication_failure_restores_the_previous_file_and_record(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -897,8 +900,8 @@ def test_a_reader_that_resolved_the_record_before_a_publication_failure_can_stil
         with pytest.raises(RuntimeError, match="publication failed"):
             feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    # The reader resumes, after the rollback has already run, and opens the file the record it
-    # captured names.
+    # A retry succeeds at once; then the reader resumes and opens the file the record it captured names.
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
     frame = store.read_feature_collection(captured["record"])
 
     assert len(frame) == 2

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Generator, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -790,7 +791,7 @@ def _require_written_feature_store(store_path: Path | str, *, dataset_id: str) -
     collection is one GeoParquet file, and a directory at that path is the partitioned form this
     release does not write or read.
     """
-    resolved = Path(store_path).resolve()
+    resolved = Path(os.path.abspath(store_path))  # not through links: `catalog/vectors` may be one
     if not storage.exists(resolved):
         raise ValueError(
             f"feature collection '{dataset_id}' has no GeoParquet file at {resolved}; the store "
