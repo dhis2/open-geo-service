@@ -3844,8 +3844,10 @@ def test_feature_names_read_only_the_id_and_name_columns(monkeypatch: pytest.Mon
     from shapely.geometry import Point
 
     from open_geo_service.features import services as feature_services
+    from open_geo_service.shared import layout
 
-    path = tmp_path / "districts.parquet"
+    path = layout.dataset_dir(layout.Kind.VECTOR, "districts") / "districts.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
     gpd.GeoDataFrame(
         {"id": [_OU[0], _OU[1]], "displayName": ["Bo", "Bombali"], "level": [2, 2]},
         geometry=[Point(-11.7, 7.9), Point(-12.1, 9.2)],

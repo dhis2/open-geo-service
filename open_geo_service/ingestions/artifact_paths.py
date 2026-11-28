@@ -12,6 +12,7 @@ absolute paths it always did.
 """
 
 import logging
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -36,12 +37,12 @@ def to_portable(raw: str) -> str:
     candidate = Path(raw)
     if not candidate.is_absolute():
         return raw
-    root = api_config.get_data_root()
+    from open_geo_service import storage
+
     try:
-        relative = candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return storage.key(candidate)
     except ValueError:
         return raw
-    return relative.as_posix()
 
 
 def to_absolute(raw: str) -> str:
@@ -56,7 +57,8 @@ def to_absolute(raw: str) -> str:
     root = api_config.get_data_root()
     candidate = Path(raw)
     if not candidate.is_absolute():
-        return str((root / PurePosixPath(raw)).resolve(strict=False))
+        # Joined as written, not resolved: a folder of `catalog/` may be a link to another disk.
+        return os.path.abspath(root / PurePosixPath(raw))
     return str(_rebase_legacy(candidate, root))
 
 

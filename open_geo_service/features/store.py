@@ -96,7 +96,7 @@ def new_collection_file(dataset_id: str) -> Path:
 def collection_files(dataset_id: str) -> list[Path]:
     """Return this collection's stored files, current and replaced alike: the Parquet files in its folder."""
     root = _collection_root(dataset_id)
-    return sorted(root.glob("*.parquet")) if root.is_dir() else []
+    return storage.files(root, ".parquet")
 
 
 def prune_superseded_files(record: ArtifactRecord) -> None:
@@ -208,7 +208,6 @@ def write_feature_collection(
     frame = frame.iloc[frame.hilbert_distance().argsort(kind="stable")].reset_index(drop=True)
 
     path = new_collection_file(dataset_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Written in the staging folder and moved into place, so a reader never sees a partial file.
     # The target is new on every write, so this replaces nothing a record points at: an
     # interrupted write leaves an unreferenced file, never a truncated collection.
@@ -259,7 +258,7 @@ def read_feature_collection(
             "max_unqualified_read=None to read all of it deliberately"
         )
     window = transform_bbox(bbox, source=bbox_crs, target=detail.crs) if bbox is not None else None
-    frame: gpd.GeoDataFrame = gpd.read_parquet(path, bbox=window, filesystem=storage.parquet_filesystem())
+    frame: gpd.GeoDataFrame = gpd.read_parquet(storage.key(path), bbox=window, filesystem=storage.parquet_filesystem())
     return frame
 
 
@@ -272,12 +271,12 @@ def read_feature_columns(record: ArtifactRecord, columns: Sequence[str]) -> list
     import pyarrow.parquet as pq
 
     path = _stored_path(record)
-    present = set(pq.read_schema(path, filesystem=storage.parquet_filesystem()).names)
+    present = set(pq.read_schema(storage.key(path), filesystem=storage.parquet_filesystem()).names)
     wanted = [column for column in dict.fromkeys(columns) if column in present]
     if not wanted:
         return []
     rows: list[dict[str, Any]] = pq.read_table(
-        path, columns=wanted, filesystem=storage.parquet_filesystem()
+        storage.key(path), columns=wanted, filesystem=storage.parquet_filesystem()
     ).to_pylist()
     return rows
 
@@ -295,7 +294,7 @@ def _stored_path(record: ArtifactRecord) -> Path:
     if raw is None:
         raise ValueError(f"feature collection '{record.dataset_id}' has no stored path on its record")
     path = Path(raw)
-    if not path.is_file():
+    if not storage.exists(path):
         raise ValueError(
             f"feature collection '{record.dataset_id}' is registered at {path}, but no file is there; "
             "the record and the store disagree"

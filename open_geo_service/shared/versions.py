@@ -39,19 +39,19 @@ def replaced_files(previous: ArtifactRecord | None, replaced: Iterable[Path]) ->
     now = datetime.now(UTC)
     settled = now - timedelta(seconds=SUPERSEDED_FILE_GRACE_SECONDS)
     new = [ReplacedFile(path=str(path), replaced_at=now) for path in replaced]
-    names = {Path(entry.path).resolve() for entry in new}
+    names = {storage.key(entry.path) for entry in new}
     kept = [
         entry
         for entry in (previous.replaced_files if previous else [])
-        if Path(entry.path).resolve() not in names and (catalog_behind() or entry.replaced_at > settled)
+        if storage.key(entry.path) not in names and (catalog_behind() or entry.replaced_at > settled)
     ]
     return kept + new
 
 
-def needed_files(record: ArtifactRecord) -> set[Path]:
-    """The files *record* names or lists as replaced, resolved; every other file in its folder can go."""
+def needed_keys(record: ArtifactRecord) -> set[str]:
+    """The keys of the files *record* names or lists as replaced; every other file in its folder can go."""
     raw = [record.path, *record.asset_paths, *(entry.path for entry in record.replaced_files)]
-    return {Path(path).resolve() for path in raw if path}
+    return {storage.key(path) for path in raw if path}
 
 
 def remove_unneeded(
@@ -64,9 +64,9 @@ def remove_unneeded(
     record. A file that cannot be removed is logged and tried again by the next write.
     """
     removing = remove or storage.remove
-    needed = needed_files(record)
+    needed = needed_keys(record)
     for path in files:
-        if path.resolve() in needed:
+        if storage.key(path) in needed:
             continue
         try:
             removing(path)

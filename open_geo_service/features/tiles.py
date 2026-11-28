@@ -77,7 +77,7 @@ def build_archive(collection_path: Path, collection_id: str, crs: str) -> Path |
                 import geopandas as gpd
 
                 source = Path(scratch) / "wgs84.parquet"
-                frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
+                frame = gpd.read_parquet(storage.key(collection_path), filesystem=storage.parquet_filesystem())
                 frame.to_crs("EPSG:4326").to_parquet(source)
             overview = Path(scratch) / "overview.parquet"
             # GeoParquet may say "Polygon Z"; the dimension does not change how it is tiled.

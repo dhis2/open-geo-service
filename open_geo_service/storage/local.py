@@ -1,10 +1,4 @@
-"""Where GeoService's data lives: one resolver for Icechunk stores, the object interface, and Parquet reads.
-
-Every Icechunk repository is opened through :func:`icechunk_storage`, every record, data file and
-derived file is written through :class:`Objects`, and Parquet is read through
-:func:`parquet_filesystem`, so a backend is chosen in one place. The local data folder is the
-only backend so far; object storage comes by configuration (CLIM-1331), and nothing here may rely
-on renaming, which object storage does not have.
+"""The object interface on the local disk: files under one folder, addressed by keys.
 
 The object interface is obstore. Until a release of obstore can flush a `LocalStore` write to
 disk (developmentseed/obstore#822, merged after 0.12.1), a put on the local disk is GeoService's
@@ -25,13 +19,10 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-import icechunk
 import obstore
 import obstore.exceptions
-import pyarrow.fs
 from obstore.store import LocalStore
 
-from open_geo_service import config as api_config
 from open_geo_service import writer_lease
 from open_geo_service.shared.persistence import replace_file
 
@@ -99,6 +90,15 @@ class Objects:
         with open(source, "rb+") as handle:
             os.fsync(handle.fileno())
         self._move_into_place(source, target, create=False)
+
+    def size(self, key: str) -> int | None:
+        """The bytes stored at *key*, or None when there is no object."""
+        if not self.path(key).is_file():
+            return None  # obstore would raise for a folder; there is no object either way
+        try:
+            return int(obstore.head(self._store, key)["size"])
+        except FileNotFoundError:
+            return None
 
     def get(self, key: str) -> bytes:
         """The bytes at *key*; `FileNotFoundError` when there are none."""
@@ -179,54 +179,6 @@ class Objects:
             if folder == self.root or folder.parent == folder:
                 break
             folder = folder.parent
-
-
-def objects() -> Objects:
-    """The data folder's objects, staged in its `tmp/` folder (`layout.staging_dir`)."""
-    from open_geo_service.shared import layout
-
-    return Objects(api_config.get_data_root(), staging=layout.staging_dir())
-
-
-def locate(path: Path) -> tuple[Objects, str]:
-    """The objects holding *path* and its key there, for a caller that still addresses files by path.
-
-    A path in the data folder is a key in it. One outside it, such as a test's own folder, is
-    held by its parent folder.
-    """
-    store = objects()
-    try:
-        return store, path.resolve().relative_to(store.root.resolve()).as_posix()
-    except ValueError:
-        return Objects(path.parent), path.name
-
-
-def write(path: Path, data: bytes) -> None:
-    """Write *data* at *path* through the object interface (`locate`)."""
-    store, key = locate(path)
-    store.put(key, data)
-
-
-def write_file(path: Path, source: Path) -> None:
-    """Move the staged file *source* to *path* through the object interface (`locate`)."""
-    store, key = locate(path)
-    store.put_file(key, source)
-
-
-def remove(path: Path) -> None:
-    """Remove *path* through the object interface (`locate`); nothing happens when it is gone."""
-    store, key = locate(path)
-    store.delete(key)
-
-
-def icechunk_storage(store: str | Path) -> icechunk.Storage:
-    """The Icechunk storage of the repository at *store*, a path in the data folder or a recorded store path."""
-    return icechunk.local_filesystem_storage(str(store))
-
-
-def parquet_filesystem() -> pyarrow.fs.FileSystem:
-    """The filesystem Parquet files are read from, with the same paths the records hold."""
-    return pyarrow.fs.LocalFileSystem()
 
 
 def _flush_folder(folder: Path) -> None:

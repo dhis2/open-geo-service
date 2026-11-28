@@ -345,7 +345,7 @@ def apply_catalog(plan: CatalogPlan) -> None:
     if plan.cross_device:
         raise MigrationError(_cross_device_message(plan.cross_device))
     for index, items in filter(None, (plan.records, plan.jobs)):
-        storage.write(index, f"{json.dumps(items, indent=2)}\n".encode())
+        storage.write_state(index, f"{json.dumps(items, indent=2)}\n".encode())
     for path in plan.deletions:
         path.unlink(missing_ok=True)
     for source, target in plan.moves:

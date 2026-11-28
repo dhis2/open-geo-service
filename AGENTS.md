@@ -28,6 +28,7 @@ open_geo_service/
   publications/     # STAC publication metadata
   extents/          # spatial extent config
   shared/           # dhis2 adapter, time utils
+  storage/          # the one way into catalog/: object interface on local disk (local.py)
   streaming/        # BaseDatasetPlugin, ingest orchestrator, normalize_period
   main.py           # FastAPI app, CORS middleware, route registration
 open_geo_service/plugins/rasters/   # built-in raster dataset templates (chirps3.yaml, worldpop.yaml, …)
@@ -58,6 +59,7 @@ Before handing work back, fix and format only the files you changed (`uv run ruf
 
 - **Test through the entry point.** Drive the route, `fetch_period`, or the publish path, not the helper underneath. Bugs found in review usually sit in a caller that bypassed a correct, well-tested helper.
 - **Count the places that enforce a rule.** If the same rule is checked in more than one place, decide it once and call that.
+- **Split a module that grows out of proportion.** A file that holds several responsibilities becomes a package with one module per responsibility. When a change would add to such a file, move the part it changes into its own module rather than growing the file.
 - **Run the real path once.** Ingest a period or call the route on a local instance and read the output. Implausible values and leaked metadata show up there, not in unit tests. Point `GEOSERVICE_CONFIG` at a copy of the config with its own `data_dir`, so a developer's data is left alone.
 - **Size defaults for a laptop.** Open Geo Service normally runs on one. Concurrency, thread pools and memory-heavy work default low; servers raise them through settings. Before raising concurrency, run a short test: if 4 concurrent fetches are no faster than 2, use 2.
 - **Start from the sibling plugins.** Before writing or porting a dataset plugin, read the plugins in `plugins/rasters/` or `plugins/vectors/` closest to it and match how they cache, find their cutoff, name helpers and set defaults. Port external or AI-written code onto those patterns rather than keeping its own. Add a feature no other plugin has (clamping the start of a range, say) only if this data source truly needs it; if it would help every plugin, suggest it as a change across all of them instead of implementing it in one.

@@ -145,7 +145,7 @@ def write_rows(
                 path=str(_dataset_root(dataset_id)),
                 asset_paths=[str(written)],
                 units=units[0] if units else (existing.units if existing else None),
-                size_bytes=written.stat().st_size,
+                size_bytes=storage.size(written),
                 table_schema=declared.declaration,
                 request_scope=ArtifactRequestScope(),
                 coverage=_coverage(merged, declared, period_type),
@@ -169,7 +169,7 @@ def write_rows(
             # No record names the file, so no reader sees it; remove it rather than leave it.
             storage.remove(written)
             raise
-        versions.remove_unneeded(_dataset_root(dataset_id).glob("*.parquet"), registered)
+        versions.remove_unneeded(storage.files(_dataset_root(dataset_id), ".parquet"), registered)
         return registered
 
 
@@ -326,10 +326,7 @@ def read_rows(
     flt = None
     for condition in conditions:
         flt = condition if flt is None else flt & condition
-    dataset = pds.dataset(
-        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
-    )
-    return dataset.to_table(filter=flt).sort_by(_order(declared))
+    return _dataset(record, declared).to_table(filter=flt).sort_by(_order(declared))
 
 
 def _column_representing(declared: TableSchema, meaning: str) -> str:
@@ -362,7 +359,7 @@ def summarize(record: ArtifactRecord) -> FileSummary:
     collection_ids: set[str] = set()
     periods: list[date] = []
     for path in record.asset_paths:
-        metadata = pq.ParquetFile(path, filesystem=storage.parquet_filesystem()).metadata
+        metadata = pq.ParquetFile(storage.key(path), filesystem=storage.parquet_filesystem()).metadata
         row_count += metadata.num_rows
         if period_column:
             column = metadata.schema.names.index(period_column)
@@ -372,7 +369,7 @@ def summarize(record: ArtifactRecord) -> FileSummary:
                     periods += [statistics.min, statistics.max]
         if collection_column:
             ids = pq.read_table(
-                path,
+                storage.key(path),
                 columns=[collection_column],
                 read_dictionary=[collection_column],
                 filesystem=storage.parquet_filesystem(),
@@ -414,9 +411,7 @@ def latest_values(record: ArtifactRecord, limit: int) -> LatestValues | None:
         return LatestValues(declared.arrow.empty_table(), 0, [])
     name = declared.represented_by("feature_name")
     by_name = [*([(name, "ascending")] if name else []), (feature, "ascending")]
-    dataset = pds.dataset(
-        record.asset_paths, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem()
-    )
+    dataset = _dataset(record, declared)
     keys = [collection, feature]
     # Aggregated under a name no declared column has, so no two columns below share a name.
     newest_input = "_newest"
@@ -461,8 +456,13 @@ def _read_file(record: ArtifactRecord | None, declared: TableSchema) -> pa.Table
     """The rows the dataset's file holds now, or None for a new dataset."""
     if record is None or not record.asset_paths:
         return None
-    files = storage.parquet_filesystem()
-    return pds.dataset(record.asset_paths, schema=declared.arrow, format="parquet", filesystem=files).to_table()
+    return _dataset(record, declared).to_table()
+
+
+def _dataset(record: ArtifactRecord, declared: TableSchema) -> pds.Dataset:
+    """The files the record names, read by key."""
+    keys = [storage.key(path) for path in record.asset_paths]
+    return pds.dataset(keys, schema=declared.arrow, format="parquet", filesystem=storage.parquet_filesystem())
 
 
 def _merged(
@@ -516,7 +516,6 @@ def _write_file(folder: Path, table: pa.Table, stamp: datetime) -> Path:
     """Write *table* as a new file in *folder*, under a temporary name first, then renamed."""
     import pyarrow.parquet as pq
 
-    folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{stamp:%Y%m%dT%H%M%S%fZ}-{uuid4().hex}.parquet"
     # Outside the dataset's folder, so a half-written file is never taken for the dataset.
     staging = layout.staging_dir() / f"{path.name}.{uuid4().hex}.writing"
