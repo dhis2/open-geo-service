@@ -28,6 +28,7 @@ from open_geo_service.ingestions.schemas import (
     PublicationStatus,
 )
 from open_geo_service.openeo import execution as openeo_execution
+from open_geo_service.shared import layout
 from open_geo_service.stac import services as stac_services
 
 BROWSER_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -287,7 +288,9 @@ def _tmp_record_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     artifacts_dir = tmp_path / "artifacts"
     monkeypatch.setattr(services, "ARTIFACTS_DIR", artifacts_dir)
     monkeypatch.setattr(services, "ARTIFACTS_INDEX_PATH", artifacts_dir / "records.json")
-    store_path = tmp_path / "districts.parquet"
+    # In the data folder, the only place a feature collection is read from.
+    store_path = layout.dataset_dir(layout.Kind.VECTOR, "districts") / "districts.parquet"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
     gpd.GeoDataFrame({"orgUnitCode": ["SL-W"]}, geometry=[Point(-13.5, 6.9)], crs="EPSG:4326").to_parquet(store_path)
     return store_path
 
@@ -548,8 +551,7 @@ def test_create_feature_artifact_refuses_a_store_path_with_no_file(
     guard the collection would be published and then absent, with a stale-artifact warning as
     the only trace.
     """
-    _tmp_record_store(monkeypatch, tmp_path)
-    missing = tmp_path / "never-written.parquet"
+    missing = _tmp_record_store(monkeypatch, tmp_path).with_name("never-written.parquet")
 
     with pytest.raises(ValueError, match="no GeoParquet file at"):
         services.create_feature_artifact(
@@ -566,8 +568,7 @@ def test_create_feature_artifact_refuses_a_directory_in_place_of_the_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """One GeoParquet file; the partitioned form is not what this release writes or reads."""
-    _tmp_record_store(monkeypatch, tmp_path)
-    partitioned = tmp_path / "districts.parquet.d"
+    partitioned = _tmp_record_store(monkeypatch, tmp_path).with_name("districts.parquet.d")
     partitioned.mkdir()
 
     with pytest.raises(ValueError, match="no GeoParquet file at"):

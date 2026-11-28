@@ -526,7 +526,7 @@ def write_feature_thumbnail(collection_path: str | Path, collection_id: str) -> 
     try:
         import geopandas as gpd
 
-        frame = gpd.read_parquet(collection_path, filesystem=storage.parquet_filesystem())
+        frame = gpd.read_parquet(storage.key(collection_path), filesystem=storage.parquet_filesystem())
         frame = frame[frame.geometry.notna() & ~frame.geometry.is_empty]
         if frame.empty:
             logger.warning("Feature collection '%s' has no geometry to draw; no thumbnail", collection_id)

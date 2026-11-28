@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
 from open_geo_service.features import providers as feature_providers
 from open_geo_service.features import store, tiles
 from open_geo_service.features import templates as feature_templates
@@ -532,7 +533,7 @@ def published_collection_file_or_404(collection_id: str) -> Path:
     if raw is None:
         raise HTTPException(status_code=409, detail=f"Feature collection '{collection_id}' has no stored path")
     path = Path(raw)
-    if not path.is_file():
+    if not storage.exists(path):
         raise HTTPException(
             status_code=404, detail=f"Feature collection '{collection_id}' is registered but its file is missing"
         )
@@ -547,7 +548,7 @@ def published_collection_tiles_or_404(collection_id: str) -> Path:
     before tiles existed) is a 404 until a refresh builds it.
     """
     path = tiles.archive_path(published_collection_file_or_404(collection_id))
-    if not path.is_file():
+    if not storage.exists(path):
         raise HTTPException(status_code=404, detail=f"Feature collection '{collection_id}' has no vector tiles")
     return path
 

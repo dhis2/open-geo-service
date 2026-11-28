@@ -48,7 +48,7 @@ data/
 - **Nothing GeoService keeps for itself lives under `catalog/`**: no locks, markers or
   half-written files. A file is written in `tmp/` and moved into place, so a reader of
   `catalog/` never sees a partial file.
-- **Every file is written through one object interface** (`storage.py`), flushed to disk before
+- **Every file is written through one object interface** (the `storage` package), flushed to disk before
   the write returns. At its start the writer removes the vector and table files a write stopped
   before their record left behind, in a folder whose dataset has a record; a folder no record
   names is left alone, as when `catalog/` is restored before `artifacts/records.json`.
@@ -69,7 +69,7 @@ The dataset records decide what GeoService advertises. The STAC catalog in `cata
 of them that can be rebuilt from them at any time. The records are kept behind their own
 interface in `ingestions/services.py`, separate from the file storage interface, so they can
 move from `artifacts/records.json` to a database without changing the catalog layout or the
-data formats. Today the file is written through `storage.py` like any other, but it stays on the
+data formats. Today the file is written through the `storage` package like any other, but it stays on the
 instance's disk when the datasets move to object storage. Code reads the records through that
 interface, not the file; only `migrate_layout` edits the file itself.
 

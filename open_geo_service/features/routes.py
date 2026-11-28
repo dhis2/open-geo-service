@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from open_geo_service import storage
 from open_geo_service.features import services
 from open_geo_service.features.schemas import FeatureCollectionListResponse, FeatureCollectionRecord
 from open_geo_service.features.tiles import PMTILES_MEDIA_TYPE, STYLE_MEDIA_TYPE
@@ -89,7 +90,7 @@ def download_feature_collection(collection_id: str) -> FileResponse:
     The path comes from the registered record — see `published_collection_file_or_404`.
     """
     path = services.published_collection_file_or_404(collection_id)
-    return FileResponse(path, media_type=PARQUET_MEDIA_TYPE, filename=f"{collection_id}.parquet")
+    return storage.file_response(path, media_type=PARQUET_MEDIA_TYPE, filename=f"{collection_id}.parquet")
 
 
 @router.get("/{collection_id}/data.pmtiles", response_class=FileResponse)
@@ -104,7 +105,7 @@ def download_feature_tiles(collection_id: str) -> FileResponse:
     collection's `tiles` STAC asset whenever it exists.
     """
     path = services.published_collection_tiles_or_404(collection_id)
-    return FileResponse(path, media_type=PMTILES_MEDIA_TYPE, filename=f"{collection_id}.pmtiles")
+    return storage.file_response(path, media_type=PMTILES_MEDIA_TYPE, filename=f"{collection_id}.pmtiles")
 
 
 @router.get("/{collection_id}/styles/default.json")

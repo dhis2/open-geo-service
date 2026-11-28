@@ -20,6 +20,7 @@ from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.main import app
 from open_geo_service.shared import layout
+from open_geo_service.storage import local as storage_local
 from open_geo_service.tables import store as table_store
 
 from .test_catalog_files import DISTRICTS, _box, write_one_of_each
@@ -32,9 +33,9 @@ def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
     objects = storage.Objects(root, staging=root / "tmp")
     files: list[int] = []
     folders: list[Path] = []
-    fsync, flush_folder = os.fsync, storage._flush_folder
-    monkeypatch.setattr(storage.os, "fsync", lambda descriptor: files.append(descriptor) or fsync(descriptor))
-    monkeypatch.setattr(storage, "_flush_folder", lambda folder: folders.append(folder) or flush_folder(folder))
+    fsync, flush_folder = os.fsync, storage_local._flush_folder
+    monkeypatch.setattr(storage_local.os, "fsync", lambda descriptor: files.append(descriptor) or fsync(descriptor))
+    monkeypatch.setattr(storage_local, "_flush_folder", lambda folder: folders.append(folder) or flush_folder(folder))
 
     objects.put("catalog/a/collection.json", b"{}")
 
@@ -57,14 +58,14 @@ def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
     assert objects.get("catalog/a/collection.json") == b"{ }"
 
     # With catalog/ on another filesystem than the staging folder, as a mount or a symlinked disk.
-    replace = storage.replace_file
+    replace = storage_local.replace_file
 
     def across(source: str | Path, target: Path) -> None:
         if Path(source).parent != target.parent:
             raise OSError(errno.EXDEV, "Invalid cross-device link")
         replace(source, target)
 
-    monkeypatch.setattr(storage, "replace_file", across)
+    monkeypatch.setattr(storage_local, "replace_file", across)
     objects.put("catalog/a/collection.json", b"{  }")
     assert objects.get("catalog/a/collection.json") == b"{  }"
     assert sorted(p.name for p in objects.path("catalog/a").iterdir()) == ["collection.json"], "nothing left beside it"

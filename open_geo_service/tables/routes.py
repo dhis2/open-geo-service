@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from open_geo_service import storage
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.shared.geoparquet import PARQUET_MEDIA_TYPE
@@ -69,11 +70,11 @@ def download_table(dataset_id: str) -> FileResponse:
     """
     record = _published_table_or_404(dataset_id)
     path = Path(record.asset_paths[0]) if record.asset_paths else None
-    if path is None or not path.is_file():
+    if path is None or not storage.exists(path):
         raise HTTPException(
             status_code=404, detail=f"Table dataset '{dataset_id}' is registered but its file is missing"
         )
-    return FileResponse(path, media_type=PARQUET_MEDIA_TYPE, filename=f"{dataset_id}.parquet")
+    return storage.file_response(path, media_type=PARQUET_MEDIA_TYPE, filename=f"{dataset_id}.parquet")
 
 
 def _published_table_or_404(dataset_id: str) -> ArtifactRecord:

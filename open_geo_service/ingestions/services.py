@@ -699,7 +699,7 @@ def create_feature_artifact(
         format=ArtifactFormat.GEOPARQUET,
         path=str(resolved_path),
         asset_paths=[str(resolved_path)],
-        size_bytes=stored_bytes(resolved_path),
+        size_bytes=storage.size(resolved_path),
         variables=[],
         request_scope=ArtifactRequestScope(start=None, end=None, bbox=requested_bbox),
         coverage=_feature_coverage(bounds, stored_crs=stored_crs, dataset_id=dataset_id),
@@ -792,7 +792,7 @@ def _require_written_feature_store(store_path: Path | str, *, dataset_id: str) -
     release does not write or read.
     """
     resolved = Path(store_path).resolve()
-    if not resolved.is_file():
+    if not storage.exists(resolved):
         raise ValueError(
             f"feature collection '{dataset_id}' has no GeoParquet file at {resolved}; the store "
             "writes the file, and this registers what it wrote"
@@ -1926,13 +1926,13 @@ def remove_files_no_record_names() -> int:
     unwanted, as when `catalog/` is restored before `artifacts/records.json`. A first write
     stopped part way is removed by the next write of that dataset instead.
     """
-    from open_geo_service.shared.versions import needed_files
+    from open_geo_service.shared.versions import needed_keys
 
     objects = storage.objects()
     needed: set[str] = set()
     for record in _load_records():
         if record.format in (ArtifactFormat.GEOPARQUET, ArtifactFormat.PARQUET):
-            needed |= {storage.locate(path)[1] for path in needed_files(record)}
+            needed |= needed_keys(record)
     needed |= {key.removesuffix(".parquet") + ".pmtiles" for key in needed if key.endswith(".parquet")}
     named_folders = {key.rpartition("/")[0] for key in needed}
     removed = 0
@@ -2849,7 +2849,7 @@ def _load_records() -> list[ArtifactRecord]:
 def _save_records(records: list[ArtifactRecord]) -> None:
     global _records_write_count
     with index_lock(ARTIFACTS_INDEX_PATH):
-        storage.write(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
+        storage.write_state(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
         _records_write_count += 1
     rewrite_catalog()
 
@@ -3057,7 +3057,7 @@ def _mutate_records(mutation: Callable[[list[ArtifactRecord]], MutationResult]) 
     with index_lock(ARTIFACTS_INDEX_PATH):
         records = _load_records()
         result = mutation(records)
-        storage.write(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
+        storage.write_state(ARTIFACTS_INDEX_PATH, _encode_records(records).encode())
         _records_write_count += 1
     rewrite_catalog()
     return result

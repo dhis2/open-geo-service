@@ -86,7 +86,7 @@ server = [
     "xarray>=2025.12.0",
     "zarr>=3.1.6,<4",
     "icechunk>=2.3.1,<3",
-    # The object interface (`storage.py`). A release after 0.12.1 can flush a LocalStore write
+    # The object interface (`storage/local.py`). A release after 0.12.1 can flush a LocalStore write
     # (obstore#822); until then a local put is GeoService's own flushed write.
     "obstore>=0.12.1,<0.14",
     "geozarr-toolkit==0.1.*",
