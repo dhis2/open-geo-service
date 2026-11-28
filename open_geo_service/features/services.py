@@ -123,6 +123,9 @@ def _refresh_feature_collection_locked(
     ]
     # The current record, whose file `written` replaces.
     latest = max(prior_records, key=lambda record: record.created_at) if prior_records else None
+    # With no record, the files already in the folder are listed as replaced as of now: one may be
+    # a failed first publication's, which a reader may have resolved before its record was removed.
+    replaced = [Path(str(latest.path))] if latest else store.collection_files(dataset_id)
     # Refuse before writing anything, so a doomed refresh leaves no file to clean up.
     store.validate_features_for_write(dataset_id=dataset_id, features=features, id_property=id_property)
     written, _count, geometry = store.write_feature_collection(
@@ -142,7 +145,7 @@ def _refresh_feature_collection_locked(
             provider=provider,
             version=version,
             publish=publish,
-            replaced_files=versions.replaced_files(latest, [Path(str(latest.path))] if latest else []),
+            replaced_files=versions.replaced_files(latest, replaced),
         )
     except BaseException:
         # Records first, then the file. `create_feature_artifact` stores the record before it
@@ -153,7 +156,7 @@ def _refresh_feature_collection_locked(
         #
         # That is why the restored record lists `written` as replaced rather than it being
         # unlinked: a caller that resolved the pre-rollback record may hold its path. With no
-        # earlier record to restore, `written` stays until the next refresh removes it.
+        # earlier record to restore, `written` stays, and the next refresh lists it as replaced.
         if latest is not None:
             restored = latest.model_copy(update={"replaced_files": versions.replaced_files(latest, [written])})
             _restore_records(dataset_id, [*(r for r in prior_records if r is not latest), restored])
