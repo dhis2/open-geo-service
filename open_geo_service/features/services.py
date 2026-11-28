@@ -161,7 +161,7 @@ def _refresh_feature_collection_locked(
     # superseded go. A failure here leaves an orphan, not a wrong answer.
     store.prune_superseded_files(dataset_id, current=written, replaced=previous)
     # Last, and never raising: a collection that cannot be drawn is still registered.
-    tiles.build_archive(written, dataset_id, store_crs)
+    tiles.build_archive(written, dataset_id)
     write_feature_thumbnail(written, dataset_id)
     # The catalog was rewritten with the record, before the tiles and thumbnail it describes.
     ingestion_services.rewrite_catalog()

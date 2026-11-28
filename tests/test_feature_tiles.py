@@ -109,6 +109,7 @@ def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
     """Zoomed out, tylertoo's feature budget would draw 256 of these 400 districts, leaving holes.
 
     Each district is large enough to draw at every zoom. Points are still thinned by the budget.
+    Polygons are simplified with their shared borders kept together; points have none.
     """
     grid = [_box(f"{i}_{j}", f"{i}_{j}", i / 2, j / 2, (i + 1) / 2, (j + 1) / 2) for i in range(20) for j in range(20)]
     if geometry == "point":
@@ -134,10 +135,12 @@ def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
     )
     import tylertoo
 
-    counts: dict[int, int] = {}
+    counts: dict[int | None, int] = {}
+    shared_borders: set[bool] = set()
     real_overview = tylertoo.overview
 
     def counting_overview(*args: Any, **kwargs: Any) -> Any:
+        shared_borders.add(kwargs["no_simplification_of_shared_nodes"])
         report = real_overview(*args, **kwargs)
         counts.update({level["zoom"]: level["feature_count"] for level in report["levels"]})
         return report
@@ -147,13 +150,14 @@ def test_a_boundary_collection_keeps_every_polygon_at_every_zoom(
     assert client.post("/features/districts/refresh").status_code == 200
 
     assert counts[2] == kept_at_zoom_2
+    assert shared_borders == {geometry != "point"}
     if geometry != "point":
         assert set(counts.values()) == {400}
     feature_templates.reset_feature_template_caches()
 
 
 def test_a_projected_collection_is_tiled_in_longitude_and_latitude() -> None:
-    """tylertoo reads WGS 84 or Web Mercator only, so a UTM store is reprojected for the build."""
+    """tylertoo reprojects a UTM store as it reads it, from the EPSG code the GeoParquet declares."""
     record = _refresh(store_crs="EPSG:32628")
 
     west, _south, east, _north = _header(tiles.archive_path(Path(str(record.path))))["bounds"]
