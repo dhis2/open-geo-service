@@ -419,7 +419,6 @@ def _publish_thumbnail(kind: layout.Kind, dataset_id: str, render: Callable[[Pat
     import os
 
     published = layout.thumbnail(kind, dataset_id)
-    published.parent.mkdir(parents=True, exist_ok=True)
     # `.png` last: matplotlib picks the output format from the extension, so a plain `.tmp`
     # suffix would be rejected rather than written.
     pending = layout.staging_dir() / f"{dataset_id}.{os.getpid()}.tmp.png"

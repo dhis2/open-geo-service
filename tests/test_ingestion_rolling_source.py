@@ -10,6 +10,7 @@ import pytest
 import xarray as xr
 import zarr
 
+from open_geo_service import storage
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
 from open_geo_service.ingestions import processes, services, sync_engine
 from open_geo_service.ingestions.schemas import ArtifactVersion, CoverageTemporal, SyncAction
@@ -146,7 +147,7 @@ def test_forward_ingestion_preserves_retired_source_history(
         assert stored["precip"][:, 0, 0].values.tolist() == [1.0, 2.0, 3.0, 4.0]
 
     # A gap in the missing delta must still fail before any data is written.
-    repo = services.open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     snapshot = repo.lookup_branch("ingest")
     plugin.available = ["2026-01-06"]
     with pytest.raises(services.HTTPException, match="contiguous sequence beginning at 2026-01-05"):
@@ -381,7 +382,7 @@ def test_a_preliminary_period_is_fetched_again_once_after_its_final_version_is_e
     assert _pipeline_runs(response) == [[("2026-01-02", "2026-01-02"), ("2026-01-03", "2026-01-03")]]
     # Chunked as `t`, rechunked at the end of each sync, so the refresh and the append above
     # wrote into a chunk of several periods, and the planner reads the array in few requests.
-    root = zarr.open_group(services.open_or_create_repo(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
+    root = zarr.open_group(storage.open_or_create_repository(store_path).readonly_session(WRITE_BRANCH).store, mode="r")
     assert [cast(zarr.Array, root[name]).chunks for name in (FETCHED_AT, "t")] == [(3,), (3,)]
 
     # Fetched after maturity, no period is due again: each was fetched at most twice.
@@ -479,7 +480,7 @@ def test_append_record_failure_restores_existing_store(
         )
 
     assert services._load_records()[-1].artifact_id == initial.artifact_id
-    repo = services.open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     assert not [branch for branch in repo.list_branches() if branch.startswith("ogs-ingest-rollback-")]
     with open_icechunk_dataset(store_path) as stored:
         assert stored["precip"][:, 0, 0].values.tolist() == [1.0, 2.0]

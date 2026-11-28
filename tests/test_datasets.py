@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from icechunk.store import IcechunkStore
 
 from open_geo_service import config as api_config
+from open_geo_service import storage
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.schemas import (
     ArtifactCoverage,
@@ -28,6 +29,7 @@ from open_geo_service.ingestions.schemas import (
 )
 from open_geo_service.plugins.rasters.chirps3 import CHIRPS3DailyPlugin
 from open_geo_service.publications.services import managed_dataset_id_for
+from open_geo_service.shared import layout
 from open_geo_service.shared.time import daily_period_ids
 
 
@@ -662,7 +664,7 @@ def test_zarr_route_answers_an_unreadable_icechunk_chunk_as_a_server_error(
 def test_icechunk_route_lets_browsers_keep_files_named_by_id_and_revalidate_the_rest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: TestClient
 ) -> None:
-    store_path = tmp_path / "cached.icechunk"
+    store_path = layout.raster_store("chirps3_precipitation_daily")
     # Large enough that Icechunk writes the chunk as a file rather than inline in the manifest.
     _published_icechunk_store(store_path, monkeypatch, [float(i) for i in range(1000)])
     files = {path.relative_to(store_path).parts[0]: path for path in store_path.rglob("*") if path.is_file()}
@@ -1489,7 +1491,7 @@ def test_create_artifact_appends_a_contiguous_union_and_preserves_request_proven
         "read_committed_period_ids_ordered",
         lambda *_args, **_kwargs: ["2026-01-01"],
     )
-    monkeypatch.setattr(services, "open_or_create_repo", lambda _: transaction_repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda _: transaction_repo)
     monkeypatch.setattr(
         services,
         "_maybe_build_pyramid",
@@ -1568,7 +1570,7 @@ def test_create_artifact_rolls_back_append_when_pyramid_rebuild_fails(
             has_committed_periods=True,
         ),
     )
-    monkeypatch.setattr(services, "open_or_create_repo", lambda _: transaction_repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda _: transaction_repo)
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",
@@ -1632,7 +1634,7 @@ def test_create_artifact_preserves_partial_append_when_fetch_fails(
     monkeypatch.setattr(services, "_load_streaming_plugin", lambda *args, **kwargs: _PeriodsPlugin(["2026-01-02"]))
     monkeypatch.setattr(services.downloader, "get_icechunk_path", lambda _: store_path)
     monkeypatch.setattr(services, "read_committed_period_ids_ordered", lambda *args, **kwargs: ["2026-01-01"])
-    monkeypatch.setattr(services, "open_or_create_repo", lambda _: transaction_repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda _: transaction_repo)
     monkeypatch.setattr(
         services,
         "run_streaming_ingest_sync",

@@ -17,6 +17,7 @@ from pathlib import Path
 from open_geo_service import config as api_config
 
 CATALOG = "catalog"
+STAGING = "tmp"
 """The catalog root, a folder of the data folder."""
 
 
@@ -69,9 +70,10 @@ def raster_store(dataset_id: str) -> Path:
 
 def raster_stores() -> Iterator[Path]:
     """Every raster dataset's Icechunk store in the data folder."""
-    root = kind_root(Kind.RASTER)
-    if root.is_dir():
-        yield from sorted(store for folder in root.iterdir() if (store := raster_store(folder.name)).is_dir())
+    from open_geo_service import storage
+
+    stores = (raster_store(folder.name) for folder in storage.folders(kind_root(Kind.RASTER)))
+    yield from (store for store in stores if storage.repository_exists(store))
 
 
 def thumbnail(kind: Kind, dataset_id: str) -> Path:
@@ -84,8 +86,10 @@ def find_thumbnail(stored_as: str, dataset_id: str) -> Path | None:
 
     *stored_as* is the dataset's `ArtifactFormat` or `DatasetItemType`, as for :func:`kind_of`.
     """
+    from open_geo_service import storage
+
     path = thumbnail(kind_of(stored_as), dataset_id)
-    return path if path.is_file() else None
+    return path if storage.exists(path) else None
 
 
 def staging_dir() -> Path:
@@ -93,7 +97,7 @@ def staging_dir() -> Path:
 
     Outside the catalog, so a reader of the catalog never meets a partial file.
     """
-    folder = api_config.get_data_root() / "tmp"
+    folder = api_config.get_data_root() / STAGING
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 

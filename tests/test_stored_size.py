@@ -24,7 +24,7 @@ from open_geo_service.data_manager.services import downloader
 from open_geo_service.features import services as feature_services
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.ingestions.schemas import ArtifactStatistics
-from open_geo_service.shared import storage_size
+from open_geo_service.shared import layout, storage_size
 from open_geo_service.shared.storage_size import stored_bytes
 from open_geo_service.system import templates as landing
 
@@ -64,8 +64,8 @@ def _no_walking(*_args: object, **_kwargs: object) -> int:
 
 
 def test_a_store_directory_is_measured_by_its_files(tmp_path: Path) -> None:
-    store = tmp_path / "store.zarr"
-    (store / "chunks" / "a").mkdir(parents=True)
+    store = layout.dataset_dir(layout.Kind.RASTER, "measured_folder") / "store.zarr"
+    (store / "chunks" / "a").mkdir(parents=True, exist_ok=True)
     (store / "chunks" / "a" / "0").write_bytes(b"x" * 1000)
     (store / "refs").write_bytes(b"y" * 24)
 
@@ -75,10 +75,10 @@ def test_a_store_directory_is_measured_by_its_files(tmp_path: Path) -> None:
 def test_an_icechunk_store_is_measured_by_the_chunks_it_keeps(tmp_path: Path) -> None:
     import numpy as np
 
-    from open_geo_service.streaming.store import open_or_create_repo
+    from open_geo_service import storage
 
-    store = tmp_path / "store.icechunk"
-    repo = open_or_create_repo(store)
+    store = layout.raster_store("measured_store")
+    repo = storage.open_or_create_repository(store)
     session = repo.writable_session("ingest")
     # Random values, too large to compress below the size Icechunk inlines into manifests.
     data = np.random.default_rng(0).random((64, 64), dtype="float32")
@@ -98,11 +98,13 @@ def test_an_icechunk_store_is_measured_by_the_chunks_it_keeps(tmp_path: Path) ->
 
 
 def test_a_file_is_measured_by_its_size_and_a_missing_path_counts_as_nothing(tmp_path: Path) -> None:
-    parquet = tmp_path / "districts.parquet"
+    parquet = layout.dataset_dir(layout.Kind.VECTOR, "measured_file") / "districts.parquet"
+    parquet.parent.mkdir(parents=True, exist_ok=True)
     parquet.write_bytes(b"z" * 300)
 
     assert stored_bytes(parquet) == 300
-    assert stored_bytes(tmp_path / "gone.icechunk") == 0
+    assert stored_bytes(layout.raster_store("gone")) == 0
+    assert stored_bytes(tmp_path / "outside.parquet") == 0, "nothing outside the data folder is measured"
 
 
 # --- recorded where stores are written -----------------------------------------------------

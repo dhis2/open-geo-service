@@ -468,12 +468,10 @@ def _open_pyramid_levels(
     ``t_dim`` defaults to the leading dim of level 0's data variables: publication renames
     time aliases to ``t``, but a climatology keeps its own (``dayofyear``).
     """
-    import icechunk
-
     from open_geo_service.stac.media_types import attributes_declare_multiscales
 
     method = _normalize_resampling_method(pyramid_method)
-    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
+    repo = storage.open_repository(store_path)
     session = repo.writable_session(branch)
     root = zarr.open_group(session.store, mode="r+")
     root_attrs = dict(root.attrs)
@@ -656,9 +654,7 @@ def ensure_time_coordinate_chunking(
     Surgical and transactional (Icechunk commit-or-nothing), and idempotent — a no-op when
     the coordinates are already coarse enough. Returns True if it re-chunked.
     """
-    import icechunk
-
-    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
+    repo = storage.open_repository(store_path)
     read_group = zarr.open_group(repo.readonly_session(branch).store, mode="r")
     fine: list[zarr.Array] = []
     for name in (time_dim, FETCHED_AT):
@@ -793,9 +789,9 @@ def write_to_icechunk_store(
     ds = ds.rio.write_crs(crs)
     ds = ds.proj.assign_crs(spatial_ref=crs)
 
-    from open_geo_service.streaming.store import open_or_create_repo
+    from open_geo_service import storage
 
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     session = repo.writable_session(branch)
 
     if _needs_pyramid(ds, x_dim, y_dim):

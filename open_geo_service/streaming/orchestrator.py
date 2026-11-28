@@ -29,6 +29,7 @@ import numpy as np
 import xarray as xr
 import zarr
 
+from open_geo_service import storage
 from open_geo_service.shared.branches import WRITE_BRANCH
 from open_geo_service.shared.cf import apply_cf_metadata, cf_attrs_from_template
 from open_geo_service.shared.provisional import FETCHED_AT, FETCHED_AT_ENCODING
@@ -48,7 +49,6 @@ from open_geo_service.streaming.store import (
     committed_data_group,
     ensure_fetched_at,
     is_store_empty,
-    open_or_create_repo,
     read_committed_period_ids,
     read_committed_period_ids_ordered,
     write_geozarr_attrs,
@@ -283,7 +283,7 @@ async def run_streaming_ingest(
             "a first write."
         )
 
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     period_queue = iter(pending)
     in_flight: deque[tuple[str, asyncio.Task[xr.Dataset]]] = deque()
     max_parallel = max(1, int(getattr(plugin, "max_concurrency", 1)))
@@ -611,7 +611,7 @@ def run_static_ingest_sync(
                 ds, cf_attrs_from_template(dataset), variable=(dataset or {}).get("variable"), overwrite=True
             )
             _check_cancelled()
-            session = open_or_create_repo(store_path).writable_session(branch)
+            session = storage.open_or_create_repository(store_path).writable_session(branch)
             ds.to_zarr(session.store, mode="w", zarr_format=3)
             write_geozarr_attrs(session.store, spec=spec, bbox=bbox)
             session.commit("ingest: static")

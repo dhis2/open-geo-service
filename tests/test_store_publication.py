@@ -26,7 +26,7 @@ from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from open_geo_service import config as api_config  # noqa: E402
-from open_geo_service import migrate_layout, writer_lease  # noqa: E402
+from open_geo_service import migrate_layout, storage, writer_lease  # noqa: E402
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset  # noqa: E402
 from open_geo_service.data_manager.services import downloader  # noqa: E402
 from open_geo_service.ingestions import services, sync_engine  # noqa: E402
@@ -34,7 +34,6 @@ from open_geo_service.ingestions.schemas import PublicationStatus  # noqa: E402
 from open_geo_service.main import app  # noqa: E402
 from open_geo_service.publications.services import managed_dataset_id_for  # noqa: E402
 from open_geo_service.streaming import BaseDatasetPlugin, normalize_period  # noqa: E402
-from open_geo_service.streaming import store as streaming_store  # noqa: E402
 from open_geo_service.streaming.store import published_snapshot  # noqa: E402
 
 NY, NX = 101, 75
@@ -342,8 +341,8 @@ def test_a_move_to_the_current_layout_that_stopped_part_way_is_finished_by_the_n
             raise Stopped
 
     with monkeypatch.context() as patched:
-        opened = streaming_store.open_or_create_repo
-        patched.setattr(streaming_store, "open_or_create_repo", lambda path: StopsBeforeMovingMain(opened(path)))
+        opened = storage.open_or_create_repository
+        patched.setattr(storage, "open_or_create_repository", lambda path: StopsBeforeMovingMain(opened(path)))
         assert migrate_layout.main([]) == 1  # as a process killed here leaves it
 
     assert migrate_layout.main([]) == 0

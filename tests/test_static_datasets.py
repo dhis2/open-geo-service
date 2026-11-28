@@ -279,12 +279,12 @@ def test_a_workflow_result_keeps_its_recorded_cadence() -> None:
 
 def test_a_rebuilt_store_renames_any_time_axis_alias(tmp_path: Path) -> None:
     """The rewrite after ingest finds the axis under every name publication accepts, not only t/time."""
+    from open_geo_service import storage
     from open_geo_service.ingestions import services
-    from open_geo_service.streaming.store import open_or_create_repo
 
     store_path = tmp_path / "aliased.icechunk"
     ds = ElevationPlugin().fetch(_BBOX).expand_dims({"date": [np.datetime64("2024-01-01")]})
-    session = open_or_create_repo(store_path).writable_session("ingest")
+    session = storage.open_or_create_repository(store_path).writable_session("ingest")
     ds.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("aliased")
 

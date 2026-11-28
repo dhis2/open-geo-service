@@ -390,8 +390,10 @@ def served_file(path: str) -> tuple[Path, str]:
     # disk is served; a `..` segment is what could leave the folder.
     parts = PurePosixPath(path).parts
     target = layout.catalog_root().joinpath(*parts)
-    unpublished = len(parts) > 2 and not layout.catalog_root().joinpath(*parts[:2], "collection.json").is_file()
-    if path.startswith("/") or "\\" in path or ".." in parts or unpublished or not target.is_file():
+    if path.startswith("/") or "\\" in path or ".." in parts:
+        raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
+    unpublished = len(parts) > 2 and not storage.exists(layout.catalog_root().joinpath(*parts[:2], "collection.json"))
+    if unpublished or not storage.exists(target):
         raise HTTPException(status_code=404, detail=f"No file '{path}' in the catalog")
     if target.parent.name == portolan.STYLES and target.suffix == ".json":
         return target, tiles.STYLE_MEDIA_TYPE

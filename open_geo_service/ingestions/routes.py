@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from starlette.responses import Response
 
+from open_geo_service import storage
 from open_geo_service.extents.services import get_extent_or_404
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.job_submission import INGESTION_JOB_HREF_BASE, submit_sync_job
@@ -213,7 +214,7 @@ def get_dataset_thumbnail(dataset_id: str) -> FileResponse:
     path = layout.find_thumbnail(artifact.format, dataset_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"No thumbnail for dataset '{dataset_id}'")
-    return FileResponse(path, media_type="image/png")
+    return storage.file_response(path, media_type="image/png")
 
 
 @datasets_router.get("/{dataset_id}/download")
@@ -241,7 +242,7 @@ def download_artifact_file(dataset_id: str) -> FileResponse:
             ),
         )
 
-    return FileResponse(artifact.path, media_type="application/x-netcdf", filename=f"{dataset_id}.nc")
+    return storage.file_response(artifact.path, media_type="application/x-netcdf", filename=f"{dataset_id}.nc")
 
 
 @zarr_router.get("/{dataset_id}/{relative_path:path}", response_model=None)
