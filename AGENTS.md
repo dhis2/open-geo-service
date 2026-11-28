@@ -28,6 +28,7 @@ open_geo_service/
   publications/     # STAC publication metadata
   extents/          # spatial extent config
   shared/           # dhis2 adapter, time utils
+  storage/          # the one way into catalog/: object interface (local.py), Icechunk repositories (icechunk.py)
   streaming/        # BaseDatasetPlugin, ingest orchestrator, normalize_period
   main.py           # FastAPI app, CORS middleware, route registration
 open_geo_service/plugins/rasters/   # built-in raster dataset templates (chirps3.yaml, worldpop.yaml, …)
