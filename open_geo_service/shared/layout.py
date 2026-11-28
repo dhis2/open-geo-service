@@ -17,8 +17,9 @@ from pathlib import Path
 from open_geo_service import config as api_config
 
 CATALOG = "catalog"
-STAGING = "tmp"
 """The catalog root, a folder of the data folder."""
+STAGING = "tmp"
+"""The folder files are written in before they are moved into place (`staging_dir`)."""
 
 
 class Kind(StrEnum):
