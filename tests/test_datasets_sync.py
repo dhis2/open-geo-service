@@ -190,62 +190,6 @@ def test_sync_dataset_creates_new_version_from_next_period(monkeypatch: pytest.M
     assert result.sync_detail.delta_end == "2026-02-10"
 
 
-def test_sync_dataset_append_policy_falls_back_to_rematerialize_without_icechunk_artifact(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    zarr_path = tmp_path / "worldpop_population_yearly.zarr"
-
-    dataset_id = "worldpop_population_yearly_sle"
-    latest = _artifact(
-        artifact_id="a1",
-        source_dataset_id="worldpop_population_yearly",
-        managed_dataset_id=dataset_id,
-        end="2024",
-        path=str(zarr_path),
-    )
-    latest.format = ArtifactFormat.NETCDF  # a download, not an Icechunk store
-    monkeypatch.setattr(services, "get_latest_artifact_for_dataset_or_404", lambda _: latest)
-    monkeypatch.setattr(
-        services.registry_datasets,
-        "get_dataset",
-        lambda _: {
-            "id": "worldpop_population_yearly",
-            "period_type": "yearly",
-            "sync": {"kind": "temporal", "execution": "append"},
-            "ingestion": {},
-        },
-    )
-
-    captured: dict[str, object] = {}
-
-    def fake_create_artifact(**kwargs: object) -> ArtifactRecord:
-        captured.update(kwargs)
-        return _artifact(
-            artifact_id="a2",
-            source_dataset_id="worldpop_population_yearly",
-            managed_dataset_id=dataset_id,
-            end="2025",
-        )
-
-    messages: list[str] = []
-
-    def fake_info(message: str, *args: object) -> None:
-        messages.append(message % args if args else message)
-
-    monkeypatch.setattr(services, "create_artifact", fake_create_artifact)
-    monkeypatch.setattr(services, "get_dataset_or_404", lambda _: _dataset_detail(dataset_id))
-    monkeypatch.setattr(sync_engine.logger, "info", fake_info)
-
-    result = services.sync_dataset(dataset_id=dataset_id, end="2025", publish=True)
-
-    assert "download_start" in captured
-    assert captured["download_start"] is None
-    assert result.sync_detail is not None
-    assert result.sync_detail.action == SyncAction.REMATERIALIZE
-    assert any("requires an existing Icechunk artifact" in message for message in messages)
-
-
 @pytest.mark.parametrize("stored_end", ["2026-02-10", "2026-02-08"])
 def test_sync_dataset_append_policy_uses_store_based_append_for_plugin_backed_dataset(
     every_day_available: None,
@@ -865,55 +809,6 @@ def test_plan_sync_for_plugin_backed_icechunk_falls_back_to_artifact_end_when_co
     assert result.action == SyncAction.APPEND
     assert result.current_end == "2026-01-15"
     assert any("malformed committed periods" in message for message in warnings)
-
-
-def test_sync_dataset_append_policy_falls_back_for_plugin_backed_non_icechunk_artifact(
-    every_day_available: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset_id = "chirps3_precipitation_daily_sle"
-    latest = _artifact(
-        artifact_id="a1",
-        managed_dataset_id=dataset_id,
-        end="2026-01-31",
-        path="/tmp/chirps3_precipitation_daily.zarr",
-    )
-    latest.format = ArtifactFormat.NETCDF
-    monkeypatch.setattr(services, "get_latest_artifact_for_dataset_or_404", lambda _: latest)
-    monkeypatch.setattr(
-        services.registry_datasets,
-        "get_dataset",
-        lambda _: {
-            "id": "chirps3_precipitation_daily",
-            "period_type": "daily",
-            "sync": {"kind": "temporal", "execution": "append"},
-            "ingestion": {"plugin": "open_geo_service.plugins.rasters.chirps3.CHIRPS3DailyPlugin"},
-        },
-    )
-
-    captured: dict[str, object] = {}
-    infos: list[str] = []
-
-    def fake_create_artifact(**kwargs: object) -> ArtifactRecord:
-        captured.update(kwargs)
-        return _artifact(artifact_id="a2", managed_dataset_id=dataset_id, end="2026-02-10")
-
-    def fake_info(message: str, *args: object) -> None:
-        infos.append(message % args if args else message)
-
-    monkeypatch.setattr(services, "create_artifact", fake_create_artifact)
-    monkeypatch.setattr(services, "get_dataset_or_404", lambda _: _dataset_detail(dataset_id))
-    monkeypatch.setattr(sync_engine.logger, "info", fake_info)
-
-    result = services.sync_dataset(dataset_id=dataset_id, end="2026-02-10", publish=True)
-
-    assert "download_start" in captured
-    assert captured["download_start"] is None
-    assert captured["download_end"] is None
-    assert result.sync_detail is not None
-    assert result.sync_detail.action == SyncAction.REMATERIALIZE
-    assert result.sync_detail.reason == "new_periods_available"
-    assert any("requires an existing Icechunk artifact" in message for message in infos)
 
 
 def test_sync_dataset_release_policy_returns_up_to_date_when_release_matches(monkeypatch: pytest.MonkeyPatch) -> None:

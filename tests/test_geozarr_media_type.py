@@ -9,7 +9,6 @@ spacing are not, and any reformatting silently disables rendering everywhere (CL
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -40,15 +39,6 @@ def _multiscales_attrs(levels: int = 3) -> dict[str, Any]:
         "proj:code": "EPSG:4326",
         "spatial:bbox": [0.0, 0.0, 1.0, 1.0],
     }
-
-
-def _write_zarr_store(root: Path, attributes: dict[str, Any]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "zarr.json").write_text(
-        json.dumps({"zarr_format": 3, "node_type": "group", "attributes": attributes}),
-        encoding="utf-8",
-    )
-    return root
 
 
 def test_web_optimized_media_type_is_byte_identical_to_client_expectation() -> None:
@@ -91,36 +81,10 @@ class TestAttributesDeclareMultiscales:
         assert attributes_declare_multiscales({"zarr_conventions": conventions}) is False
 
 
-class TestReadRootAttributes:
-    def test_reads_plain_zarr_v3_root(self, tmp_path: Path) -> None:
-        store = _write_zarr_store(tmp_path / "store.zarr", _multiscales_attrs())
-        assert read_root_attributes(str(store), icechunk=False)["multiscales"]["resampling_method"] == "mean"
-
-    def test_empty_for_missing_store(self, tmp_path: Path) -> None:
-        assert read_root_attributes(str(tmp_path / "absent.zarr"), icechunk=False) == {}
-
-    def test_empty_for_unreadable_metadata(self, tmp_path: Path) -> None:
-        store = tmp_path / "broken.zarr"
-        store.mkdir()
-        (store / "zarr.json").write_text("{not json", encoding="utf-8")
-        assert read_root_attributes(str(store), icechunk=False) == {}
-
-    def test_empty_for_remote_store(self) -> None:
-        # Detection must not make a network round trip per STAC request.
-        assert read_root_attributes("s3://bucket/store.zarr", icechunk=False) == {}
-
-
 class TestZarrMediaType:
-    def test_pyramided_store_advertises_profile(self, tmp_path: Path) -> None:
-        store = _write_zarr_store(tmp_path / "pyramid.zarr", _multiscales_attrs())
-        assert zarr_media_type(str(store), icechunk=False) == WEB_OPTIMIZED_ZARR_MEDIA_TYPE
-
-    def test_flat_store_advertises_plain_type(self, tmp_path: Path) -> None:
-        store = _write_zarr_store(tmp_path / "flat.zarr", {"proj:code": "EPSG:4326"})
-        assert zarr_media_type(str(store), icechunk=False) == ZARR_V3_MEDIA_TYPE
-
     def test_falls_back_to_plain_type_when_store_absent(self, tmp_path: Path) -> None:
-        assert zarr_media_type(str(tmp_path / "absent.zarr"), icechunk=False) == ZARR_V3_MEDIA_TYPE
+        assert read_root_attributes(str(tmp_path / "absent.icechunk")) == {}
+        assert zarr_media_type(str(tmp_path / "absent.icechunk")) == ZARR_V3_MEDIA_TYPE
 
     def test_falls_back_to_plain_type_when_detection_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A broken/locked store must never take the STAC collection down with it.
@@ -128,7 +92,7 @@ class TestZarrMediaType:
             raise RuntimeError("store is locked")
 
         monkeypatch.setattr("open_geo_service.stac.media_types.read_root_attributes", _boom)
-        assert zarr_media_type("/tmp/whatever.icechunk", icechunk=True) == ZARR_V3_MEDIA_TYPE
+        assert zarr_media_type("/tmp/whatever.icechunk") == ZARR_V3_MEDIA_TYPE
 
 
 class TestIcechunkDetectionEndToEnd:
@@ -166,11 +130,11 @@ class TestIcechunkDetectionEndToEnd:
     def test_a_pyramided_store_written_by_ogs_is_detected(self, tmp_path: Path) -> None:
         # Past the 2048x2048 pyramid threshold, so the writer builds a multiscales layout.
         store = self._write(tmp_path, 2100, 2400)
-        assert zarr_media_type(store, icechunk=True) == WEB_OPTIMIZED_ZARR_MEDIA_TYPE
+        assert zarr_media_type(store) == WEB_OPTIMIZED_ZARR_MEDIA_TYPE
 
     def test_a_flat_store_written_by_ogs_is_not(self, tmp_path: Path) -> None:
         store = self._write(tmp_path, 64, 64)
-        assert zarr_media_type(store, icechunk=True) == ZARR_V3_MEDIA_TYPE
+        assert zarr_media_type(store) == ZARR_V3_MEDIA_TYPE
 
     def test_reads_the_root_group_not_pyramid_level_zero(self, tmp_path: Path) -> None:
         """The store accessors descend into level 0, whose attrs carry no multiscales layout.

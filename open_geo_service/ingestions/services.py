@@ -241,9 +241,7 @@ opens turns a catalogue entry into a runtime failure, and excluding one a reader
 hides a dataset that works. `openeo/execution.py::_open_artifact` opens exactly these. Every
 raster GeoService writes is an Icechunk repository; the plain Zarr format went in CLIM-2017.
 
-NETCDF is absent deliberately: nothing opens it as a datacube, and `_dataset_links` offers it
-as a download instead. GEOPARQUET is absent for a stronger reason: it is not a datacube at all,
-so no reader will ever open it here.
+GEOPARQUET and PARQUET are absent: neither is a datacube, so no reader will ever open them here.
 """
 
 
@@ -3565,12 +3563,6 @@ def _dataset_links(
         )
     if published is not None and published.format == ArtifactFormat.PARQUET:
         links.append(DatasetAccessLink(href=f"/tables/{_segment(dataset_id)}/rows", rel="rows", title="Table rows"))
-    if latest.format == ArtifactFormat.NETCDF:
-        links.append(
-            DatasetAccessLink(
-                href=f"/datasets/{_segment(dataset_id)}/download", rel="download", title="Download NetCDF"
-            )
-        )
     return links
 
 

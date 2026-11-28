@@ -924,50 +924,6 @@ def test_raster_sync_refuses_a_feature_collection(monkeypatch: pytest.MonkeyPatc
     assert "feature collection" in excinfo.value.detail
 
 
-@pytest.mark.parametrize(
-    "refused",
-    [fmt for fmt in ArtifactFormat if fmt is not ArtifactFormat.NETCDF],
-    ids=lambda fmt: str(fmt),
-)
-def test_download_route_refuses_every_format_it_cannot_describe(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, refused: ArtifactFormat
-) -> None:
-    """The allowlist itself, not just the format that exposed it.
-
-    GeoParquet is what broke the old denylist — Parquet bytes came back as
-    application/x-netcdf named .nc — but the fix was to name the one format the response is
-    built for, so this enumerates `ArtifactFormat` and holds every other member to a refusal.
-    Adding a format to the enum without a branch here fails this test rather than shipping a
-    wrong media type.
-    """
-    artifact = _feature_artifact() if refused is ArtifactFormat.GEOPARQUET else _raster_artifact()
-    artifact.format = refused
-    monkeypatch.setattr(services, "list_artifacts", lambda: SimpleNamespace(items=[artifact]))
-
-    response = client.get(f"/datasets/{services.managed_dataset_id_for(artifact)}/download")
-
-    assert response.status_code == 409
-    assert str(refused) in response.json()["detail"]
-
-
-def test_download_route_still_serves_a_netcdf_artifact(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The one format the response is actually built for keeps working."""
-    stored = layout.dataset_dir(layout.Kind.RASTER, "legacy_netcdf") / "legacy.nc"
-    stored.parent.mkdir(parents=True, exist_ok=True)
-    stored.write_bytes(b"CDF\x01")
-    netcdf = _raster_artifact(artifact_id="n1", dataset_id="legacy_netcdf")
-    netcdf.format = ArtifactFormat.NETCDF
-    netcdf.path = str(stored)
-    monkeypatch.setattr(services, "list_artifacts", lambda: SimpleNamespace(items=[netcdf]))
-
-    response = client.get("/datasets/legacy_netcdf/download")
-
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "application/x-netcdf"
-
-
 # --- itemType on the dataset record -------------------------------------------------------
 
 

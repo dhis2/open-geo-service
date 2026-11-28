@@ -246,7 +246,6 @@ Implemented sync behavior:
 - `GET /extent`
 - `GET /datasets`
 - `GET /datasets/{dataset_id}`
-- `GET /datasets/{dataset_id}/download`
 - `GET /zarr/{dataset_id}`
 - `GET /zarr/{dataset_id}/{relative_path}`
 - `POST /sync/{dataset_id}`

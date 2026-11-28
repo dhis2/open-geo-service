@@ -177,16 +177,11 @@ def test_stac_landing_links_to_collections(client: TestClient) -> None:
     assert payload["stac_extensions"] == ["https://schemas.portolan-sdi.org/portolan/v0.3.0/schema.json"]
 
 
-def test_catalog_excludes_unpublished_and_netcdf(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_catalog_excludes_unpublished(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ingestion_services,
         "list_artifacts",
-        lambda: SimpleNamespace(
-            items=[
-                _artifact(artifact_id="a1", status=PublicationStatus.UNPUBLISHED),
-                _artifact(artifact_id="a2", format=ArtifactFormat.NETCDF),
-            ]
-        ),
+        lambda: SimpleNamespace(items=[_artifact(artifact_id="a1", status=PublicationStatus.UNPUBLISHED)]),
     )
 
     response = client.get("/stac/catalog.json")
@@ -599,28 +594,6 @@ def test_a_newer_unpublished_artifact_does_not_hide_the_published_one(monkeypatc
     assert gate["chirps3_precipitation_daily"].artifact_id == "a1"
 
 
-def test_raster_gate_admits_every_loadable_store_format(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate follows what a reader can open: `_open_artifact` opens Icechunk; NETCDF has no
-    datacube reader and is offered as a download instead, so it stays out of both catalogues."""
-    store = _artifact(
-        artifact_id="a1",
-        dataset_id="rain",
-        managed_dataset_id="rain",
-        format=ArtifactFormat.ICECHUNK,
-    )
-    netcdf = _artifact(
-        artifact_id="a2",
-        dataset_id="legacy_netcdf",
-        managed_dataset_id="legacy_netcdf",
-        format=ArtifactFormat.NETCDF,
-    )
-    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[store, netcdf]))
-
-    assert list(ingestion_services.latest_published_raster_artifacts_by_dataset()) == ["rain"]
-    assert list(ingestion_services.stac_eligible_artifacts_by_dataset()) == ["rain"]
-    assert ArtifactFormat.NETCDF not in ingestion_services.LOADABLE_RASTER_FORMATS
-
-
 def test_stac_and_openeo_gates_agree_on_rasters(monkeypatch: pytest.MonkeyPatch) -> None:
     """The split gates still agree on every published, loadable raster."""
     published = _artifact(artifact_id="a1")
@@ -630,17 +603,7 @@ def test_stac_and_openeo_gates_agree_on_rasters(monkeypatch: pytest.MonkeyPatch)
         managed_dataset_id="era5_land_t2m",
         status=PublicationStatus.UNPUBLISHED,
     )
-    non_raster = _artifact(
-        artifact_id="a3",
-        dataset_id="legacy_netcdf",
-        managed_dataset_id="legacy_netcdf",
-        format=ArtifactFormat.NETCDF,
-    )
-    monkeypatch.setattr(
-        ingestion_services,
-        "list_artifacts",
-        lambda: SimpleNamespace(items=[published, unpublished, non_raster]),
-    )
+    monkeypatch.setattr(ingestion_services, "list_artifacts", lambda: SimpleNamespace(items=[published, unpublished]))
 
     stac_gate = ingestion_services.stac_eligible_artifacts_by_dataset()
     raster_gate = ingestion_services.latest_published_raster_artifacts_by_dataset()
@@ -1234,7 +1197,7 @@ def test_media_type_detection_is_cached_per_request(client: TestClient, monkeypa
     """
     reads = 0
 
-    def counting_media_type(store_path: str, *, icechunk: bool) -> str:
+    def counting_media_type(store_path: str) -> str:
         nonlocal reads
         reads += 1
         return "application/vnd.zarr; version=3"
@@ -1259,7 +1222,7 @@ def test_media_type_cache_is_keyed_by_artifact_not_store_path(
     """
     detections: list[str] = []
 
-    def growing_media_type(store_path: str, *, icechunk: bool) -> str:
+    def growing_media_type(store_path: str) -> str:
         detections.append(store_path)
         return (
             "application/vnd.zarr; version=3; profile=multiscales"

@@ -9,10 +9,8 @@ filesystem and Icechunk access the writer's pure geometry helpers do not.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from open_geo_service import storage
@@ -80,30 +78,13 @@ def attributes_declare_multiscales(attributes: Mapping[str, Any]) -> bool:
     return isinstance(layout, list) and len(layout) > 0
 
 
-def read_root_attributes(store_path: str, *, icechunk: bool) -> Mapping[str, Any]:
-    """Root group attributes of a published store; empty mapping when unreadable.
+def read_root_attributes(store_path: str) -> Mapping[str, Any]:
+    """Root group attributes of the version readers see of an Icechunk store; empty when there is none.
 
     Reads group metadata only, never chunk data. Deliberately the *root* group: the store
     accessors descend into pyramid level ``0``, whose attributes do not carry the multiscales
     layout, so this needs its own path.
-
-    Remote stores return empty rather than paying a network round trip — the caller degrades to
-    the flat media type.
     """
-    if icechunk:
-        return _read_icechunk_root_attributes(store_path)
-    if "://" in store_path:
-        return {}
-    zarr_json = Path(store_path) / "zarr.json"
-    try:
-        payload = json.loads(zarr_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    attributes = payload.get("attributes")
-    return attributes if isinstance(attributes, Mapping) else {}
-
-
-def _read_icechunk_root_attributes(store_path: str) -> Mapping[str, Any]:
     import zarr
 
     from open_geo_service.streaming.store import read_snapshot
@@ -116,7 +97,7 @@ def _read_icechunk_root_attributes(store_path: str) -> Mapping[str, Any]:
     return dict(group.attrs)
 
 
-def zarr_media_type(store_path: str, *, icechunk: bool) -> str:
+def zarr_media_type(store_path: str) -> str:
     """The media type to advertise for the store at *store_path*.
 
     Falls back to the flat :data:`ZARR_V3_MEDIA_TYPE` whenever the pyramid cannot be confirmed.
@@ -125,7 +106,7 @@ def zarr_media_type(store_path: str, *, icechunk: bool) -> str:
     corrupt store must never take the STAC collection down with it.
     """
     try:
-        attributes = read_root_attributes(store_path, icechunk=icechunk)
+        attributes = read_root_attributes(store_path)
     except Exception:  # noqa: BLE001 — any read failure degrades to the flat type
         logger.debug("Could not read root attributes of store %r", store_path, exc_info=True)
         return ZARR_V3_MEDIA_TYPE
