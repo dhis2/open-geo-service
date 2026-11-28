@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -22,7 +22,7 @@ from open_geo_service.ingestions.schemas import ArtifactRecord
 from open_geo_service.shared import geoparquet, layout
 from open_geo_service.shared.crs import canonical_crs_code, transform_bbox
 from open_geo_service.shared.urls import require_segment_safe_id
-from open_geo_service.shared.versions import prune_superseded
+from open_geo_service.shared.versions import remove_unneeded
 
 if TYPE_CHECKING:
     import geopandas as gpd
@@ -99,12 +99,12 @@ def collection_files(dataset_id: str) -> list[Path]:
     return sorted(root.glob("*.parquet")) if root.is_dir() else []
 
 
-def prune_superseded_files(dataset_id: str, *, current: Path | None, replaced: Iterable[Path] = ()) -> None:
-    """Remove this collection's files that are no longer needed (`shared.versions.prune_superseded`).
+def prune_superseded_files(record: ArtifactRecord) -> None:
+    """Remove the collection's files *record* no longer needs (`shared.versions.remove_unneeded`).
 
     Each file's vector tiles go with it.
     """
-    prune_superseded(collection_files(dataset_id), current=current, replaced=replaced, remove=_remove_version)
+    remove_unneeded(collection_files(record.dataset_id), record, remove=_remove_version)
 
 
 def _remove_version(path: Path) -> None:

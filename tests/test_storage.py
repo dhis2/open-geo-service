@@ -15,13 +15,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from open_geo_service import storage
+from open_geo_service.features import services as feature_services
 from open_geo_service.features import store as feature_store
 from open_geo_service.ingestions import services as ingestion_services
 from open_geo_service.main import app
 from open_geo_service.shared import layout
 from open_geo_service.tables import store as table_store
 
-from .test_catalog_files import _box, write_one_of_each
+from .test_catalog_files import DISTRICTS, _box, write_one_of_each
 
 
 def test_a_put_is_whole_flushed_and_create_refuses_an_existing_key(
@@ -75,15 +76,16 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
 ) -> None:
     data = tmp_path / "data"
     write_one_of_each(data, monkeypatch)
+    (replaced,) = [Path(str(r.path)) for r in ingestion_services._load_records() if r.dataset_id == "districts"]
+    feature_services.refresh_feature_collection(
+        template=DISTRICTS, features={"type": "FeatureCollection", "features": [_box("D1")]}
+    )
     records = {record.dataset_id: record for record in ingestion_services._load_records()}
     districts = Path(str(records["districts"].path))
     table = Path(records["rain_districts"].asset_paths[0])
-    # Written a day ago; what follows is newer than them, and older than the grace period.
-    for path in (data / "catalog").rglob("*.p*"):
-        os.utime(path, (time.time() - 86400, time.time() - 86400))
 
     # The first half of each write, the file, with no record after it: what a process stopped
-    # between the two leaves.
+    # between the two leaves. Made to look newer than the files the records name: no file time is read.
     stopped_vector, _count, _geometry = feature_store.write_feature_collection(
         dataset_id="districts",
         features={"type": "FeatureCollection", "features": [_box("D2")]},
@@ -92,6 +94,8 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
     stopped_table = table_store._write_file(
         layout.dataset_dir(layout.Kind.TABLE, "rain_districts"), pq.read_table(table), datetime.now(UTC)
     )
+    for path in (districts, table, replaced):
+        os.utime(path, (time.time() - 86400, time.time() - 86400))
     # A first write stopped the same way, in a folder no record names at all: left, as the
     # records may be what is missing.
     unrecorded, _count, _geometry = feature_store.write_feature_collection(
@@ -100,20 +104,11 @@ def test_a_write_stopped_between_file_and_record_is_removed_at_the_writers_next_
         id_property="orgUnitCode",
     )
 
-    # Older than the grace period, as after a restart; a reader may still hold a younger one.
-    for path in (stopped_vector, stopped_table, unrecorded):
-        os.utime(path, (time.time() - 3600, time.time() - 3600))
-    fresh, _count, _geometry = feature_store.write_feature_collection(
-        dataset_id="districts",
-        features={"type": "FeatureCollection", "features": [_box("D3")]},
-        id_property="orgUnitCode",
-    )
-
     restart_writer()
 
     assert not stopped_vector.exists() and not stopped_table.exists()
     assert unrecorded.exists(), "a folder no record names is left alone"
-    assert fresh.exists(), "a file younger than the grace period waits for the next start"
+    assert replaced.exists(), "a file the record lists as replaced stays for its grace period"
     assert districts.exists() and table.exists(), "the files the records name stay"
     assert TestClient(app).get("/features/districts/data.parquet").status_code == 200
 

@@ -56,8 +56,9 @@ data/
   another filesystem is copied beside its target first, so the last step is still a rename
   within one filesystem and a reader sees the old file or the new one.
 - **A new version of a vector or table dataset is a new file.** The record names the current
-  one. A replaced file is removed once the file that replaced it is a minute old, so a reader
-  that has just read the record can still open the file it named.
+  one and lists the files it replaced, with when. A replaced file is removed by a write a
+  minute or more later, so a reader that has just read the record can still open the file it
+  named. No file time is read, as object storage cannot set one.
 - **The records decide what is listed and served.** The listings and the catalog read the
   records, never the folder, and `/stac` serves no file in the folder of a dataset not
   published (see below).

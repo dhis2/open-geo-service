@@ -57,6 +57,7 @@ from open_geo_service.ingestions.schemas import (
     IngestionResponse,
     ProvisionalPeriod,
     PublicationStatus,
+    ReplacedFile,
     SyncAction,
     SyncDetail,
     SyncKind,
@@ -627,6 +628,7 @@ def create_feature_artifact(
     provider: str | None = None,
     version: ArtifactVersion | None = None,
     publish: bool = True,
+    replaced_files: Sequence[ReplacedFile] = (),
 ) -> ArtifactRecord:
     """Register one already-written feature collection as a managed dataset.
 
@@ -665,6 +667,8 @@ def create_feature_artifact(
     `FeatureDetail.provider` (CLIM-926). None for a hand-registered collection. The caller's
     own selected registry name, never read from the payload: a provider does not get to declare
     its own identity, or one could claim ownership of a collection another provider wrote.
+
+    `replaced_files` are the files the new record lists as replaced (`shared.versions`).
     """
     dataset_id = _require_template_str(template, "id")
     dataset_name = _require_template_str(template, "name")
@@ -708,6 +712,7 @@ def create_feature_artifact(
             crs=stored_crs,
             provider=provider,
         ),
+        replaced_files=list(replaced_files),
     )
     # Overwrite semantics, which is what a refresh is: replace this collection's name, extent
     # and paths in place while keeping its artifact id and publication state. There is no
@@ -1912,43 +1917,32 @@ def clean_up_interrupted_ingests() -> int:
 
 
 def remove_files_no_record_names() -> int:
-    """Remove the vector and table files a write left without a record; return how many.
+    """Remove the vector and table files no record names or lists as replaced; return how many.
 
-    A vector or table write puts its new file, then the record naming it. A write stopped in
-    between leaves a file no record names, newer than every file a record names in its folder.
-    Run by the writer at startup, when no write is in progress. An older file no record names is
-    a replaced version, which `shared.versions` removes once its grace period has passed. A file
-    younger than that grace period is left too: a reader may have resolved a record that named it,
-    such as a first publication that failed and was rolled back; the next startup removes it.
+    Run by the writer at startup, when no write is in progress, with the rule a write applies to
+    its own folder (`shared.versions.remove_unneeded`): such a file was left by a write stopped
+    before its record, or replaced longer ago than the grace period, and no reader can hold it.
     A folder no record names is left alone: its records may be missing rather than its files
     unwanted, as when `catalog/` is restored before `artifacts/records.json`. A first write
     stopped part way is removed by the next write of that dataset instead.
     """
-    from open_geo_service.shared.versions import SUPERSEDED_FILE_GRACE_SECONDS
+    from open_geo_service.shared.versions import needed_files
 
-    settled = datetime.now(UTC) - timedelta(seconds=SUPERSEDED_FILE_GRACE_SECONDS)
     objects = storage.objects()
-    named: set[str] = set()
+    needed: set[str] = set()
     for record in _load_records():
         if record.format in (ArtifactFormat.GEOPARQUET, ArtifactFormat.PARQUET):
-            for raw in (record.path, *record.asset_paths):
-                if raw:
-                    named.add(storage.locate(Path(raw))[1])
-    named |= {key.removesuffix(".parquet") + ".pmtiles" for key in named if key.endswith(".parquet")}
+            needed |= {storage.locate(path)[1] for path in needed_files(record)}
+    needed |= {key.removesuffix(".parquet") + ".pmtiles" for key in needed if key.endswith(".parquet")}
+    named_folders = {key.rpartition("/")[0] for key in needed}
     removed = 0
     for kind in (layout.Kind.VECTOR, layout.Kind.TABLE):
-        folders: dict[str, list[storage.Listed]] = {}
         for listed in objects.scan(f"{layout.CATALOG}/{kind.value}"):
-            if listed.key.endswith((".parquet", ".pmtiles")):
-                folders.setdefault(listed.key.rpartition("/")[0], []).append(listed)
-        for files in folders.values():
-            current = [listed.modified for listed in files if listed.key in named]
-            for listed in files:
-                unnamed = listed.key not in named and listed.modified < settled
-                if unnamed and current and listed.modified > max(current):
-                    logger.info("Removing '%s', which a write left without a record", listed.key)
-                    objects.delete(listed.key)
-                    removed += 1
+            unneeded = listed.key.endswith((".parquet", ".pmtiles")) and listed.key not in needed
+            if unneeded and listed.key.rpartition("/")[0] in named_folders:
+                logger.info("Removing '%s', which no record names", listed.key)
+                objects.delete(listed.key)
+                removed += 1
     return removed
 
 

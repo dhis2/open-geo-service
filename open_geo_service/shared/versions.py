@@ -2,86 +2,73 @@
 
 Feature collections and table datasets never overwrite a file: each write is a new file, and the
 record says which one is current. A reader resolves the record, then opens the file it names, so
-a file just replaced must stay for a reader caught between the two.
+a file just replaced must stay for a reader caught between the two. The record lists each such
+file with the time it was replaced (`ArtifactRecord.replaced_files`); no file time is read, as
+object storage cannot set one.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from open_geo_service import storage
+from open_geo_service.ingestions.schemas import ArtifactRecord, ReplacedFile
 
 logger = logging.getLogger(__name__)
 
 SUPERSEDED_FILE_GRACE_SECONDS = 60
-"""How long a replaced file stays after the file that replaced it was written.
+"""How long a replaced file stays listed after it was replaced.
 
 Far longer than opening one file takes. It is not a guarantee for a reader that pauses for
 longer while further writes run; nothing short of reference counting is.
 """
 
 
-def prune_superseded(
-    files: Iterable[Path],
-    *,
-    current: Path | None,
-    replaced: Iterable[Path] = (),
-    remove: Callable[[Path], None] | None = None,
-) -> None:
-    """Call when *current* has just become the file the record names, replacing *replaced*.
+def replaced_files(previous: ArtifactRecord | None, replaced: Iterable[Path]) -> list[ReplacedFile]:
+    """The files a new record lists as replaced: *replaced*, as of now, and *previous*'s still in grace.
 
-    A file stopped being current when the next newer file was written, so the next file's mtime
-    is that moment, and each of *files* is removed once that is more than the grace period ago.
-    For that, files must become current in the order of their mtimes: *current* is given the time
-    now, which also covers a file restored by a rollback, and the files written after *replaced*
-    that never became current (a write killed before its record) are removed at once, as no
-    record ever named them. *current*, *replaced* and the newest file are never removed, and no
-    replaced file is while the STAC catalog lags the records, as it may still link one. A file
-    that cannot be removed is logged and tried again on the next write.
+    A file *previous* listed longer ago than the grace period is dropped, and `remove_unneeded`
+    removes it once the new record is stored, unless the STAC catalog lags the records: it may
+    still link the file, so every listed file is kept until a write after it has caught up.
     """
-    removing = remove or storage.remove
-    if current is not None:
-        make_current(current)
-    replaced_keys = {path.resolve() for path in replaced}
-    kept = replaced_keys | ({current.resolve()} if current is not None else set())
-    stamped = sorted(_stamped(files))
-    if replaced_times := [mtime for mtime, path in stamped if path.resolve() in replaced_keys]:
-        never_current = [path for mtime, path in stamped if mtime > max(replaced_times) and path.resolve() not in kept]
-        for path in never_current:
-            _remove(path, removing)
-        stamped = [(mtime, path) for mtime, path in stamped if path not in never_current]
     from open_geo_service.stac.catalog_files import catalog_behind
 
-    if catalog_behind():
-        return  # the catalog may still link a replaced file; removed by a write once it has caught up
-    now = time.time()
-    for (_, older), (written, _) in zip(stamped, stamped[1:], strict=False):
-        if older.resolve() not in kept and now - written >= SUPERSEDED_FILE_GRACE_SECONDS:
-            _remove(older, removing)
+    now = datetime.now(UTC)
+    settled = now - timedelta(seconds=SUPERSEDED_FILE_GRACE_SECONDS)
+    new = [ReplacedFile(path=str(path), replaced_at=now) for path in replaced]
+    names = {Path(entry.path).resolve() for entry in new}
+    kept = [
+        entry
+        for entry in (previous.replaced_files if previous else [])
+        if Path(entry.path).resolve() not in names and (catalog_behind() or entry.replaced_at > settled)
+    ]
+    return kept + new
 
 
-def make_current(path: Path) -> None:
-    """Make *path* the newest version, as of now. Logged rather than raised on failure."""
-    try:
-        os.utime(path)
-    except OSError:
-        logger.warning("Could not mark '%s' as the current version", path, exc_info=True)
+def needed_files(record: ArtifactRecord) -> set[Path]:
+    """The files *record* names or lists as replaced, resolved; every other file in its folder can go."""
+    raw = [record.path, *record.asset_paths, *(entry.path for entry in record.replaced_files)]
+    return {Path(path).resolve() for path in raw if path}
 
 
-def _stamped(files: Iterable[Path]) -> Iterator[tuple[float, Path]]:
+def remove_unneeded(
+    files: Iterable[Path], record: ArtifactRecord, *, remove: Callable[[Path], None] | None = None
+) -> None:
+    """Remove each of *files* that *record* neither names nor lists as replaced.
+
+    Call once *record* is stored, holding the dataset's lock. Such a file was replaced longer ago
+    than the grace period, or no record ever named it, as when a write was killed before its
+    record. A file that cannot be removed is logged and tried again by the next write.
+    """
+    removing = remove or storage.remove
+    needed = needed_files(record)
     for path in files:
+        if path.resolve() in needed:
+            continue
         try:
-            yield path.stat().st_mtime, path
+            removing(path)
         except OSError:
-            continue  # gone since it was listed
-
-
-def _remove(path: Path, remove: Callable[[Path], None]) -> None:
-    try:
-        remove(path)
-    except OSError:
-        logger.warning("Could not remove the superseded file '%s'", path, exc_info=True)
+            logger.warning("Could not remove the superseded file '%s'", path, exc_info=True)

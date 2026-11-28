@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _PATH_FIELD = "path"
 _PATH_LIST_FIELD = "asset_paths"
+_REPLACED_FIELD = "replaced_files"
 
 
 def to_portable(raw: str) -> str:
@@ -106,6 +107,9 @@ def _map_record_paths(item: dict[str, Any], convert: Any) -> dict[str, Any]:
     assets = item.get(_PATH_LIST_FIELD)
     if isinstance(assets, list):
         item[_PATH_LIST_FIELD] = [convert(entry) if isinstance(entry, str) else entry for entry in assets]
+    for replaced in item.get(_REPLACED_FIELD) or []:
+        if isinstance(replaced, dict) and isinstance(replaced.get(_PATH_FIELD), str):
+            replaced[_PATH_FIELD] = convert(replaced[_PATH_FIELD])
     return item
 
 

@@ -501,6 +501,13 @@ class ArtifactStatistics(BaseModel):
     p98: float | None = None
 
 
+class ReplacedFile(BaseModel):
+    """A file of a feature collection or table dataset that a later write replaced (`shared.versions`)."""
+
+    path: str
+    replaced_at: datetime
+
+
 class ProvisionalPeriod(BaseModel):
     """A stored period fetched from a source's preliminary product, before its final version (CLIM-931)."""
 
@@ -590,6 +597,13 @@ class ArtifactRecord(BaseModel):
     publication: ArtifactPublication = Field(default_factory=ArtifactPublication)
     provenance: ArtifactProvenance | None = Field(
         default=None, description="How a derived artifact was produced; None for an ingested one."
+    )
+    replaced_files: list[ReplacedFile] = Field(
+        default_factory=lambda: list[ReplacedFile](),
+        description=(
+            "Files of a feature collection or table dataset replaced less than the grace period ago, "
+            "kept for a reader that resolved an earlier record (`shared.versions`). Empty for a raster."
+        ),
     )
     features: FeatureDetail | None = Field(
         default=None,
