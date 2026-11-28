@@ -33,9 +33,10 @@ os.umask(_UMASK)
 
 @dataclass(frozen=True)
 class Listed:
-    """An object found by a listing: its key, and when it was last written."""
+    """An object: its key, its size in bytes, and when it was last written."""
 
     key: str
+    size: int
     modified: datetime
 
 
@@ -91,14 +92,15 @@ class Objects:
             os.fsync(handle.fileno())
         self._move_into_place(source, target, create=False)
 
-    def size(self, key: str) -> int | None:
-        """The bytes stored at *key*, or None when there is no object."""
+    def stat(self, key: str) -> Listed | None:
+        """The object at *key*, or None when there is none."""
         if not self.path(key).is_file():
             return None  # obstore would raise for a folder; there is no object either way
         try:
-            return int(obstore.head(self._store, key)["size"])
+            meta = obstore.head(self._store, key)
         except FileNotFoundError:
             return None
+        return Listed(key, int(meta["size"]), meta["last_modified"])
 
     def get(self, key: str) -> bytes:
         """The bytes at *key*; `FileNotFoundError` when there are none."""
@@ -122,7 +124,7 @@ class Objects:
             return  # obstore would refuse a missing folder; an empty listing is the answer
         for batch in obstore.list(self._store, prefix=prefix):
             for meta in batch:
-                yield Listed(meta["path"], meta["last_modified"])
+                yield Listed(meta["path"], int(meta["size"]), meta["last_modified"])
 
     def level(self, prefix: str) -> tuple[list[str], list[str]]:
         """The keys directly under *prefix*, and the prefixes of its sub-folders, without going deeper."""

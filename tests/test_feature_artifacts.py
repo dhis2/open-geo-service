@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,7 +64,8 @@ def _feature_artifact(
     status: PublicationStatus = PublicationStatus.PUBLISHED,
     path: str | None = None,
 ) -> ArtifactRecord:
-    artifact_path = path if path is not None else str(Path(tempfile.gettempdir()) / f"{dataset_id}.parquet")
+    default = layout.dataset_dir(layout.Kind.VECTOR, dataset_id) / f"{dataset_id}.parquet"
+    artifact_path = path if path is not None else str(default)
     return ArtifactRecord(
         artifact_id=artifact_id,
         dataset_id=dataset_id,
@@ -954,7 +954,8 @@ def test_download_route_still_serves_a_netcdf_artifact(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The one format the response is actually built for keeps working."""
-    stored = tmp_path / "legacy.nc"
+    stored = layout.dataset_dir(layout.Kind.RASTER, "legacy_netcdf") / "legacy.nc"
+    stored.parent.mkdir(parents=True, exist_ok=True)
     stored.write_bytes(b"CDF\x01")
     netcdf = _raster_artifact(artifact_id="n1", dataset_id="legacy_netcdf")
     netcdf.format = ArtifactFormat.NETCDF

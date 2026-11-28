@@ -12,9 +12,10 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from open_geo_service import storage
 from open_geo_service.stac.services import _build_ordinal_dimensions
 from open_geo_service.streaming.orchestrator import _strip_cf_encoding
-from open_geo_service.streaming.store import open_or_create_repo, read_committed_period_ids
+from open_geo_service.streaming.store import read_committed_period_ids
 
 
 def _dayofyear_cube() -> xr.Dataset:
@@ -65,7 +66,7 @@ def test_read_committed_period_ids_ordinal_coord(tmp_path: Path) -> None:
     # committed ids come back as plain strings ("1".."366"), not datetime-parsed
     # garbage — otherwise resume would re-append everything.
     store_path = tmp_path / "ordinal.icechunk"
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     session = repo.writable_session("ingest")
     _dayofyear_cube().to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("ingest: ordinal")

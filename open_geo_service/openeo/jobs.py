@@ -1473,11 +1473,9 @@ def _netcdf_safe_attrs(ds: Any) -> Any:
 
 def store_head(store_path: Path) -> str | None:
     """The tip of an Icechunk store's write branch, or None when there is no store yet."""
-    import icechunk
-
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return None
-    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
+    repo = storage.open_repository(store_path)
     return str(repo.lookup_branch(WRITE_BRANCH))
 
 
@@ -1489,11 +1487,9 @@ def committed_snapshot(store_path: Path, commit_message: str, base_snapshot_id: 
     ``commit_message``. A head that merely differs from the base proves nothing: another
     writer may have committed since, so only this attempt's own message counts.
     """
-    import icechunk
-
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return None
-    repo = icechunk.Repository.open(storage.icechunk_storage(str(store_path)))
+    repo = storage.open_repository(store_path)
     for snapshot in repo.ancestry(branch=WRITE_BRANCH):
         if base_snapshot_id is not None and snapshot.id == base_snapshot_id:
             return None
@@ -1769,7 +1765,6 @@ def _write_managed_zarr(
     coverage = _derive_coverage(ds, x_dim, y_dim, t_dim, crs)
     period_type: str | None = _derive_period_type(ds, options, source_template, t_dim)
     store_path = layout.raster_store(dataset_id)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Validate the complete record before crossing the store commit's point of no return.
     # Only its measured byte size depends on the committed store and is filled in afterwards.

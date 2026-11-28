@@ -104,15 +104,13 @@ def read_root_attributes(store_path: str, *, icechunk: bool) -> Mapping[str, Any
 
 
 def _read_icechunk_root_attributes(store_path: str) -> Mapping[str, Any]:
-    import icechunk
     import zarr
 
-    if not Path(store_path).exists():
-        return {}
-    repo_storage = storage.icechunk_storage(store_path)
     from open_geo_service.streaming.store import read_snapshot
 
-    repo = icechunk.Repository.open(repo_storage)
+    if not storage.repository_exists(store_path):
+        return {}
+    repo = storage.open_repository(store_path)
     session = repo.readonly_session(snapshot_id=read_snapshot(repo))
     group = zarr.open_group(session.store, mode="r")
     return dict(group.attrs)

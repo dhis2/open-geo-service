@@ -2004,11 +2004,11 @@ def test_plan_sync_append_for_icechunk_artifact(
 def test_cleanup_removes_the_branches_a_killed_ingest_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import icechunk
 
+    from open_geo_service import storage
     from open_geo_service.ingestions.services import clean_up_interrupted_ingest
-    from open_geo_service.streaming.store import open_or_create_repo
 
     target = tmp_path / "ds.icechunk"
-    repo = open_or_create_repo(target)
+    repo = storage.open_or_create_repository(target)
     snapshot = repo.lookup_branch("ingest")
     repo.create_branch("ogs-ingest-rollback-first", snapshot)
     repo.create_branch("ogs-ingest-replacement-second", snapshot)
@@ -2061,9 +2061,9 @@ def _rolled_back_store(target: Path) -> Any:
     Chunks are 16 KB of random values, too large to compress below the size Icechunk inlines
     into manifests, so each is a file.
     """
-    from open_geo_service.streaming.store import open_or_create_repo
+    from open_geo_service import storage
 
-    repo = open_or_create_repo(target)
+    repo = storage.open_or_create_repository(target)
     _commit_days(repo, range(0, 3), "seed")
     before = repo.lookup_branch("ingest")
     repo.create_branch("ogs-ingest-rollback-attempt", before)
@@ -2086,11 +2086,11 @@ def test_collection_keeps_the_snapshot_a_reader_opened_during_the_attempt(tmp_pa
     import numpy as np
     import xarray as xr
 
+    from open_geo_service import storage
     from open_geo_service.ingestions.services import collect_unreachable_objects
-    from open_geo_service.streaming.store import open_or_create_repo
 
     target = tmp_path / "ds.icechunk"
-    repo = open_or_create_repo(target)
+    repo = storage.open_or_create_repository(target)
     _commit_days(repo, range(0, 3), "seed")
     before = repo.lookup_branch("ingest")
     for day in range(3, 6):
@@ -2127,11 +2127,11 @@ def test_collecting_unreachable_objects_frees_a_rolled_back_attempt(tmp_path: Pa
 
 def test_collection_keeps_what_a_branch_still_reaches(tmp_path: Path, collect_immediately: None) -> None:
     """Only unreachable data goes: commits another branch points at survive the reset."""
+    from open_geo_service import storage
     from open_geo_service.ingestions.services import collect_unreachable_objects
-    from open_geo_service.streaming.store import open_or_create_repo
 
     target = tmp_path / "ds.icechunk"
-    repo = open_or_create_repo(target)
+    repo = storage.open_or_create_repository(target)
     _commit_days(repo, range(0, 3), "seed")
     before = repo.lookup_branch("ingest")
     for day in range(3, 6):

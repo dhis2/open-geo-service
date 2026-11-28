@@ -45,7 +45,7 @@ def get_data(
     """Load an xarray raster dataset for a given time range and bbox."""
     logger.info("Opening dataset")
     icechunk_path = get_icechunk_path(dataset)
-    if not icechunk_path.exists():
+    if not storage.repository_exists(icechunk_path):
         # Nothing has been ingested. A typed error, so a caller can tell it apart from a
         # genuinely broken store (CLIM-897).
         raise DatasetDataUnavailable(
@@ -196,13 +196,10 @@ def open_icechunk_dataset(
     planner, is dropped unless ``with_fetched_at`` asks for it: it is bookkeeping, and every
     consumer (aggregation, openEO, exports, STAC) would otherwise carry it along (CLIM-931).
     """
-    import icechunk
-
     path = Path(store_path)
-    if not path.exists():
+    if not storage.repository_exists(path):
         raise FileNotFoundError(f"Icechunk store not found: {path}")
-    repo_storage = storage.icechunk_storage(str(path))
-    repo = icechunk.Repository.open(repo_storage)
+    repo = storage.open_repository(path)
     if branch is None:
         from open_geo_service.streaming.store import read_snapshot
 

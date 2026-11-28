@@ -9,6 +9,7 @@ import pytest
 import xarray as xr
 
 import open_geo_service.streaming.orchestrator as streaming_orchestrator
+from open_geo_service import storage
 from open_geo_service.streaming.orchestrator import _grid_spec_from_dataset, run_streaming_ingest_sync
 
 
@@ -126,7 +127,7 @@ def test_orchestrator_uses_store_state_as_resume_truth(monkeypatch: pytest.Monke
     progress_updates: list[tuple[int | None, int | None, str | None]] = []
     cursor_saves: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -201,7 +202,7 @@ def test_orchestrator_closes_each_fetched_dataset(monkeypatch: pytest.MonkeyPatc
     don't leak the open_rasterio / open_dataset handles backing it."""
     store_path = tmp_path / "close-store.zarr"
     repo = _FakeRepo(str(store_path))
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -240,7 +241,7 @@ def test_orchestrator_infers_grid_when_plugin_has_no_probe(monkeypatch: pytest.M
     CRS, and dtype are inferred from the first fetched period and the defaults apply."""
     store_path = tmp_path / "noprobe-store.zarr"
     repo = _FakeRepo(str(store_path))
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -299,7 +300,7 @@ def test_orchestrator_uses_plugin_crs_attr_as_inference_fallback(
     fetched data carries no CRS of its own."""
     store_path = tmp_path / "projected-store.zarr"
     repo = _FakeRepo(str(store_path))
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -344,7 +345,7 @@ def test_orchestrator_stamps_cf_attrs_from_template(monkeypatch: pytest.MonkeyPa
     store_path = tmp_path / "streaming-store.zarr"
     repo = _FakeRepo(str(store_path))
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -394,7 +395,7 @@ def test_orchestrator_stamps_the_template_on_its_variable_only(monkeypatch: pyte
     store_path = tmp_path / "streaming-store.zarr"
     repo = _FakeRepo(str(store_path))
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -440,7 +441,7 @@ def test_orchestrator_refuses_destructive_first_write_when_existing_store_is_not
     store_path.mkdir()
     repo = _FakeRepo(str(store_path))
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t", **_: set()
     )
@@ -470,7 +471,7 @@ def test_orchestrator_normalizes_invalid_plugin_batching_and_concurrency(
     repo = _FakeRepo(str(store_path))
     cursor_saves: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -508,7 +509,7 @@ def test_orchestrator_does_not_skip_uncommitted_gaps_before_cursor(
     )
     existing.to_zarr(store_path, mode="w", zarr_format=3)
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator,
         "read_committed_period_ids",
@@ -541,7 +542,7 @@ def test_orchestrator_rejects_spatial_shape_changes_across_appends(
     store_path = tmp_path / "streaming-store.zarr"
     repo = _FakeRepo(str(store_path))
 
-    monkeypatch.setattr(streaming_orchestrator, "open_or_create_repo", lambda path: repo)
+    monkeypatch.setattr(storage, "open_or_create_repository", lambda path: repo)
     monkeypatch.setattr(
         streaming_orchestrator, "read_committed_period_ids", lambda path, period_type, time_dim="t", **_: set()
     )

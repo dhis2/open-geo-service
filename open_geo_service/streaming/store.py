@@ -29,19 +29,6 @@ from open_geo_service.streaming.protocol import GridSpec
 logger = logging.getLogger(__name__)
 
 
-def open_or_create_repo(store_path: Path) -> Any:
-    """Open an existing Icechunk repository, or create one at ``store_path`` with its write branch."""
-    import icechunk
-
-    repo_storage = storage.icechunk_storage(str(store_path))
-    if store_path.exists():
-        return icechunk.Repository.open(repo_storage)
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    repo = icechunk.Repository.create(repo_storage)
-    repo.create_branch(WRITE_BRANCH, repo.lookup_branch(PUBLISHED_BRANCH))
-    return repo
-
-
 # Snapshot metadata on a version a sync or job completed, which a rollback may publish. A sync
 # that fails part way leaves its periods on the write branch for a retry without it.
 COMPLETE_VERSION = {"ogs_complete": True}
@@ -49,7 +36,7 @@ COMPLETE_VERSION = {"ogs_complete": True}
 
 def seal_version(store_path: Path, branch: str = WRITE_BRANCH) -> None:
     """Mark the tip of *branch* as a complete version, in place: an empty amend that adds the mark."""
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     tip = next(iter(repo.ancestry(branch=branch)))
     repo.writable_session(branch).amend(tip.message, metadata=COMPLETE_VERSION, allow_empty=True)
 
@@ -83,7 +70,7 @@ def needs_adoption(store_path: Path) -> bool:
     Such a store's `main` is its old write tip, which readers would take for the published version,
     so it is not read until `migrate_layout` has moved it (`adopt_write_branch`).
     """
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     branches = repo.list_branches()
     return _ADOPTING_BRANCH in branches or (WRITE_BRANCH not in branches and published_snapshot(repo) is not None)
 
@@ -98,7 +85,7 @@ def adopt_write_branch(store_path: Path, published: bool) -> bool:
     complete so a rollback may return to it. The write branch is created last, so a store that has
     it is done. Also gives a new store the write branch its creation stopped before.
     """
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     branches = repo.list_branches()
     if WRITE_BRANCH in branches and _ADOPTING_BRANCH not in branches:
         return False
@@ -130,7 +117,7 @@ def publish_snapshot(store_path: Path, snapshot_id: str | None = None) -> str | 
     from open_geo_service import writer_lease
 
     writer_lease.ensure_held()
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     if snapshot_id is None:
         if not next(iter(repo.ancestry(branch=WRITE_BRANCH))).metadata.get("ogs_complete"):
             # Readers are served it from now on, so it is a version a rollback may return to.
@@ -173,10 +160,10 @@ def committed_data_group(store_path: Path, *, branch: str = WRITE_BRANCH) -> str
     """
     import xarray as xr
 
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return None
     try:
-        repo = open_or_create_repo(store_path)
+        repo = storage.open_or_create_repository(store_path)
         store = repo.readonly_session(branch).store
         ds = xr.open_zarr(store)
         try:
@@ -197,7 +184,7 @@ def _open_committed(store_path: Path, branch: str) -> Any:
     """Open the committed store at whichever group actually holds the data."""
     import xarray as xr
 
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     store = repo.readonly_session(branch).store
     group = committed_data_group(store_path, branch=branch)
     return xr.open_zarr(store) if group is None else xr.open_zarr(store, group=group)
@@ -220,7 +207,7 @@ def read_committed_period_ids_ordered(
 
     from open_geo_service.shared.time import datetime_to_period_string
 
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return []
 
     try:
@@ -270,7 +257,7 @@ def read_fetched_at(store_path: Path, *, branch: str = WRITE_BRANCH) -> list[dat
 
     from open_geo_service.shared.provisional import FETCHED_AT
 
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return None
     try:
         ds = _open_committed(store_path, branch)
@@ -344,11 +331,11 @@ def is_store_empty(store_path: Path, *, branch: str = WRITE_BRANCH) -> bool:
     import zarr
     from zarr.errors import GroupNotFoundError
 
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return True
 
     try:
-        repo = open_or_create_repo(store_path)
+        repo = storage.open_or_create_repository(store_path)
         # Two is enough to answer "more than the initial snapshot?" — ancestry is lazy, so
         # this does not walk the history of a store with thousands of commits.
         if len(list(itertools.islice(repo.ancestry(branch=branch), 2))) < 2:
@@ -381,7 +368,7 @@ def read_committed_spatial_coords(
     ``spatial_ref``, so reading the root returned None and silently disabled the check — on
     exactly the large stores where a mirrored raster is hardest to spot by eye.
     """
-    if not store_path.exists():
+    if not storage.repository_exists(store_path):
         return None
     try:
         ds = _open_committed(store_path, branch)

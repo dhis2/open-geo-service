@@ -11,6 +11,7 @@ Every route answers HEAD, as a static host does and a link checker expects.
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 
+from open_geo_service import storage
 from open_geo_service.stac import catalog_files
 
 router = APIRouter()
@@ -21,4 +22,6 @@ router = APIRouter()
 def get_stac_file(path: str) -> FileResponse:
     """A document of the STAC catalog, or a dataset's data file, at its path in the catalog."""
     file, media_type = catalog_files.served_file(path)
-    return FileResponse(file, media_type=media_type, headers={"Cache-Control": catalog_files.cache_control(file)})
+    return storage.file_response(
+        file, media_type=media_type, headers={"Cache-Control": catalog_files.cache_control(file)}
+    )

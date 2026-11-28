@@ -96,7 +96,6 @@ from open_geo_service.streaming.store import (
     expire_replaced_snapshots,
     is_store_empty,
     needs_adoption,
-    open_or_create_repo,
     publish_snapshot,
     published_snapshot,
     read_committed_period_ids_ordered,
@@ -1295,7 +1294,7 @@ def _plan_static_materialization(*, store_path: Path, overwrite: bool) -> _Strea
     ``overwrite`` keeps it, and one with ``overwrite`` fetches it again into a replacement that
     the write branch moves to once it is complete.
     """
-    has_store = store_path.exists() and not is_store_empty(store_path)
+    has_store = storage.repository_exists(store_path) and not is_store_empty(store_path)
     if has_store and not overwrite:
         action = SyncAction.NO_OP
     elif has_store:
@@ -1449,13 +1448,13 @@ def _create_streaming_artifact(
 
         held_back: list[str] = []
         ingest_branch = WRITE_BRANCH
-        rematerialize = plan.action == SyncAction.REMATERIALIZE and store_path.exists()
+        rematerialize = plan.action == SyncAction.REMATERIALIZE and storage.repository_exists(store_path)
         if rematerialize or (plan.action != SyncAction.NO_OP and plan.has_committed_periods):
             # Keep the current version reachable until the new one is recorded, so a failure after
             # the ingest completes (normalization, the record) resets the write branch to it. A
             # forward append that fails part way keeps the periods it committed instead, so a
             # retry resumes rather than downloading them again.
-            existing_repo = open_or_create_repo(store_path)
+            existing_repo = storage.open_or_create_repository(store_path)
             rollback_snapshot = existing_repo.lookup_branch(WRITE_BRANCH)
             rollback_branch = f"{_INGEST_BRANCH_PREFIX}rollback-{uuid4().hex}"
             existing_repo.create_branch(rollback_branch, rollback_snapshot)
@@ -1511,7 +1510,9 @@ def _create_streaming_artifact(
             wrote_this_run = result.periods_written > 0
             # Held-back periods were committed and then reset away, which also leaves data to collect.
             amended_periods = result.periods_written > 1 or bool(held_back)
-            if result.periods_written == 0 and (replacement_branch is not None or not store_path.exists()):
+            if result.periods_written == 0 and (
+                replacement_branch is not None or not storage.repository_exists(store_path)
+            ):
                 raise HTTPException(status_code=409, detail="Source has no data for the requested temporal scope")
 
         coverage_data = get_data_coverage_for_paths(
@@ -1565,7 +1566,10 @@ def _create_streaming_artifact(
             # Nothing else moves it meanwhile: the writer lease keeps other processes out and the
             # store lock other ingests, which is also what lets a failure reset it below.
             repo.reset_branch(WRITE_BRANCH, repo.lookup_branch(replacement_branch))
-        if (store_path / "repo").exists() and published_snapshot(open_or_create_repo(store_path)) is not None:
+        if (
+            storage.repository_exists(store_path)
+            and published_snapshot(storage.open_or_create_repository(store_path)) is not None
+        ):
             # A published dataset's readers move to the new version before its record is written,
             # as every publication does: the branch decides, the record follows.
             published_before = publish_snapshot(store_path)
@@ -1583,8 +1587,9 @@ def _create_streaming_artifact(
             period_type=str(dataset.get("period_type")) if dataset.get("period_type") is not None else None,
             version=_resolve_artifact_version(dataset),
             format=ArtifactFormat.ICECHUNK,
-            path=str(store_path.resolve()),
-            asset_paths=[str(store_path.resolve())],
+            # As written, not resolved: a folder of `catalog/` may be a link to another disk.
+            path=os.path.abspath(store_path),
+            asset_paths=[os.path.abspath(store_path)],
             # After the write branch has moved, like the thumbnail: the size and statistics of the new version.
             size_bytes=stored_bytes(store_path),
             statistics=measure_statistics(store_path, str(dataset["variable"])),
@@ -1618,7 +1623,7 @@ def _create_streaming_artifact(
                 # Readers go back to the version the record still describes, also after a NO_OP
                 # that re-registered the store and so has no rollback of the write branch.
                 try:
-                    open_or_create_repo(store_path).reset_branch(PUBLISHED_BRANCH, published_before)
+                    storage.open_or_create_repository(store_path).reset_branch(PUBLISHED_BRANCH, published_before)
                 except Exception:
                     logger.error(
                         "Could not move '%s' of '%s' back; the next writer start describes what it holds",
@@ -1736,11 +1741,11 @@ def clean_up_interrupted_ingest(store_path: Path) -> bool:
 
     Call with the store's write lock held. Returns True when it removed a branch.
     """
-    if not (store_path / "repo").exists():
+    if not storage.repository_exists(store_path):
         return False
     removed = False
     try:
-        repo = open_or_create_repo(store_path)
+        repo = storage.open_or_create_repository(store_path)
         stale = [branch for branch in repo.list_branches() if branch.startswith(_INGEST_BRANCH_PREFIX)]
         deleted = [branch for branch in stale if _delete_branch(repo, branch, store_path)]
         if deleted:
@@ -1760,7 +1765,7 @@ def _expire_replaced_versions(store_path: Path) -> bool:
     it was, and collection still runs.
     """
     try:
-        expired = expire_replaced_snapshots(open_or_create_repo(store_path))
+        expired = expire_replaced_snapshots(storage.open_or_create_repository(store_path))
     except Exception:
         logger.warning("Could not expire old snapshots in '%s'", store_path, exc_info=True)
         return False
@@ -1788,7 +1793,7 @@ def _collect_replaced_versions(store_path: Path) -> None:
     them, and a pending collection frees them later. Never raises.
     """
     try:
-        repo = open_or_create_repo(store_path)
+        repo = storage.open_or_create_repository(store_path)
     except Exception:
         logger.warning("Could not open '%s' to collect it", store_path, exc_info=True)
         return
@@ -1862,8 +1867,8 @@ def _move_collection_after_writes(store_path: Path) -> None:
         marked = datetime.fromisoformat(marker.read_text().strip())
     except (OSError, ValueError):
         return  # none pending, or unreadable, which `collect_pending_garbage` collects at once
-    times = [path.stat().st_mtime for path in (store_path / "repo").rglob("*") if path.is_file()]
-    newest = datetime.fromtimestamp(max(times), UTC) if times else None
+    times = [listed.modified for listed in storage.scan(store_path)]
+    newest = max(times) if times else None
     if newest is not None and newest > marked:
         _mark_collection_pending(store_path, at=newest)
 
@@ -1886,10 +1891,10 @@ def collect_pending_garbage(store_path: Path) -> bool:
         marked = datetime.min.replace(tzinfo=UTC)
     if datetime.now(UTC) - marked < _GC_RETENTION:
         return False
-    if not (store_path / "repo").exists():
+    if not storage.repository_exists(store_path):
         marker.unlink(missing_ok=True)
         return False
-    if not collect_unreachable_objects(open_or_create_repo(store_path), store_path):
+    if not collect_unreachable_objects(storage.open_or_create_repository(store_path), store_path):
         return False
     marker.unlink(missing_ok=True)
     return True
@@ -2153,7 +2158,7 @@ def publish_artifact_record(artifact_id: str, snapshot_id: str | None = None) ->
     record = get_artifact_or_404(artifact_id)
     if record.format == ArtifactFormat.ICECHUNK and record.path:
         store_path = Path(record.path)
-        if not (store_path / "repo").exists():
+        if not storage.repository_exists(store_path):
             raise HTTPException(status_code=409, detail=f"Artifact '{artifact_id}' has no store at {store_path}")
         rolled_back = snapshot_id is None and _rolled_back(store_path)
         try:
@@ -2173,9 +2178,9 @@ def _rolled_back(store_path: Path) -> bool:
     A sync that failed part way also leaves `main` behind, but on a tip not marked complete. Call
     holding the store lock: an ingest between sealing the write branch and publishing it looks the same.
     """
-    if not (store_path / "repo").exists():
+    if not storage.repository_exists(store_path):
         return False
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     published = published_snapshot(repo)
     tip = next(iter(repo.ancestry(branch=WRITE_BRANCH)))
     return published is not None and published != str(tip.id) and bool(tip.metadata.get("ogs_complete"))
@@ -2207,8 +2212,12 @@ def _record_publication(record: ArtifactRecord) -> ArtifactRecord:
     """
     artifact_id = record.artifact_id
     published = record if record.publication.status == PublicationStatus.PUBLISHED else publish_artifact(record)
-    if published.format == ArtifactFormat.ICECHUNK and published.path and (Path(published.path) / "repo").exists():
-        snapshot = published_snapshot(open_or_create_repo(Path(published.path)))
+    if (
+        published.format == ArtifactFormat.ICECHUNK
+        and published.path
+        and storage.repository_exists(Path(published.path))
+    ):
+        snapshot = published_snapshot(storage.open_or_create_repository(Path(published.path)))
         published = published.model_copy(
             update={"publication": published.publication.model_copy(update={"snapshot_id": snapshot})}
         )
@@ -2243,14 +2252,14 @@ def reconcile_published_branches() -> int:
     changed = 0
     for path, records in by_store.items():
         store_path = Path(path)
-        if not (store_path / "repo").exists():
+        if not storage.repository_exists(store_path):
             continue
         try:
             if needs_adoption(store_path):
                 continue
             any_published = any(r.publication.status == PublicationStatus.PUBLISHED for r in records)
             adopted = adopt_write_branch(store_path, published=False)
-            tip = published_snapshot(open_or_create_repo(store_path))
+            tip = published_snapshot(storage.open_or_create_repository(store_path))
             newest = max(records, key=lambda record: record.created_at)
             published = newest.publication.status == PublicationStatus.PUBLISHED
             if tip is None and any_published:
@@ -2271,7 +2280,7 @@ def reconcile_published_branches() -> int:
         logger.warning("Brought the publication of '%s' and its record into step", store_path.name)
     registered = {Path(path).resolve() for path in by_store}
     for store_path in layout.raster_stores():
-        if store_path.resolve() in registered or not (store_path / "repo").exists():
+        if store_path.resolve() in registered or not storage.repository_exists(store_path):
             continue
         try:
             changed += not needs_adoption(store_path) and adopt_write_branch(store_path, published=False)
@@ -2445,14 +2454,15 @@ IMMUTABLE_CACHE = "max-age=31536000, immutable"
 def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
     """Serve a raw Icechunk store file for native SDK access via icechunk.http_storage()."""
     artifact = _get_latest_published_icechunk_artifact(dataset_id)
-    store_root = Path(artifact.path or artifact.asset_paths[0]).resolve()
+    # Normalised as written rather than resolved, so a linked folder of `catalog/` is served.
+    store_root = Path(os.path.abspath(artifact.path or artifact.asset_paths[0]))
 
     # A client given the asset href, which ends in a slash, asks for `<href>/repo`; without the
     # strip, `//repo` would name the absolute path /repo.
-    full_path = (store_root / file_path.lstrip("/")).resolve()
+    full_path = Path(os.path.abspath(store_root / file_path.lstrip("/")))
     if not full_path.is_relative_to(store_root):
         raise HTTPException(status_code=404, detail="Not found")
-    if not full_path.is_file():
+    if not storage.exists(full_path):
         raise HTTPException(status_code=404, detail=f"Icechunk store file not found: {file_path}")
     top = full_path.relative_to(store_root).parts[0]
     if top == "repo":
@@ -2461,12 +2471,12 @@ def serve_icechunk_file(dataset_id: str, file_path: str) -> FileResponse:
         import icechunk
 
         try:
-            read_snapshot(icechunk.Repository.open(storage.icechunk_storage(str(store_root))))
+            read_snapshot(storage.open_repository(store_root))
         except icechunk.RefNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Icechunk store has no readable branch") from exc
 
     cache = IMMUTABLE_CACHE if top in IMMUTABLE_ICECHUNK_FOLDERS else "no-cache"
-    return FileResponse(full_path, media_type="application/octet-stream", headers={"Cache-Control": cache})
+    return storage.file_response(full_path, media_type="application/octet-stream", headers={"Cache-Control": cache})
 
 
 def _latest_published_raster_artifacts_cached() -> dict[str, ArtifactRecord]:
@@ -2531,9 +2541,9 @@ def _open_icechunk_store_or_404(artifact: ArtifactRecord) -> _IcechunkSession:
             repo = _open_repositories.get(store_path)
             if repo is None:
                 path = Path(store_path).resolve()
-                if not path.exists():
+                if not storage.repository_exists(path):
                     raise HTTPException(status_code=404, detail="Icechunk store path does not exist on disk")
-                repo = icechunk.Repository.open(storage.icechunk_storage(str(path)))
+                repo = storage.open_repository(path)
                 _open_repositories[store_path] = repo
     try:
         snapshot_id = read_snapshot(repo)
@@ -2965,7 +2975,7 @@ def _refresh_recorded_size(store_path: Path) -> None:
     never masks the failure that led here.
     """
     try:
-        path = str(store_path.resolve())
+        path = os.path.abspath(store_path)
         size = stored_bytes(store_path)
 
         def newest(records: list[ArtifactRecord]) -> int | None:
@@ -3011,7 +3021,7 @@ def measure_missing_statistics(should_stop: Callable[[], bool] = lambda: False) 
     for record in newest.values():
         if record.format != ArtifactFormat.ICECHUNK or _fully_measured(record.statistics) or record.variable is None:
             continue
-        if record.path is None or not Path(record.path).exists():
+        if record.path is None or not storage.repository_exists(record.path):
             continue
         if not slots.acquire(should_stop):
             break
@@ -3270,15 +3280,17 @@ def _materialized_records(records: list[ArtifactRecord]) -> list[ArtifactRecord]
 
 
 def _artifact_storage_exists(record: ArtifactRecord) -> bool:
-    """Return whether an artifact's on-disk backing files are still present."""
-    paths: list[str] = []
-    if record.path is not None:
-        paths.append(record.path)
-    if record.asset_paths:
-        paths.extend(record.asset_paths)
-    if not paths:
+    """Return whether an artifact's store, or every file it names, is still there.
+
+    A record naming a location outside the data folder has nothing there.
+    """
+    try:
+        if record.format == ArtifactFormat.ICECHUNK:
+            return record.path is not None and storage.repository_exists(record.path)
+        files = record.asset_paths or ([record.path] if record.path else [])
+        return bool(files) and all(storage.exists(path) for path in files)
+    except ValueError:
         return False
-    return all(Path(path).exists() for path in paths)
 
 
 def _temporal_coverage_matches_request_scope(
@@ -3417,8 +3429,6 @@ def dataset_provenance(record: ArtifactRecord) -> DatasetProvenance | None:
     input without snapshots, such as a feature collection, keeps its artifact id when refreshed,
     so whether it changed cannot be told.
     """
-    import icechunk
-
     provenance = record.provenance
     if provenance is None:
         return None
@@ -3429,11 +3439,11 @@ def dataset_provenance(record: ArtifactRecord) -> DatasetProvenance | None:
         dataset_id = str(recorded["collection_id"])
         current = current_artifacts.get(dataset_id)
         current_snapshot = (
-            read_snapshot(icechunk.Repository.open(storage.icechunk_storage(current.path)))
+            read_snapshot(storage.open_repository(current.path))
             if current is not None
             and current.format == ArtifactFormat.ICECHUNK
             and current.path
-            and (Path(current.path) / "repo").exists()
+            and storage.repository_exists(Path(current.path))
             else None
         )
         changed: bool | None = None

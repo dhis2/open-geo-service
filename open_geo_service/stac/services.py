@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import os
 import threading
 import urllib.parse
 from collections.abc import Iterable
@@ -22,6 +21,7 @@ from fastapi import HTTPException, Request
 from pystac.extensions.table import TableExtension
 from xstac import xarray_to_stac
 
+from open_geo_service import storage
 from open_geo_service.auth.oidc import discovery_url
 from open_geo_service.auth.tokens import access_settings, auth_required_for_read
 from open_geo_service.data_accessor.services.accessor import open_icechunk_dataset
@@ -88,7 +88,7 @@ def file_size(path: Path) -> dict[str, object]:
 
     Their checksums are to be computed when the writer writes the file (CLIM-1879).
     """
-    return {"file:size": path.stat().st_size}
+    return {"file:size": storage.size(path)}
 
 
 def file_fields(path: Path) -> dict[str, object]:
@@ -96,29 +96,32 @@ def file_fields(path: Path) -> dict[str, object]:
 
     Only for a file: a Zarr or Icechunk store is a directory of chunks, with neither one size nor
     one checksum. The checksum is a sha256 multihash (`1220` and the hex digest), computed once
-    for each version of the file, as its inode, size and modification time identify it. Size and
-    checksum come from one open file, so a file replaced in between (a thumbnail refresh) can't
-    pair one version's size with the other's checksum.
+    for each version of the file, as its key, size and time of writing identify it. Size and
+    checksum come from one read, and a checksum is cached only when the file did not change during
+    the read, so a file replaced in between (a thumbnail refresh) can't pair one version's size
+    with the other's checksum.
     """
-    with open(path, "rb") as handle:
-        stat = os.fstat(handle.fileno())
-        version = (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    found = storage.stat(path)
+    if found is None:
+        raise FileNotFoundError(path)
+    version = (found.key, found.size, found.modified)
+    with _CHECKSUMS_LOCK:
+        cached = _CHECKSUMS.get(version)
+    if cached is not None:
+        return {"file:size": found.size, "file:checksum": cached}
+    # Read and hashed outside the lock, so one large file does not hold up every other request.
+    data = storage.read(path)
+    checksum = "1220" + hashlib.sha256(data).hexdigest()
+    after = storage.stat(path)
+    if after is not None and (after.key, after.size, after.modified) == version:
         with _CHECKSUMS_LOCK:
-            checksum = _CHECKSUMS.get(version)
-        if checksum is None:
-            # Hashed outside the lock, so one large file does not hold up every other request.
-            digest = hashlib.sha256()
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-            checksum = "1220" + digest.hexdigest()
-            with _CHECKSUMS_LOCK:
-                _CHECKSUMS[version] = checksum
-                while len(_CHECKSUMS) > 256:
-                    _CHECKSUMS.pop(next(iter(_CHECKSUMS)))
-    return {"file:size": stat.st_size, "file:checksum": checksum}
+            _CHECKSUMS[version] = checksum
+            while len(_CHECKSUMS) > 256:
+                _CHECKSUMS.pop(next(iter(_CHECKSUMS)))
+    return {"file:size": len(data), "file:checksum": checksum}
 
 
-_CHECKSUMS: dict[tuple[str, int, int, int], str] = {}
+_CHECKSUMS: dict[tuple[str, int, datetime], str] = {}
 """Checksums by file version, oldest first; `file_fields` keeps the latest 256."""
 # Routes run in a thread pool, so two requests evicting at once could pop the same entry.
 _CHECKSUMS_LOCK = threading.Lock()
@@ -648,12 +651,12 @@ def _build_feature_collection(dataset_id: str, artifact: ArtifactRecord, request
             title="GeoParquet collection",
             description="Every feature with all its properties, in one GeoParquet file; table:columns describes them.",
             roles=["data"],
-            extra_fields=file_size(data_path) if data_path is not None and data_path.is_file() else None,
+            extra_fields=file_size(data_path) if data_path is not None and storage.exists(data_path) else None,
         ),
     )
     # Vector tiles for display, when the refresh built them, and the style the viewer draws them
     # with. The `pmtiles` link is how web-map-links clients find the archive and its layer.
-    if data_path is not None and tiles.archive_path(data_path).is_file():
+    if data_path is not None and storage.exists(tiles.archive_path(data_path)):
         tiles_href = absolute_url(request, f"/features/{path_segment(dataset_id)}/data.pmtiles")
         collection.add_asset(
             "tiles",
@@ -789,10 +792,10 @@ def _build_table_collection(dataset_id: str, artifact: ArtifactRecord, request: 
             roles=["data"],
             # Size and checksum, as Portolan asks of a single-file asset: a table is small, and
             # the checksum is computed once per file version.
-            extra_fields=file_fields(data_path) if data_path is not None and data_path.is_file() else None,
+            extra_fields=file_fields(data_path) if data_path is not None and storage.exists(data_path) else None,
         ),
     )
-    if data_path is not None and data_path.is_file():
+    if data_path is not None and storage.exists(data_path):
         collection.stac_extensions.append(FILE_EXTENSION)
     collection.stac_extensions.append(PROCESSING_EXTENSION)
 

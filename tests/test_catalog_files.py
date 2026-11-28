@@ -413,6 +413,7 @@ def test_stac_serves_the_folder_as_a_static_host_would(data: Path, monkeypatch: 
     (data / "catalog" / "rasters").rename(elsewhere)
     (data / "catalog" / "rasters").symlink_to(elsewhere, target_is_directory=True)
     assert client.get("/stac/rasters/rain/rain.icechunk/repo").status_code == 200
+    assert client.get("/icechunk/rain/repo").status_code == 200
     assert client.get("/stac/rasters/rain/collection.json").status_code == 200
     assert client.get("/stac/rasters/districts/README.md").status_code == 404
     # Written through such a link too: a feature refresh and a table write, then read back.

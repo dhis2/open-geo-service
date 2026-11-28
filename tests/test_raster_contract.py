@@ -430,8 +430,8 @@ def test_ingest_refuses_to_append_to_a_pre_contract_store(tmp_path: Path) -> Non
     actionable message beats silently corrupting the store, and the fix is a re-ingest.
     """
     pytest.importorskip("icechunk")
+    from open_geo_service import storage
     from open_geo_service.streaming.orchestrator import _assert_appendable_axes
-    from open_geo_service.streaming.store import open_or_create_repo
 
     store_path = tmp_path / "south_up.icechunk"
     ascending = xr.Dataset(
@@ -442,7 +442,7 @@ def test_ingest_refuses_to_append_to_a_pre_contract_store(tmp_path: Path) -> Non
             "x": [10.0, 11.0],
         },
     )
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     session = repo.writable_session("ingest")
     ascending.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("pre-contract store")
@@ -456,8 +456,8 @@ def test_ingest_refuses_to_append_to_a_pre_contract_store(tmp_path: Path) -> Non
 
 def test_ingest_appends_happily_to_a_conforming_store(tmp_path: Path) -> None:
     pytest.importorskip("icechunk")
+    from open_geo_service import storage
     from open_geo_service.streaming.orchestrator import _assert_appendable_axes
-    from open_geo_service.streaming.store import open_or_create_repo
 
     store_path = tmp_path / "north_up.icechunk"
     descending = xr.Dataset(
@@ -468,7 +468,7 @@ def test_ingest_appends_happily_to_a_conforming_store(tmp_path: Path) -> None:
             "x": [10.0, 11.0],
         },
     )
-    repo = open_or_create_repo(store_path)
+    repo = storage.open_or_create_repository(store_path)
     session = repo.writable_session("ingest")
     descending.to_zarr(session.store, mode="w", zarr_format=3)
     session.commit("conforming store")
