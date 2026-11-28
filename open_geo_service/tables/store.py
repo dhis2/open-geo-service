@@ -47,10 +47,9 @@ from open_geo_service.ingestions.schemas import (
     CoverageSpatial,
     CoverageTemporal,
 )
-from open_geo_service.shared import layout
+from open_geo_service.shared import layout, versions
 from open_geo_service.shared.geoparquet import PARQUET_COMPRESSION
 from open_geo_service.shared.urls import require_segment_safe_id
-from open_geo_service.shared.versions import prune_superseded
 from open_geo_service.tables.schemas import DEFAULT_SCHEMA, WRITTEN_AT, TableSchema, declared_schema, get_schema
 
 logger = logging.getLogger(__name__)
@@ -152,6 +151,9 @@ def write_rows(
                 coverage=_coverage(merged, declared, period_type),
                 created_at=datetime.now(UTC),
                 provenance=provenance or (existing.provenance if existing else None),
+                replaced_files=versions.replaced_files(
+                    existing, [Path(path) for path in (existing.asset_paths if existing else [])]
+                ),
             )
             registered = ingestion_services.register_artifact_record(record, publish=False)
             if publish and existing is None:
@@ -167,11 +169,7 @@ def write_rows(
             # No record names the file, so no reader sees it; remove it rather than leave it.
             storage.remove(written)
             raise
-        prune_superseded(
-            _dataset_root(dataset_id).glob("*.parquet"),
-            current=written,
-            replaced=[Path(path) for path in (existing.asset_paths if existing else [])],
-        )
+        versions.remove_unneeded(_dataset_root(dataset_id).glob("*.parquet"), registered)
         return registered
 
 

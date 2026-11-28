@@ -307,27 +307,30 @@ def _age(path: Path, seconds: float) -> None:
     os.utime(path, (then, then))
 
 
-def test_a_replaced_file_stays_until_its_replacement_is_older_than_the_grace_period() -> None:
+def test_a_replaced_file_stays_for_the_grace_period_whatever_the_file_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Which file was replaced when is read from the records: file times that contradict the
+    write order, as object storage may report them, change nothing."""
     grown = _collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
     first = Path(
         str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection()).path)
     )
     second = Path(str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=grown).path))
-    assert first.is_file(), "a file survives the refresh that replaces it"
+    _age(second, 1000)
+    third = Path(
+        str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection()).path)
+    )
+    assert first.is_file() and second.is_file(), "both replaced less than the grace period ago"
 
-    _age(first, 1000)
-    _age(second, versions.SUPERSEDED_FILE_GRACE_SECONDS - 10)
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    assert first.is_file(), "its replacement is younger than the grace period"
-
-    _age(second, versions.SUPERSEDED_FILE_GRACE_SECONDS + 10)
-    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    assert not first.exists()
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
+    _age(third, 2000)
+    fourth = Path(
+        str(feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection()).path)
+    )
+    assert sorted(_collection_files()) == sorted([third, fourth]), "the file just replaced stays, older ones go"
 
 
-def test_a_file_a_killed_refresh_left_does_not_shorten_the_grace_of_the_file_before_it() -> None:
-    """A file no record ever named is removed by the next refresh, so it cannot stand in as the
-    replacement of the current file and make that one look replaced long ago."""
+def test_a_file_a_killed_refresh_left_is_removed_by_the_next_refresh_whatever_its_time() -> None:
+    """A file no record ever named goes, while the file the refresh replaced stays listed."""
     current = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
     _age(Path(str(current.path)), 1000)
     orphan, _count, _geometry = store.write_feature_collection(
@@ -361,9 +364,9 @@ def test_the_files_to_keep_are_found_behind_a_symlinked_data_folder(
 def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_after_the_next(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The restored file was current until the next successful refresh, not until the failed one."""
+    """The restored file was current until the next successful refresh, not until the failed one,
+    and the failed refresh's file, which a reader may have resolved, is listed as replaced."""
     first = feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
-    _age(Path(str(first.path)), 1000)
     with monkeypatch.context() as failing:
         failing.setattr(ingestion_services, "publish_artifact_record", _raise_publication_failed)
         with pytest.raises(RuntimeError, match="publication failed"):
@@ -371,9 +374,11 @@ def test_a_rolled_back_refresh_keeps_the_restored_file_for_the_grace_period_afte
                 template=DISTRICTS_TEMPLATE, features=_collection(WEST, EAST, _box("SL-N", -12.5, 8.5, -11.5, 9.5))
             )
     (failed,) = [path for path in _collection_files() if path != Path(str(first.path))]
-    # Time passes; the next refresh succeeds.
-    for path in _collection_files():
-        _age(path, 500 + time.time() - path.stat().st_mtime)
+    (restored,) = ingestion_services._load_records()
+    assert [Path(entry.path) for entry in restored.replaced_files] == [failed]
+    _age(Path(str(first.path)), 1000)
+    # The grace period passes; the next refresh succeeds.
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
     assert len(store.read_feature_collection(first)) == 2, "a reader holding the restored record can still read it"
@@ -832,13 +837,16 @@ def test_a_failed_first_registration_keeps_rather_than_deletes_the_unregistered_
         with pytest.raises(RuntimeError, match="unwritable"):
             feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert len(_collection_files()) == 1, "not deleted immediately"
+    (abandoned,) = _collection_files()
 
-    # Nor left forever: the next successful refresh removes it once the grace period is over.
+    # Nor left forever: the next successful refresh lists it as replaced, and one after the grace
+    # period removes it.
     monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
+    assert abandoned.exists(), "a reader may have resolved it before its record was removed"
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    assert len(_collection_files()) == 1, "the abandoned file is gone; only the successful write remains"
+    assert not abandoned.exists()
 
 
 def test_publication_failure_restores_the_previous_file_and_record(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -859,7 +867,8 @@ def test_publication_failure_restores_the_previous_file_and_record(monkeypatch: 
     with pytest.raises(RuntimeError, match="publication failed"):
         feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=grown)
 
-    assert ingestion_services._load_records() == [first]
+    (restored,) = ingestion_services._load_records()
+    assert restored.model_copy(update={"replaced_files": []}) == first
     assert len(gpd.read_parquet(_current_file())) == 2
     # The record that briefly named the "grown" file is durable before publication is attempted
     # (register_artifact_record upserts, then publishes), so a caller could have resolved it in
@@ -891,8 +900,8 @@ def test_a_reader_that_resolved_the_record_before_a_publication_failure_can_stil
         with pytest.raises(RuntimeError, match="publication failed"):
             feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
 
-    # The reader resumes, after the rollback has already run, and opens the file the record it
-    # captured names.
+    # A retry succeeds at once; then the reader resumes and opens the file the record it captured names.
+    feature_services.refresh_feature_collection(template=DISTRICTS_TEMPLATE, features=_collection())
     frame = store.read_feature_collection(captured["record"])
 
     assert len(frame) == 2

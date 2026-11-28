@@ -7,6 +7,7 @@ import errno
 import io
 import math
 import os
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -211,13 +212,15 @@ def test_a_reader_during_a_write_sees_the_files_before_it(
     assert store.read_rows(record).column("value").to_pylist() == [10.0]
 
 
-def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(stores: Path) -> None:
+def test_a_replaced_file_is_removed_once_the_grace_period_has_passed(
+    stores: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first = _write([_row("D1", 1.0)], written_at=FIRST)
     second = _write([_row("D1", 2.0)], written_at=LATER)
-    # The second file replaced the first a while ago; the third write removes the first only.
-    replaced = Path(second.asset_paths[0]).stat().st_mtime - versions.SUPERSEDED_FILE_GRACE_SECONDS - 1
-    os.utime(first.asset_paths[0], (replaced - 1, replaced - 1))
-    os.utime(second.asset_paths[0], (replaced, replaced))
+    # File times are not read: the replaced file looking newest changes nothing.
+    os.utime(first.asset_paths[0], (time.time() + 1000, time.time() + 1000))
+    # The second write replaced the first longer ago than the grace period; the third removes the first only.
+    monkeypatch.setattr(versions, "SUPERSEDED_FILE_GRACE_SECONDS", 0)
     third = _write([_row("D1", 3.0)], written_at=datetime(2026, 5, 1, tzinfo=UTC))
 
     files = sorted((stores / "precip_districts").glob("*.parquet"))
