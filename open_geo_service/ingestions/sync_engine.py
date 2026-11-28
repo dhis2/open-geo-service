@@ -720,10 +720,9 @@ def _icechunk_path_for(artifact: ArtifactRecord) -> str | None:
     """Return the Icechunk store path for a plugin-backed artifact.
 
     Explicitly raster-only, and None is the right answer for every other format rather than a
-    case to add. Append writes periods into a committed Icechunk store, so a NetCDF
-    download and a GeoParquet feature collection both fall back to rematerialize — and a
-    feature collection never reaches here at all, since `services._refuse_non_raster_sync`
-    turns it away before the planner runs.
+    case to add: append writes periods into a committed Icechunk store. A feature collection or
+    table never reaches here, since `services._refuse_non_raster_sync` turns it away before the
+    planner runs.
     """
     if artifact.format != ArtifactFormat.ICECHUNK:
         return None
@@ -732,15 +731,10 @@ def _icechunk_path_for(artifact: ArtifactRecord) -> str | None:
 
 def _supports_append(source_dataset: dict[str, Any], latest_artifact: ArtifactRecord) -> bool:
     """Return whether this template opts into store-based append sync execution."""
-    if source_dataset.get("sync", {}).get("execution") != SyncAction.APPEND.value:
-        return False
-    if latest_artifact.format == ArtifactFormat.ICECHUNK:
-        return True
-    logger.info(
-        "Sync append execution for dataset '%s' requires an existing Icechunk artifact; falling back to rematerialize",
-        source_dataset.get("id", "<unknown>"),
+    return (
+        source_dataset.get("sync", {}).get("execution") == SyncAction.APPEND.value
+        and latest_artifact.format == ArtifactFormat.ICECHUNK
     )
-    return False
 
 
 def _is_plugin_backed(source_dataset: dict[str, Any]) -> bool:

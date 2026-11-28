@@ -29,7 +29,6 @@ Operational note:
 - `GET /extent`
 - `GET /datasets`
 - `GET /datasets/{dataset_id}`
-- `GET /datasets/{dataset_id}/download`
 - `GET /datasets/{dataset_id}/thumbnail.png`
 - `GET /features`
 - `GET /features/{collection_id}`

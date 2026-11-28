@@ -2323,7 +2323,6 @@ def _result_assets(record: OpenEOJobRecord) -> dict[str, Any]:
         # step with the collection's own asset.
         try:
             from open_geo_service.ingestions import services as _ingestion_services
-            from open_geo_service.ingestions.schemas import ArtifactFormat
             from open_geo_service.stac.services import collection_path
 
             artifact = _ingestion_services.latest_published_raster_artifacts_by_dataset().get(dataset_id)
@@ -2339,7 +2338,7 @@ def _result_assets(record: OpenEOJobRecord) -> dict[str, Any]:
                 # unlike the STAC side — a job-result read is rare enough not to warrant one.
                 store_path = artifact.path or (artifact.asset_paths[0] if artifact.asset_paths else None)
                 if store_path:
-                    media_type = zarr_media_type(store_path, icechunk=artifact.format == ArtifactFormat.ICECHUNK)
+                    media_type = zarr_media_type(store_path)
                     assets["zarr"]["type"] = media_type
                     assets["zarr"]["xarray:open_kwargs"] = {
                         **assets["zarr"]["xarray:open_kwargs"],

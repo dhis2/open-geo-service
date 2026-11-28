@@ -22,7 +22,6 @@ from open_geo_service.shared.licences import STAC_LICENSE_OTHER
 class ArtifactFormat(StrEnum):
     """Supported stored artifact formats."""
 
-    NETCDF = "netcdf"
     ICECHUNK = "icechunk"
     GEOPARQUET = "geoparquet"
     """A feature collection: rows of geometry and properties, not a datacube.

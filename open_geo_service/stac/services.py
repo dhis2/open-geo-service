@@ -1347,7 +1347,7 @@ def _zarr_media_type(artifact: ArtifactRecord) -> str:
         store_path = _artifact_store_path(artifact)
     except HTTPException:
         return ZARR_V3_MEDIA_TYPE
-    media_type = zarr_media_type(store_path, icechunk=artifact.format == ArtifactFormat.ICECHUNK)
+    media_type = zarr_media_type(store_path)
     _cache_by_artifact(_zarr_media_type_cache, _written(artifact), media_type)
     return media_type
 

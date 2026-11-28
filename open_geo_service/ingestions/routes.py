@@ -11,7 +11,6 @@ from open_geo_service.extents.services import get_extent_or_404
 from open_geo_service.ingestions import services
 from open_geo_service.ingestions.job_submission import INGESTION_JOB_HREF_BASE, submit_sync_job
 from open_geo_service.ingestions.schemas import (
-    ArtifactFormat,
     CreateIngestionRequest,
     DatasetDetailRecord,
     DatasetListResponse,
@@ -215,34 +214,6 @@ def get_dataset_thumbnail(dataset_id: str) -> FileResponse:
     if path is None:
         raise HTTPException(status_code=404, detail=f"No thumbnail for dataset '{dataset_id}'")
     return storage.file_response(path, media_type="image/png")
-
-
-@datasets_router.get("/{dataset_id}/download")
-def download_artifact_file(dataset_id: str) -> FileResponse:
-    """Download the primary saved file for a dataset, for the one format that is a single file.
-
-    An allowlist rather than a denylist. This used to refuse `zarr` and serve everything else
-    as `application/x-netcdf` under a `.nc` filename, which was true while NetCDF was the only
-    single-file format left. `GEOPARQUET` broke that assumption: a feature collection is one
-    file with a path, so it passed the check and came back as Parquet bytes wearing NetCDF's
-    media type and extension — a wrong answer rather than a refusal.
-
-    Naming the format the response is built for means the next format added is refused here by
-    default and has to claim its own branch, which is the failure a caller can act on. Serving
-    a feature collection is `GET /features` in CLIM-1068, with the Parquet media type settled
-    in CLIM-1069.
-    """
-    artifact = services.get_latest_artifact_for_dataset_or_404(dataset_id)
-    if artifact.path is None or artifact.format != ArtifactFormat.NETCDF:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Dataset '{dataset_id}' is stored as {artifact.format} and is not a single "
-                "downloadable file; use metadata and dataset assets instead"
-            ),
-        )
-
-    return storage.file_response(artifact.path, media_type="application/x-netcdf", filename=f"{dataset_id}.nc")
 
 
 @zarr_router.get("/{dataset_id}/{relative_path:path}", response_model=None)

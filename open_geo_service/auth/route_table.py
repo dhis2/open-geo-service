@@ -54,7 +54,6 @@ ROUTE_TABLE: dict[Tier, frozenset[str]] = {
             "GET /data-sources/{dataset_id}",
             "GET /datasets",
             "GET /datasets/{dataset_id}",
-            "GET /datasets/{dataset_id}/download",
             "GET /datasets/{dataset_id}/thumbnail.png",
             "GET /extent",
             "GET /features",

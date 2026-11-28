@@ -193,19 +193,15 @@ def test_dataset_links_include_stac_for_published_icechunk() -> None:
     )
 
 
-def test_dataset_links_omit_catalogue_links_for_unpublished_or_netcdf() -> None:
+def test_dataset_links_omit_catalogue_links_for_unpublished() -> None:
     unpublished = _artifact(artifact_id="a1")
     unpublished.publication.status = PublicationStatus.UNPUBLISHED
-    netcdf = _artifact(artifact_id="a2")
-    netcdf.format = ArtifactFormat.NETCDF
 
     # `published=None` is what "this dataset has no published artifact" looks like, which is the
     # state an unpublished-only dataset is actually in.
-    unpublished_links = services._dataset_links("chirps3_precipitation_daily", unpublished, published=None)
-    netcdf_links = services._dataset_links("chirps3_precipitation_daily", netcdf, published=netcdf)
+    links = services._dataset_links("chirps3_precipitation_daily", unpublished, published=None)
 
-    for links in (unpublished_links, netcdf_links):
-        assert all(link.rel not in {"zarr", "stac"} for link in links)
+    assert all(link.rel not in {"zarr", "stac"} for link in links)
 
 
 def test_dataset_links_include_zarr_and_stac_for_icechunk() -> None:
